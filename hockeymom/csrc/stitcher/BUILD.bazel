@@ -1,0 +1,15 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "homography_maps",
+    srcs = ["HomographyMaps.cpp"],
+    hdrs = ["HomographyMaps.h"],
+    visibility = ["//visibility:public"],
+    deps = ["@opencv_linux//:opencv"],
+)
+
+cc_test(
+    name = "homography_maps_test",
+    srcs = ["HomographyMapsTest.cpp"],
+    deps = [":homography_maps"],
+)

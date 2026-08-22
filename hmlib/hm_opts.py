@@ -1460,6 +1460,24 @@ class hm_opts(object):
             help="Maximum number of control points used to calculate the homography matrices",
         )
         parser.add_argument(
+            "--control-point-matcher",
+            choices=["superpoint-lightglue", "dedode-lightglue", "loftr"],
+            default="superpoint-lightglue",
+            help="Feature matcher used to find stitching control points",
+        )
+        parser.add_argument(
+            "--mapping-backend",
+            choices=["nona", "opencv-magsac", "opencv-affine-ransac"],
+            default="nona",
+            help="Backend used to create stitching mapping TIFFs",
+        )
+        parser.add_argument(
+            "--max-output-dimension",
+            type=int,
+            default=None,
+            help="Maximum native OpenCV mapping canvas width or height",
+        )
+        parser.add_argument(
             "--track-ids",
             type=str,
             default=None,
@@ -1738,6 +1756,9 @@ class hm_opts(object):
             ("display_aspen_graph", "aspen.pipeline.display_graph"),
             ("aspen_stitching", "stitching.enabled"),
             ("blend_mode", "stitching.blend_mode"),
+            ("control_point_matcher", "stitching.control_point_matcher"),
+            ("mapping_backend", "stitching.mapping_backend"),
+            ("max_output_dimension", "stitching.max_output_dimension"),
             ("max_blend_levels", "stitching.max_blend_levels"),
             ("python_blender", "stitching.python_blender"),
             ("no_minimize_blend", "stitching.minimize_blend"),

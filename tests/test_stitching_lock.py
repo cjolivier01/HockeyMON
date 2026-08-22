@@ -43,8 +43,14 @@ def should_reject_partial_stitching_project_cache(tmp_path):
 
     assert not _stitch_project_is_complete(project_path, autooptimiser_path)
 
-    (tmp_path / "mapping_0000.tif").touch()
-    (tmp_path / "mapping_0001.tif").touch()
+    for index in range(2):
+        (tmp_path / f"mapping_{index:04d}.tif").touch()
     (tmp_path / "seam_file.png").touch()
+
+    assert not _stitch_project_is_complete(project_path, autooptimiser_path)
+
+    for index in range(2):
+        (tmp_path / f"mapping_{index:04d}_x.tif").touch()
+        (tmp_path / f"mapping_{index:04d}_y.tif").touch()
 
     assert _stitch_project_is_complete(project_path, autooptimiser_path)

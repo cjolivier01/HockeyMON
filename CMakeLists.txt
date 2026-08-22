@@ -147,7 +147,7 @@ set(FFMPEG_LIBS ${AVCODEC_LIBRARIES} ${AVFORMAT_LIBRARIES} ${AVFORMAT_LIBRARIES}
 
 if (WITH_OPENCV)
   # cudaimgproc
-  find_package(OpenCV REQUIRED core highgui)
+  find_package(OpenCV REQUIRED core calib3d highgui imgcodecs imgproc)
   set(OpenCV_ENABLE_OPENGL TRUE)  # Print OpenCV version and directories (optional but helpful for debugging)
   message(STATUS "OpenCV version: ${OpenCV_VERSION}")
   message(STATUS "OpenCV include dirs: ${OpenCV_INCLUDE_DIRS}")

@@ -1,4 +1,5 @@
 #include <ATen/ATen.h>
+#include <pybind11/numpy.h>
 #include <torch/extension.h>
 #include <torch/torch.h>
 #include <algorithm>
@@ -32,6 +33,7 @@
 #include "hockeymom/csrc/pytorch/image_remap.h"
 #include "hockeymom/csrc/pytorch/image_stitch.h"
 #include "hockeymom/csrc/pytorch/torch_cuda_compat.h"
+#include "hockeymom/csrc/stitcher/HomographyMaps.h"
 #include "hockeymom/csrc/ui/HmRenderSet.h"
 
 #ifndef NO_CPP_BLENDING
@@ -602,6 +604,135 @@ void init_stitching(::pybind11::module_& m) {
       .def_readwrite("interpolation", &hm::ops::RemapperConfig::interpolation)
       .def_readwrite("batch_size", &hm::ops::RemapperConfig::batch_size)
       .def_readwrite("device", &hm::ops::RemapperConfig::device);
+
+  auto homography_result_to_dict = [](const hm::stitcher::HomographyMapResult&
+                                          result) {
+    auto matrix_array = [](const std::array<double, 9>& values) {
+      py::array_t<double> array({3, 3});
+      std::copy(values.begin(), values.end(), array.mutable_data());
+      return array;
+    };
+    py::dict output;
+    output["canvas_width"] = result.canvas_width;
+    output["canvas_height"] = result.canvas_height;
+    output["output_scale"] = result.output_scale;
+    output["right_to_left_homography"] =
+        matrix_array(result.right_to_left_homography);
+    output["left_to_canvas_homography"] =
+        matrix_array(result.left_to_canvas_homography);
+    output["right_to_canvas_homography"] =
+        matrix_array(result.right_to_canvas_homography);
+
+    py::array_t<uint8_t> inlier_mask(result.inlier_mask.size());
+    std::copy(
+        result.inlier_mask.begin(),
+        result.inlier_mask.end(),
+        inlier_mask.mutable_data());
+    output["inlier_mask"] = std::move(inlier_mask);
+
+    py::list image_maps;
+    for (const auto& image_map : result.image_maps) {
+      py::dict item;
+      item["x_position"] = image_map.x_position;
+      item["y_position"] = image_map.y_position;
+      py::array_t<uint16_t> x_map({image_map.height, image_map.width});
+      py::array_t<uint16_t> y_map({image_map.height, image_map.width});
+      std::copy(
+          image_map.x_map.begin(), image_map.x_map.end(), x_map.mutable_data());
+      std::copy(
+          image_map.y_map.begin(), image_map.y_map.end(), y_map.mutable_data());
+      item["x_map"] = std::move(x_map);
+      item["y_map"] = std::move(y_map);
+      image_maps.append(std::move(item));
+    }
+    output["image_maps"] = std::move(image_maps);
+    return output;
+  };
+
+  m.def(
+      "create_homography_maps",
+      [homography_result_to_dict](
+          const std::vector<std::array<double, 2>>& left_points,
+          const std::vector<std::array<double, 2>>& right_points,
+          int left_width,
+          int left_height,
+          int right_width,
+          int right_height,
+          double reprojection_threshold,
+          double confidence,
+          int max_iterations,
+          int max_output_dimension) {
+        hm::stitcher::HomographyMapResult result;
+        {
+          py::gil_scoped_release release;
+          result = hm::stitcher::create_homography_maps(
+              left_points,
+              right_points,
+              left_width,
+              left_height,
+              right_width,
+              right_height,
+              reprojection_threshold,
+              confidence,
+              max_iterations,
+              max_output_dimension);
+        }
+        return homography_result_to_dict(result);
+      },
+      py::arg("left_points"),
+      py::arg("right_points"),
+      py::arg("left_width"),
+      py::arg("left_height"),
+      py::arg("right_width"),
+      py::arg("right_height"),
+      py::arg("reprojection_threshold") = 3.0,
+      py::arg("confidence") = 0.999,
+      py::arg("max_iterations") = 10000,
+      py::arg("max_output_dimension") = 0);
+
+  m.def(
+      "create_affine_ransac_maps",
+      [homography_result_to_dict](
+          const std::vector<std::array<double, 2>>& left_points,
+          const std::vector<std::array<double, 2>>& right_points,
+          int left_width,
+          int left_height,
+          int right_width,
+          int right_height,
+          double reprojection_threshold,
+          double confidence,
+          int max_iterations,
+          int refine_iterations,
+          int max_output_dimension) {
+        hm::stitcher::HomographyMapResult result;
+        {
+          py::gil_scoped_release release;
+          result = hm::stitcher::create_affine_ransac_maps(
+              left_points,
+              right_points,
+              left_width,
+              left_height,
+              right_width,
+              right_height,
+              reprojection_threshold,
+              confidence,
+              max_iterations,
+              refine_iterations,
+              max_output_dimension);
+        }
+        return homography_result_to_dict(result);
+      },
+      py::arg("left_points"),
+      py::arg("right_points"),
+      py::arg("left_width"),
+      py::arg("left_height"),
+      py::arg("right_width"),
+      py::arg("right_height"),
+      py::arg("reprojection_threshold") = 10.0,
+      py::arg("confidence") = 0.999,
+      py::arg("max_iterations") = 10000,
+      py::arg("refine_iterations") = 10,
+      py::arg("max_output_dimension") = 0);
 
   py::class_<hm::BlenderConfig, std::shared_ptr<hm::BlenderConfig>>(
       m, "BlenderConfig")

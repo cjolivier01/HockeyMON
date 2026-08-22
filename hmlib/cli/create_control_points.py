@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 This script synchronizes two videos using audio cross-correlation, extracts the corresponding frames,
-computes control points using LightGlue and SuperPoint (from the lightglue package), and updates a Hugin
+computes control points with a selectable learned matcher and updates a Hugin
 PTO file with the newly computed control points.
 """
 
@@ -16,24 +16,27 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 import ffmpegio
-import kornia
 import numpy as np
 import scipy.signal
 import tifffile
 import torch
 import yaml
-from lightglue import LightGlue, SuperPoint, viz2d
-from lightglue.utils import rbd
-
 from hmlib.config import get_game_dir
-from hmlib.stitching.configure_stitching import get_enblend_bin
-
-# Ensure that the lightglue package is available.
-try:
-    import lightglue  # noqa: F401
-except ImportError:
-    print("Please install the lightglue package from https://github.com/cvg/LightGlue")
-    exit(1)
+from hmlib.stitching.configure_stitching import (
+    MAPPING_BACKENDS,
+    OPENCV_MAPPING_BACKENDS,
+    get_enblend_bin,
+    normalize_mapping_backend,
+    normalize_max_output_dimension,
+)
+from hmlib.stitching.control_points import (
+    CONTROL_POINT_MATCHERS,
+    calculate_control_points as calculate_stitching_control_points,
+)
+from hmlib.stitching.homography_maps import (
+    create_opencv_affine_ransac_mapping_files,
+    create_opencv_magsac_mapping_files,
+)
 
 # Constant marker used in PTO files to denote control points.
 _CONTROL_POINTS_LINE = "# control points"
@@ -334,9 +337,10 @@ def calculate_control_points(
     device: Optional[torch.device] = None,
     max_num_keypoints: int = 2048,
     output_directory: Optional[str] = None,
+    matcher: str = "superpoint-lightglue",
 ) -> Dict[str, torch.Tensor]:
     """
-    Compute control points (matched keypoints) between two frames using SuperPoint and LightGlue.
+    Compute control points between two frames with the selected matcher.
 
     Args:
         frame0: First input frame (BGR NumPy array).
@@ -350,74 +354,15 @@ def calculate_control_points(
     Returns:
         A dictionary with keys "m_kpts0" and "m_kpts1" containing the matched keypoints as torch.Tensors.
     """
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Initialize the SuperPoint extractor.
-    extractor: SuperPoint = SuperPoint(max_num_keypoints=max_num_keypoints).eval().to(device)
-    # Initialize the LightGlue matcher.
-    matcher: LightGlue = (
-        LightGlue(
-            features="superpoint",
-            depth_confidence=-1,
-            width_confidence=-1,
-            filter_threshold=0.2,
-        )
-        .eval()
-        .to(device)
+    return calculate_stitching_control_points(
+        frame0,
+        frame1,
+        max_control_points=max_control_points,
+        device=device,
+        max_num_keypoints=max_num_keypoints,
+        output_directory=output_directory,
+        matcher=matcher,
     )
-
-    # Convert frames from BGR to RGB.
-    img1_rgb: np.ndarray = cv2.cvtColor(frame0, cv2.COLOR_BGR2RGB)
-    img2_rgb: np.ndarray = cv2.cvtColor(frame1, cv2.COLOR_BGR2RGB)
-
-    # Convert images to torch tensors with shape [C, H, W] and normalize to [0, 1].
-    image0: torch.Tensor = kornia.image_to_tensor(img1_rgb, keepdim=False).float() / 255.0
-    image1: torch.Tensor = kornia.image_to_tensor(img2_rgb, keepdim=False).float() / 255.0
-
-    # Move tensors to the specified device if necessary.
-    if image0.device != device:
-        image0 = image0.to(device)
-    if image1.device != device:
-        image1 = image1.to(device)
-
-    # Extract features using SuperPoint.
-    feats0 = extractor.extract(image0)
-    feats1 = extractor.extract(image1)
-    # Run LightGlue to match features.
-    matches01 = matcher({"image0": feats0, "image1": feats1})
-    # Remove batch dimensions.
-    feats0, feats1, matches01 = [rbd(x) for x in [feats0, feats1, matches01]]
-
-    # Retrieve keypoints and matching indices.
-    kpts0: torch.Tensor = feats0["keypoints"]
-    kpts1: torch.Tensor = feats1["keypoints"]
-    matches: torch.Tensor = matches01["matches"]
-
-    # Select the matched keypoints.
-    m_kpts0: torch.Tensor = kpts0[matches[..., 0]]
-    m_kpts1: torch.Tensor = kpts1[matches[..., 1]]
-
-    # If there are more matches than desired, select evenly spaced ones.
-    indices: torch.Tensor = select_evenly_spaced(m_kpts0, max_control_points)
-    m_kpts0 = m_kpts0[indices]
-    m_kpts1 = m_kpts1[indices]
-
-    # Optionally generate and save visualizations.
-    if output_directory:
-        viz2d.plot_images([frame0, frame1])
-        viz2d.plot_matches(m_kpts0, m_kpts1, color="lime", lw=0.2)
-        viz2d.add_text(0, f'Stop after {matches01["stop"]} layers', fs=20)
-        viz2d.save_plot(os.path.join(output_directory, "matches.png"))
-
-        kpc0 = viz2d.cm_prune(matches01["prune0"])
-        kpc1 = viz2d.cm_prune(matches01["prune1"])
-        viz2d.plot_images([frame0, frame1])
-        viz2d.plot_keypoints([kpts0, kpts1], colors=[kpc0, kpc1], ps=10)
-        viz2d.save_plot(os.path.join(output_directory, "keypoints.png"))
-
-    control_points: Dict[str, torch.Tensor] = {"m_kpts0": m_kpts0, "m_kpts1": m_kpts1}
-    return control_points
 
 
 def load_pto_file(file_path: str) -> List[str]:
@@ -558,6 +503,8 @@ def configure_stitching(
     scale: float = None,
     max_output_dimension: Optional[int] = None,
     device: Optional[torch.device] = None,
+    control_point_matcher: str = "superpoint-lightglue",
+    mapping_backend: str = "nona",
 ) -> bool:
     """
     Configure and run the stitching pipeline. This includes:
@@ -576,10 +523,19 @@ def configure_stitching(
         max_control_points: Maximum number of control points to compute.
         max_output_dimension: Maximum generated panorama width/height. If set, the PTO is auto-scaled to fit.
         device: Torch device for computations.
+        control_point_matcher: Learned matcher used for point correspondences.
+        mapping_backend: ``nona`` or a native OpenCV mapping backend.
 
     Returns:
         True if the process completes successfully.
     """
+    mapping_backend = normalize_mapping_backend(mapping_backend)
+    if mapping_backend in OPENCV_MAPPING_BACKENDS and scale not in (None, 1.0):
+        raise ValueError(
+            f"The {mapping_backend} backend does not accept --scale; " "use --max-output-dimension"
+        )
+    max_output_dimension = normalize_max_output_dimension(max_output_dimension)
+
     # Define file names for saved images.
     left_image_file: str = "left.png"
     right_image_file: str = "right.png"
@@ -633,6 +589,7 @@ def configure_stitching(
             device=device,
             max_num_keypoints=2048,
             output_directory=directory,
+            matcher=control_point_matcher,
         )
         # Update the PTO file with the new control points.
         update_pto_file(project_file_path, control_points)
@@ -657,23 +614,26 @@ def configure_stitching(
             _run_stitching_command(cmd)
 
         output_scale = float(scale) if scale else None
-        run_autooptimiser(output_scale)
-        if max_output_dimension and max_output_dimension > 0:
-            canvas_size = _read_pto_canvas_size(autooptimiser_out)
-            if canvas_size:
-                canvas_width, canvas_height = canvas_size
-                longest_dimension = max(canvas_width, canvas_height)
-                if longest_dimension > max_output_dimension:
-                    current_scale = output_scale if output_scale else 1.0
-                    output_scale = current_scale * (
-                        float(max_output_dimension) / float(longest_dimension)
-                    )
-                    print(
-                        "Scaling Hugin canvas from "
-                        f"{canvas_width}x{canvas_height} to fit max dimension "
-                        f"{max_output_dimension} (autooptimiser -x {output_scale:.6f})"
-                    )
-                    run_autooptimiser(output_scale)
+        if mapping_backend == "nona":
+            run_autooptimiser(output_scale)
+            if max_output_dimension and max_output_dimension > 0:
+                canvas_size = _read_pto_canvas_size(autooptimiser_out)
+                if canvas_size:
+                    canvas_width, canvas_height = canvas_size
+                    longest_dimension = max(canvas_width, canvas_height)
+                    if longest_dimension > max_output_dimension:
+                        current_scale = output_scale if output_scale else 1.0
+                        output_scale = current_scale * (
+                            float(max_output_dimension) / float(longest_dimension)
+                        )
+                        print(
+                            "Scaling Hugin canvas from "
+                            f"{canvas_width}x{canvas_height} to fit max dimension "
+                            f"{max_output_dimension} (autooptimiser -x {output_scale:.6f})"
+                        )
+                        run_autooptimiser(output_scale)
+        else:
+            shutil.copyfile(hm_project, autooptimiser_out)
 
         def run_nona() -> List[str]:
             cmd = [
@@ -695,40 +655,55 @@ def configure_stitching(
             return files
 
         mapping_files: List[str] = []
-        for attempt in range(3):
-            mapping_files = run_nona()
-            if not max_output_dimension or max_output_dimension <= 0:
-                break
+        if mapping_backend == "opencv-magsac":
+            mapping_files = create_opencv_magsac_mapping_files(
+                [f1, f2],
+                control_points,
+                dir_name,
+                max_output_dimension=max_output_dimension,
+            )
+        elif mapping_backend == "opencv-affine-ransac":
+            mapping_files = create_opencv_affine_ransac_mapping_files(
+                [f1, f2],
+                control_points,
+                dir_name,
+                max_output_dimension=max_output_dimension,
+            )
+        else:
+            for attempt in range(3):
+                mapping_files = run_nona()
+                if not max_output_dimension or max_output_dimension <= 0:
+                    break
 
-            mapping_canvas_size = _read_mapping_canvas_size(mapping_files)
-            if not mapping_canvas_size:
-                break
+                mapping_canvas_size = _read_mapping_canvas_size(mapping_files)
+                if not mapping_canvas_size:
+                    break
 
-            mapping_width, mapping_height = mapping_canvas_size
-            longest_mapping_dimension = max(mapping_width, mapping_height)
-            if longest_mapping_dimension <= max_output_dimension:
-                break
+                mapping_width, mapping_height = mapping_canvas_size
+                longest_mapping_dimension = max(mapping_width, mapping_height)
+                if longest_mapping_dimension <= max_output_dimension:
+                    break
 
-            if attempt == 2:
-                raise RuntimeError(
-                    "Generated Hugin mapping canvas "
-                    f"{mapping_width}x{mapping_height} still exceeds max dimension "
-                    f"{max_output_dimension}"
+                if attempt == 2:
+                    raise RuntimeError(
+                        "Generated Hugin mapping canvas "
+                        f"{mapping_width}x{mapping_height} still exceeds max dimension "
+                        f"{max_output_dimension}"
+                    )
+
+                current_scale = output_scale if output_scale else 1.0
+                output_scale = (
+                    current_scale
+                    * (float(max_output_dimension) / float(longest_mapping_dimension))
+                    * 0.999
                 )
-
-            current_scale = output_scale if output_scale else 1.0
-            output_scale = (
-                current_scale
-                * (float(max_output_dimension) / float(longest_mapping_dimension))
-                * 0.999
-            )
-            print(
-                "Generated mapping canvas "
-                f"{mapping_width}x{mapping_height} exceeds max dimension "
-                f"{max_output_dimension}; retrying autooptimiser -x {output_scale:.6f}"
-            )
-            _remove_mapping_outputs(dir_name)
-            run_autooptimiser(output_scale)
+                print(
+                    "Generated mapping canvas "
+                    f"{mapping_width}x{mapping_height} exceeds max dimension "
+                    f"{max_output_dimension}; retrying autooptimiser -x {output_scale:.6f}"
+                )
+                _remove_mapping_outputs(dir_name)
+                run_autooptimiser(output_scale)
 
         # Blend the mappings into a panorama using enblend.
         cmd = [
@@ -762,7 +737,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Synchronize two videos using audio cross-correlation, extract sync frames, "
-            "compute control points using LightGlue and SuperPoint, and update a Hugin PTO file."
+            "compute control points with a selectable matcher, and update a Hugin PTO file."
         )
     )
     parser.add_argument(
@@ -774,6 +749,18 @@ def main() -> None:
     parser.add_argument("--right", default=None, help="Path to left video file")
     parser.add_argument(
         "--max-control-points", type=int, default=500, help="Maximum number of control points"
+    )
+    parser.add_argument(
+        "--control-point-matcher",
+        choices=CONTROL_POINT_MATCHERS,
+        default="superpoint-lightglue",
+        help="Feature matcher used to find control points",
+    )
+    parser.add_argument(
+        "--mapping-backend",
+        choices=MAPPING_BACKENDS,
+        default="nona",
+        help="Backend used to generate mapping TIFFs",
     )
     parser.add_argument("--lfo", default=None, help="Left frame offset")
     parser.add_argument("--rfo", default=None, help="Right frame offset")
@@ -840,7 +827,7 @@ def main() -> None:
     frame2: np.ndarray = extract_frame(args.right, rfo)
 
     # Run the stitching pipeline which includes control point computation and PTO update.
-    print("Running SuperPoint and LightGlue to obtain control point matches...")
+    print(f"Running {args.control_point_matcher} to obtain control point matches...")
     configure_stitching(
         frame1,
         frame2,
@@ -848,6 +835,8 @@ def main() -> None:
         max_control_points=args.max_control_points,
         scale=args.scale,
         max_output_dimension=args.max_output_dimension,
+        control_point_matcher=args.control_point_matcher,
+        mapping_backend=args.mapping_backend,
     )
 
 

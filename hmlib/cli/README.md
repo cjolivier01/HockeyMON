@@ -5,7 +5,7 @@ This folder contains user-facing CLI commands that are installed with hm-prefixe
 ### Installed commands
 - **hmtrack** — Run tracking/inference on a game video directory
 - **hmstitch** — Stitch left/right camera videos into one panorama
-- **hmcreate_control_points** — Compute Hugin control points with SuperPoint/LightGlue and update a .pto
+- **hmcreate_control_points** — Compute control points with SuperPoint/LightGlue, DeDoDe/LightGlue, or LoFTR and update a .pto
 - **hmplayers** — Analyze tracked players and generate per-player timestamp files
 - **hmfind_ice_rink** — Detect the ice rink mask and save configuration for a game
 - **hmorientation** — Inspect a game directory and label left/right camera sets
@@ -109,6 +109,19 @@ hmstitch --game-id ev-stockton-1 -o stitched_output-with-audio.mp4
 
 # Configure only (no render)
 hmstitch --game-id ev-stockton-1 --configure-only
+
+# Try DeDoDe + LightGlue and generate remap TIFFs with OpenCV MAGSAC++
+hmstitch --game-id ev-stockton-1 \
+  --control-point-matcher dedode-lightglue \
+  --mapping-backend opencv-magsac
+
+# Use detector-free LoFTR matching (nona remains the mapping backend)
+hmstitch --game-id ev-stockton-1 --control-point-matcher loftr
+
+# Constrain wide-angle geometry to an affine transform with robust RANSAC
+hmstitch --game-id ev-stockton-1 \
+  --control-point-matcher dedode-lightglue \
+  --mapping-backend opencv-affine-ransac
 ```
 
 ### Notable options
@@ -117,6 +130,9 @@ hmstitch --game-id ev-stockton-1 --configure-only
 - `--stitch-frame-time HH:MM:SS` — Choose reference frame for alignment; `--start-frame-time` to start processing at a time
 - `--stitch-rotate-degrees <float>` — Rotate the stitched output about its center by the given degrees; keeps same dimensions (use small values to level the horizon)
 - `--max-control-points N` — Control points for homography
+- `--control-point-matcher superpoint-lightglue|dedode-lightglue|loftr` — Feature matching backend (default: `superpoint-lightglue`); DeDoDe caps its longest input dimension at 1920 pixels and restores matches to source-image coordinates
+- `--mapping-backend nona|opencv-magsac|opencv-affine-ransac` — Mapping TIFF generator (default: `nona`); the native OpenCV options use either `findHomography` with MAGSAC++ or `estimateAffine2D` with RANSAC and write the same RGB/alpha and X/Y map artifacts
+- `--max-output-dimension N` — Optionally scale a native OpenCV mapping canvas so neither dimension exceeds `N`
 - `--blend-mode laplacian|multiblend|gpu-hard-seam` — Blending mode
 - `--batch-size`, `--stitch-cache-size`, `--multi-gpu` — Performance tuning
 - `--show` / `--show-scaled` — Preview frames
@@ -125,7 +141,7 @@ hmstitch --game-id ev-stockton-1 --configure-only
 
 ## hmcreate_control_points — Compute and write Hugin control points
 
-Synchronize by audio (optional), extract frames, compute feature matches with SuperPoint + LightGlue, and update the Hugin `.pto` project file with control points. Helpful before stitching.
+Synchronize by audio (optional), extract frames, compute feature matches with a selectable learned matcher, and update the Hugin `.pto` project file with control points. Helpful before stitching. DeDoDe and LoFTR weights are downloaded by Kornia on first use.
 
 ### Quick start
 ```bash
@@ -140,7 +156,10 @@ hmcreate_control_points --left left.mp4 --right right.mp4 --synchronize-only
 - `--left` / `--right` — Input videos (or supply `--game-id`)
 - `--synchronize-only` — Print left/right frame offsets and exit
 - `--max-control-points N` — Limit control point matches
+- `--control-point-matcher superpoint-lightglue|dedode-lightglue|loftr` — Feature matching backend
+- `--mapping-backend nona|opencv-magsac|opencv-affine-ransac` — Mapping TIFF generator
 - `--scale <float>` — Downscale when optimizing/visualizing
+- `--max-output-dimension N` — Cap the generated panorama width and height
 
 ---
 

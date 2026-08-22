@@ -135,12 +135,13 @@ def configure_control_points(
     force: bool = False,
     output_directory: Optional[str] = None,
     use_hugin: bool = False,
-) -> None:
+    matcher: str = "superpoint-lightglue",
+) -> Dict[str, torch.Tensor]:
     """Populate or update control points in a Hugin PTO project.
 
     If existing control points are present and ``use_hugin`` is true,
-    they are reused unless ``force`` is set. Otherwise, LightGlue-based
-    control points are computed and written back to the PTO file.
+    they are reused unless ``force`` is set. Otherwise, control points are
+    computed with the selected learned matcher and written back to the PTO file.
 
     @param project_file_path: Path to PTO project file.
     @param image0: Left image filename.
@@ -149,6 +150,7 @@ def configure_control_points(
     @param force: If True, always recompute control points.
     @param output_directory: Optional output dir for debug visualizations.
     @param use_hugin: If True, prefer Hugin control points when present.
+    @param matcher: Learned matcher backend used when points must be computed.
     """
     #  c n0 N1 x5162 y1173 X1416.1875 Y1252.78125 t0
     torch.manual_seed(1)
@@ -157,7 +159,10 @@ def configure_control_points(
     if hugin_ctrl_points is None:
         use_hugin = False
     if hugin_ctrl_points is not None and not force:
-        return
+        return {
+            "m_kpts0": hugin_ctrl_points[0],
+            "m_kpts1": hugin_ctrl_points[1],
+        }
 
     control_points = None
 
@@ -173,12 +178,13 @@ def configure_control_points(
             image0=image0,
             image1=image1,
             max_control_points=max_control_points,
+            matcher=matcher,
         )
         print(f"Calculated control points in {time.time() - start} seconds")
 
     if use_hugin and hugin_ctrl_points is not None:
-        # Don't rewrite if we got tyhem from the huugin project file
-        return
+        # Don't rewrite if we got them from the Hugin project file.
+        return control_points
 
     pts0 = control_points["m_kpts0"]
     pts1 = control_points["m_kpts1"]
@@ -202,6 +208,7 @@ def configure_control_points(
         pto_file.append(line)
     save_pto_file(file_path=project_file_path, data=pto_file)
     get_logger(__name__).info("Done with control points")
+    return control_points
 
 
 def parse_pto_transformations(lines: List[str]) -> List[Dict[str, Any]]:

@@ -33,6 +33,7 @@ pybind_extension(
     "//hockeymom/csrc/pytorch:pytorch_stitch",
     "//hockeymom/csrc/kmeans:kmeans",
     "//hockeymom/csrc/play_tracker:play_tracker",
+    "//hockeymom/csrc/stitcher:homography_maps",
     "//hockeymom/csrc/ui:hm_render_set",
     "@libtorch//:libtorch_python",
     "@hm-cupano//src/pano:cuda_pano",

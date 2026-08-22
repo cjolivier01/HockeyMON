@@ -7,8 +7,10 @@ estimation and per-game synchronization into reusable functions.
 @see @ref hmlib.stitching.hugin.configure_control_points "configure_control_points"
 """
 
+import json
 import logging
 import os
+import shutil
 import subprocess
 from contextlib import contextmanager
 import fcntl
@@ -28,8 +30,16 @@ from hmlib.config import (
     save_private_config,
     set_nested_value,
 )
-from hmlib.stitching.control_points import calculate_control_points
+from hmlib.stitching.control_points import (
+    calculate_control_points,
+    normalize_control_point_matcher,
+)
 from hmlib.stitching.hugin import configure_control_points
+from hmlib.stitching.homography_maps import (
+    MAXIMUM_MAP_DIMENSION,
+    create_opencv_affine_ransac_mapping_files,
+    create_opencv_magsac_mapping_files,
+)
 from hmlib.video.video_stream import extract_frame_image
 
 from .synchronize import configure_synchronization
@@ -38,6 +48,28 @@ logger = logging.getLogger(__name__)
 
 _STITCH_FRAME_TIME_PATH = ("stitching", "stitch_frame_time")
 _STITCH_FRAME_TIME_ALT_PATH = ("stitching", "stitch-frame-time")
+OPENCV_MAPPING_BACKENDS = ("opencv-magsac", "opencv-affine-ransac")
+MAPPING_BACKENDS = ("nona", *OPENCV_MAPPING_BACKENDS)
+_STITCH_ARTIFACT_MANIFEST = ".stitching_artifacts.json"
+
+
+def normalize_mapping_backend(mapping_backend: str) -> str:
+    """Return a canonical mapping backend name or raise."""
+    normalized = str(mapping_backend).strip().lower().replace("_", "-")
+    if normalized not in MAPPING_BACKENDS:
+        choices = ", ".join(MAPPING_BACKENDS)
+        raise ValueError(f"Unsupported mapping backend {normalized!r}; choose one of: {choices}")
+    return normalized
+
+
+def normalize_max_output_dimension(max_output_dimension: Optional[int]) -> Optional[int]:
+    """Validate and normalize an optional native coordinate-map dimension cap."""
+    if max_output_dimension is None:
+        return None
+    normalized = int(max_output_dimension)
+    if not 0 < normalized <= MAXIMUM_MAP_DIMENSION:
+        raise ValueError(f"max_output_dimension must be between 1 and {MAXIMUM_MAP_DIMENSION}")
+    return normalized
 
 
 @contextmanager
@@ -139,7 +171,11 @@ def is_older_than(file1: str, file2: str):
 
 
 def _stitch_project_is_complete(
-    project_file_path: Union[str, Path], autooptimiser_path: Union[str, Path]
+    project_file_path: Union[str, Path],
+    autooptimiser_path: Union[str, Path],
+    control_point_matcher: Optional[str] = None,
+    mapping_backend: Optional[str] = None,
+    max_output_dimension: Optional[int] = None,
 ) -> bool:
     """Return whether every artifact required to initialize stitching exists."""
     project_path = Path(project_file_path)
@@ -148,10 +184,42 @@ def _stitch_project_is_complete(
         project_path,
         Path(autooptimiser_path),
         game_dir / "mapping_0000.tif",
+        game_dir / "mapping_0000_x.tif",
+        game_dir / "mapping_0000_y.tif",
         game_dir / "mapping_0001.tif",
+        game_dir / "mapping_0001_x.tif",
+        game_dir / "mapping_0001_y.tif",
         game_dir / "seam_file.png",
     )
-    return all(path.is_file() for path in required_paths)
+    if not all(path.is_file() for path in required_paths):
+        return False
+    if control_point_matcher is None and mapping_backend is None and max_output_dimension is None:
+        return True
+
+    manifest = _read_stitch_artifact_manifest(game_dir)
+    if manifest is None:
+        return False
+    return manifest == {
+        "control_point_matcher": control_point_matcher,
+        "mapping_backend": mapping_backend,
+        "max_output_dimension": str(max_output_dimension or 0),
+    }
+
+
+def _read_stitch_artifact_manifest(game_dir: Union[str, Path]) -> Optional[Dict[str, str]]:
+    """Read the backend choices used to build cached stitching artifacts."""
+    manifest_path = Path(game_dir) / _STITCH_ARTIFACT_MANIFEST
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in manifest.items()
+    ):
+        return None
+    return manifest
 
 
 def get_image_geo_position(tiff_image_file: str):
@@ -246,7 +314,7 @@ def _delete_globs(game_dir: Path, patterns: Sequence[str]) -> int:
 def _set_hugin_optimization_variables(
     project_file_path: Union[str, Path], variables: Sequence[str]
 ) -> None:
-    """Restrict Hugin optimization to geometry variables used by LightGlue setup."""
+    """Restrict Hugin optimization to the geometry variables used by learned matches."""
     path = Path(project_file_path)
     lines = path.read_text().splitlines()
     updated: List[str] = []
@@ -502,6 +570,7 @@ def clean_stitch_game_artifacts(game_id: str, game_dir: Union[str, Path]) -> int
             "matches.png",
             "keypoints.png",
             "s.png",
+            _STITCH_ARTIFACT_MANIFEST,
         ],
     )
     removed_files += _delete_globs(game_dir, patterns=["rink_mask_*.png"])
@@ -543,6 +612,9 @@ def build_stitching_project(
     fov: int = 108,
     scale: Optional[float] = None,
     force: bool = False,
+    control_point_matcher: str = "superpoint-lightglue",
+    mapping_backend: str = "nona",
+    max_output_dimension: Optional[int] = None,
 ):
     """Create or update a Hugin PTO project and seam masks for two images.
 
@@ -554,16 +626,39 @@ def build_stitching_project(
     @param fov: Horizontal field-of-view in degrees.
     @param scale: Optional scale factor passed to `autooptimiser`.
     @param force: If True, always rebuild, ignoring mtimes.
+    @param control_point_matcher: Feature matcher used to find control points.
+    @param mapping_backend: ``nona`` or a native OpenCV remapping backend.
+    @param max_output_dimension: Optional maximum mapping canvas dimension.
     @return: True on success, False if seam quality tests fail.
     """
     pto_path = Path(project_file_path)
+    control_point_matcher = normalize_control_point_matcher(control_point_matcher)
+    mapping_backend = normalize_mapping_backend(mapping_backend)
+    if mapping_backend in OPENCV_MAPPING_BACKENDS and scale not in (None, 1.0):
+        raise ValueError(
+            f"The {mapping_backend} backend does not accept Hugin's relative scale; "
+            "use max_output_dimension instead"
+        )
+    max_output_dimension = normalize_max_output_dimension(max_output_dimension)
     dir_name = pto_path.parent
+    previous_manifest = _read_stitch_artifact_manifest(dir_name)
+    previous_control_point_matcher = (
+        previous_manifest.get("control_point_matcher")
+        if previous_manifest is not None
+        else "superpoint-lightglue"
+    )
     hm_project = project_file_path
     autooptimiser_out = os.path.join(dir_name, "autooptimiser_out.pto")
     assert autooptimiser_out != hm_project
     if (
         skip_if_exists
-        and _stitch_project_is_complete(project_file_path, autooptimiser_out)
+        and _stitch_project_is_complete(
+            project_file_path,
+            autooptimiser_out,
+            control_point_matcher=control_point_matcher,
+            mapping_backend=mapping_backend,
+            max_output_dimension=max_output_dimension,
+        )
         and not is_older_than(project_file_path, autooptimiser_out)
     ):
         print(f"Project file already exists (skipping project creation): {autooptimiser_out}")
@@ -602,42 +697,61 @@ def build_stitching_project(
                 ],
             )
 
-        def run_remap_pipeline() -> bool:
+        def run_remap_pipeline(control_points: Dict[str, torch.Tensor]) -> bool:
             remove_remap_outputs()
-            cmd = [
-                "autooptimiser",
-                "-n",
-                "-l",
-                "-s",
-                "-q",
-                "-o",
-                autooptimiser_out,
-                hm_project,
-            ]
-            if scale and scale != 1.0:
-                cmd += [
-                    "-x",
-                    str(scale),
+            if mapping_backend == "nona":
+                cmd = [
+                    "autooptimiser",
+                    "-n",
+                    "-l",
+                    "-s",
+                    "-q",
+                    "-o",
+                    autooptimiser_out,
+                    hm_project,
                 ]
-            _run_stitching_command(cmd)
-            _set_hugin_optimization_variables(autooptimiser_out, ("r1", "p1", "y1"))
+                if scale and scale != 1.0:
+                    cmd += [
+                        "-x",
+                        str(scale),
+                    ]
+                _run_stitching_command(cmd)
+                _set_hugin_optimization_variables(autooptimiser_out, ("r1", "p1", "y1"))
 
-            cmd = [
-                "nona",
-                "-m",
-                "TIFF_m",
-                "-z",
-                "NONE",
-                "--bigtiff",
-                "-c",
-                "-o",
-                "mapping_",
-                autooptimiser_out,
-            ]
-            _run_stitching_command(cmd)
-            mapping_files = sorted(str(path) for path in Path(dir_name).glob("mapping_????.tif"))
-            if not mapping_files:
-                raise FileNotFoundError(f"No Hugin mapping TIFFs were generated in {dir_name}")
+                cmd = [
+                    "nona",
+                    "-m",
+                    "TIFF_m",
+                    "-z",
+                    "NONE",
+                    "--bigtiff",
+                    "-c",
+                    "-o",
+                    "mapping_",
+                    autooptimiser_out,
+                ]
+                _run_stitching_command(cmd)
+                mapping_files = sorted(
+                    str(path) for path in Path(dir_name).glob("mapping_????.tif")
+                )
+                if not mapping_files:
+                    raise FileNotFoundError(f"No Hugin mapping TIFFs were generated in {dir_name}")
+            elif mapping_backend == "opencv-magsac":
+                shutil.copyfile(hm_project, autooptimiser_out)
+                mapping_files = create_opencv_magsac_mapping_files(
+                    [left_image_file, right_image_file],
+                    control_points,
+                    dir_name,
+                    max_output_dimension=max_output_dimension,
+                )
+            else:
+                shutil.copyfile(hm_project, autooptimiser_out)
+                mapping_files = create_opencv_affine_ransac_mapping_files(
+                    [left_image_file, right_image_file],
+                    control_points,
+                    dir_name,
+                    max_output_dimension=max_output_dimension,
+                )
 
             seam_file: str = os.path.join(dir_name, "seam_file.png")
             cmd = [
@@ -693,10 +807,10 @@ def build_stitching_project(
         use_hugin = False
         if not os.path.exists(hm_project) or force:
             generate_pto()
-        else:
+        elif previous_control_point_matcher == control_point_matcher:
             use_hugin = True
 
-        configure_control_points(
+        control_points = configure_control_points(
             output_directory=str(dir_name),
             project_file_path=hm_project,
             image0=left_image_file,
@@ -704,16 +818,29 @@ def build_stitching_project(
             max_control_points=max_control_points,
             force=True,
             use_hugin=use_hugin,
+            matcher=control_point_matcher,
         )
         _set_hugin_optimization_variables(hm_project, ("r1", "p1", "y1"))
         try:
-            remap_ok = run_remap_pipeline()
+            remap_ok = run_remap_pipeline(control_points)
         except (subprocess.CalledProcessError, FileNotFoundError) as exc:
             raise RuntimeError(
-                "LightGlue control points did not produce remappable Hugin outputs"
+                f"{control_point_matcher} control points did not produce "
+                f"remappable {mapping_backend} outputs"
             ) from exc
         if not remap_ok:
-            raise RuntimeError("LightGlue control points produced low-quality seam masks")
+            raise RuntimeError(
+                f"{control_point_matcher} control points produced low-quality seam masks"
+            )
+        manifest = {
+            "control_point_matcher": control_point_matcher,
+            "mapping_backend": mapping_backend,
+            "max_output_dimension": str(max_output_dimension or 0),
+        }
+        (Path(dir_name) / _STITCH_ARTIFACT_MANIFEST).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
         return True
 
     finally:
@@ -758,7 +885,7 @@ def load_or_calculate_control_points(
     device: Optional[torch.device] = None,
     save: bool = True,
 ) -> Dict[str, torch.Tensor]:
-    """Load game-specific control points or compute them with LightGlue.
+    """Load game-specific control points or compute them with a learned matcher.
 
     @param game_id: Game identifier used to resolve private config.
     @param image0: First image (path or tensor).
@@ -801,8 +928,14 @@ def configure_video_stitching(
     stitch_frame_time: Optional[str] = None,
     ignore_private_config: bool = False,
     game_config: Optional[Dict[str, Any]] = None,
+    control_point_matcher: str = "superpoint-lightglue",
+    mapping_backend: str = "nona",
+    max_output_dimension: Optional[int] = None,
 ):
     """Configure stitching while serializing shared artifacts per game."""
+    control_point_matcher = normalize_control_point_matcher(control_point_matcher)
+    mapping_backend = normalize_mapping_backend(mapping_backend)
+    max_output_dimension = normalize_max_output_dimension(max_output_dimension)
     with _stitch_game_lock(dir_name):
         return _configure_video_stitching_locked(
             dir_name=dir_name,
@@ -819,6 +952,9 @@ def configure_video_stitching(
             stitch_frame_time=stitch_frame_time,
             ignore_private_config=ignore_private_config,
             game_config=game_config,
+            control_point_matcher=control_point_matcher,
+            mapping_backend=mapping_backend,
+            max_output_dimension=max_output_dimension,
         )
 
 
@@ -837,11 +973,15 @@ def _configure_video_stitching_locked(
     stitch_frame_time: Optional[str] = None,
     ignore_private_config: bool = False,
     game_config: Optional[Dict[str, Any]] = None,
+    control_point_matcher: str = "superpoint-lightglue",
+    mapping_backend: str = "nona",
+    max_output_dimension: Optional[int] = None,
 ):
     """Configure a two-camera stitching project from game videos.
 
     Uses audio-based synchronization, frame extraction, optional per-side
-    color adjustment and Hugin PTO generation to produce mapping TIFFs.
+    color adjustment and PTO generation to produce mapping TIFFs with either
+    nona, native OpenCV MAGSAC++ homography maps, or affine RANSAC maps.
 
     @param dir_name: Game directory containing videos and config.
     @param video_left: Left-side video filename or path.
@@ -857,6 +997,9 @@ def _configure_video_stitching_locked(
     @param stitch_frame_time: Effective stitch-frame-time used to build the PTO.
     @param ignore_private_config: If True, do not read/write the private config stamp.
     @param game_config: Optional in-memory game config to update with the effective stamp.
+    @param control_point_matcher: Learned feature matcher backend.
+    @param mapping_backend: Mapping generator backend.
+    @param max_output_dimension: Optional maximum native OpenCV mapping dimension.
     @return: Tuple ``(pto_project_file, left_frame_offset, right_frame_offset)``.
     """
     stitch_frame_time_changed = sync_stitch_frame_time_state(
@@ -885,7 +1028,13 @@ def _configure_video_stitching_locked(
     autooptimiser_out: str = os.path.join(dir_name, "autooptimiser_out.pto")
     if (
         force
-        or not _stitch_project_is_complete(pto_project_file, autooptimiser_out)
+        or not _stitch_project_is_complete(
+            pto_project_file,
+            autooptimiser_out,
+            control_point_matcher=control_point_matcher,
+            mapping_backend=mapping_backend,
+            max_output_dimension=max_output_dimension,
+        )
         or (os.path.exists(pto_project_file) and is_older_than(pto_project_file, autooptimiser_out))
     ):
         left_image_file, right_image_file = extract_frames(
@@ -902,6 +1051,9 @@ def _configure_video_stitching_locked(
             max_control_points=max_control_points,
             force=force,
             skip_if_exists=not force,
+            control_point_matcher=control_point_matcher,
+            mapping_backend=mapping_backend,
+            max_output_dimension=max_output_dimension,
         )
         if not project_built:
             raise RuntimeError("Failed to build stitching project")

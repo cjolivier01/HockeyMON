@@ -22,6 +22,7 @@ set(
   csrc/pytorch/image_stitch.cpp
   csrc/pytorch/image_utils.cpp
   csrc/pytorch/smart_image_stitch.cpp
+  csrc/stitcher/HomographyMaps.cpp
 )
 
 if(FALSE AND CMAKE_SYSTEM_PROCESSOR MATCHES "i686|x86|i386")

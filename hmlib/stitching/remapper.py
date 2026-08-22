@@ -1,4 +1,4 @@
-"""CLI entry point for remapping video frames using Hugin mapping TIFFs."""
+"""CLI entry point for remapping video frames using stitching mapping TIFFs."""
 
 import argparse
 import os
