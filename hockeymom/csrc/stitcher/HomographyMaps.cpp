@@ -70,7 +70,7 @@ std::array<cv::Point2d, 4> transformed_corners(
   for (const auto& point : result) {
     if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
       throw std::runtime_error(
-          "MAGSAC++ produced a homography with non-finite image bounds");
+          "Estimated transform produced non-finite image bounds");
     }
   }
   return result;
@@ -120,7 +120,8 @@ HomographyImageMap make_image_map(
       0,
       canvas_height);
   if (x1 <= x0 || y1 <= y0) {
-    throw std::runtime_error("Homography produced an empty image mapping");
+    throw std::runtime_error(
+        "Estimated transform produced an empty image mapping");
   }
 
   HomographyImageMap result;
@@ -161,9 +162,7 @@ HomographyImageMap make_image_map(
   return result;
 }
 
-} // namespace
-
-HomographyMapResult create_homography_maps(
+void validate_estimation_inputs(
     const std::vector<std::array<double, 2>>& left_points,
     const std::vector<std::array<double, 2>>& right_points,
     int left_width,
@@ -173,50 +172,56 @@ HomographyMapResult create_homography_maps(
     double reprojection_threshold,
     double confidence,
     int max_iterations,
-    int max_output_dimension) {
+    size_t minimum_points,
+    const char* estimator_name) {
   validate_image_size(left_width, left_height, "Left");
   validate_image_size(right_width, right_height, "Right");
   if (left_points.size() != right_points.size()) {
     throw std::invalid_argument(
         "Left and right control-point counts must match");
   }
-  if (left_points.size() < 4) {
+  if (left_points.size() < minimum_points) {
     throw std::invalid_argument(
-        "At least four control-point pairs are required for a homography");
+        "At least " + std::to_string(minimum_points) +
+        " control-point pairs are required for " + estimator_name);
   }
   if (reprojection_threshold <= 0.0) {
     throw std::invalid_argument("Reprojection threshold must be positive");
   }
   if (confidence <= 0.0 || confidence >= 1.0) {
     throw std::invalid_argument(
-        "Homography confidence must be between 0 and 1");
+        std::string(estimator_name) + " confidence must be between 0 and 1");
   }
   if (max_iterations <= 0) {
     throw std::invalid_argument(
-        "Maximum homography iterations must be positive");
+        std::string(estimator_name) + " iterations must be positive");
   }
+}
 
-  const auto left_cv = to_cv_points(left_points, "Left");
-  const auto right_cv = to_cv_points(right_points, "Right");
-  cv::Mat inlier_mask;
-  const cv::Mat homography = cv::findHomography(
-      right_cv,
-      left_cv,
-      cv::USAC_MAGSAC,
-      reprojection_threshold,
-      inlier_mask,
-      max_iterations,
-      confidence);
-  if (homography.empty()) {
-    throw std::runtime_error("OpenCV MAGSAC++ failed to estimate a homography");
+HomographyMapResult build_map_result(
+    const cv::Matx33d& right_to_left,
+    const cv::Mat& inlier_mask,
+    int left_width,
+    int left_height,
+    int right_width,
+    int right_height,
+    int max_output_dimension,
+    size_t minimum_inliers,
+    const char* estimator_name) {
+  HomographyMapResult result;
+  result.inlier_mask.reserve(inlier_mask.total());
+  for (size_t index = 0; index < inlier_mask.total(); ++index) {
+    result.inlier_mask.push_back(inlier_mask.ptr<uint8_t>()[index]);
   }
-  cv::Mat homography_64;
-  homography.convertTo(homography_64, CV_64F);
-  cv::Matx33d right_to_left;
-  std::copy(
-      homography_64.ptr<double>(),
-      homography_64.ptr<double>() + 9,
-      right_to_left.val);
+  const auto inlier_count = std::count_if(
+      result.inlier_mask.begin(), result.inlier_mask.end(), [](uint8_t value) {
+        return value != 0;
+      });
+  if (inlier_count < static_cast<decltype(inlier_count)>(minimum_inliers)) {
+    throw std::runtime_error(
+        std::string("OpenCV ") + estimator_name + " found fewer than " +
+        std::to_string(minimum_inliers) + " transform inliers");
+  }
 
   const cv::Matx33d identity = cv::Matx33d::eye();
   Bounds unscaled_bounds;
@@ -227,7 +232,9 @@ HomographyMapResult create_homography_maps(
   const double unscaled_width = unscaled_bounds.max_x - unscaled_bounds.min_x;
   const double unscaled_height = unscaled_bounds.max_y - unscaled_bounds.min_y;
   if (unscaled_width <= 0.0 || unscaled_height <= 0.0) {
-    throw std::runtime_error("MAGSAC++ produced invalid panorama bounds");
+    throw std::runtime_error(
+        std::string("OpenCV ") + estimator_name +
+        " produced invalid panorama bounds");
   }
 
   double output_scale = 1.0;
@@ -258,11 +265,11 @@ HomographyMapResult create_homography_maps(
       canvas_width > kMaximumCoordinate || canvas_height > kMaximumCoordinate ||
       canvas_pixels > kMaximumCanvasPixels) {
     throw std::runtime_error(
-        "Homography panorama exceeds supported coordinate-map dimensions; "
-        "set a smaller maximum output dimension");
+        std::string("OpenCV ") + estimator_name +
+        " panorama exceeds supported coordinate-map dimensions; set a smaller "
+        "maximum output dimension");
   }
 
-  HomographyMapResult result;
   result.canvas_width = canvas_width;
   result.canvas_height = canvas_height;
   result.output_scale = output_scale;
@@ -273,20 +280,131 @@ HomographyMapResult create_homography_maps(
       left_to_canvas, left_width, left_height, canvas_width, canvas_height);
   result.image_maps[1] = make_image_map(
       right_to_canvas, right_width, right_height, canvas_width, canvas_height);
-
-  result.inlier_mask.reserve(inlier_mask.total());
-  for (size_t index = 0; index < inlier_mask.total(); ++index) {
-    result.inlier_mask.push_back(inlier_mask.ptr<uint8_t>()[index]);
-  }
-  const auto inlier_count = std::count_if(
-      result.inlier_mask.begin(), result.inlier_mask.end(), [](uint8_t value) {
-        return value != 0;
-      });
-  if (inlier_count < 4) {
-    throw std::runtime_error(
-        "OpenCV MAGSAC++ found fewer than four homography inliers");
-  }
   return result;
+}
+
+} // namespace
+
+HomographyMapResult create_homography_maps(
+    const std::vector<std::array<double, 2>>& left_points,
+    const std::vector<std::array<double, 2>>& right_points,
+    int left_width,
+    int left_height,
+    int right_width,
+    int right_height,
+    double reprojection_threshold,
+    double confidence,
+    int max_iterations,
+    int max_output_dimension) {
+  validate_estimation_inputs(
+      left_points,
+      right_points,
+      left_width,
+      left_height,
+      right_width,
+      right_height,
+      reprojection_threshold,
+      confidence,
+      max_iterations,
+      4,
+      "MAGSAC++ homography");
+
+  const auto left_cv = to_cv_points(left_points, "Left");
+  const auto right_cv = to_cv_points(right_points, "Right");
+  cv::Mat inlier_mask;
+  const cv::Mat homography = cv::findHomography(
+      right_cv,
+      left_cv,
+      cv::USAC_MAGSAC,
+      reprojection_threshold,
+      inlier_mask,
+      max_iterations,
+      confidence);
+  if (homography.empty()) {
+    throw std::runtime_error("OpenCV MAGSAC++ failed to estimate a homography");
+  }
+  cv::Mat homography_64;
+  homography.convertTo(homography_64, CV_64F);
+  cv::Matx33d right_to_left;
+  std::copy(
+      homography_64.ptr<double>(),
+      homography_64.ptr<double>() + 9,
+      right_to_left.val);
+  return build_map_result(
+      right_to_left,
+      inlier_mask,
+      left_width,
+      left_height,
+      right_width,
+      right_height,
+      max_output_dimension,
+      4,
+      "MAGSAC++ homography");
+}
+
+HomographyMapResult create_affine_ransac_maps(
+    const std::vector<std::array<double, 2>>& left_points,
+    const std::vector<std::array<double, 2>>& right_points,
+    int left_width,
+    int left_height,
+    int right_width,
+    int right_height,
+    double reprojection_threshold,
+    double confidence,
+    int max_iterations,
+    int refine_iterations,
+    int max_output_dimension) {
+  validate_estimation_inputs(
+      left_points,
+      right_points,
+      left_width,
+      left_height,
+      right_width,
+      right_height,
+      reprojection_threshold,
+      confidence,
+      max_iterations,
+      3,
+      "affine RANSAC");
+  if (refine_iterations < 0) {
+    throw std::invalid_argument(
+        "Affine RANSAC refinement iterations cannot be negative");
+  }
+
+  const auto left_cv = to_cv_points(left_points, "Left");
+  const auto right_cv = to_cv_points(right_points, "Right");
+  cv::Mat inlier_mask;
+  const cv::Mat affine = cv::estimateAffine2D(
+      right_cv,
+      left_cv,
+      inlier_mask,
+      cv::RANSAC,
+      reprojection_threshold,
+      static_cast<size_t>(max_iterations),
+      confidence,
+      static_cast<size_t>(refine_iterations));
+  if (affine.empty()) {
+    throw std::runtime_error(
+        "OpenCV affine RANSAC failed to estimate a transform");
+  }
+  cv::Mat affine_64;
+  affine.convertTo(affine_64, CV_64F);
+  cv::Matx33d right_to_left = cv::Matx33d::eye();
+  for (int row = 0; row < 2; ++row) {
+    for (int column = 0; column < 3; ++column) {
+      right_to_left(row, column) = affine_64.at<double>(row, column);
+    }
+  }
+  return build_map_result(
+      right_to_left,
+      inlier_mask,
+      left_width,
+      left_height,
+      right_width,
+      right_height,
+      max_output_dimension,
+      3,
+      "affine RANSAC");
 }
 
 } // namespace hm::stitcher

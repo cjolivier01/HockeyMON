@@ -35,7 +35,10 @@ from hmlib.stitching.control_points import (
     normalize_control_point_matcher,
 )
 from hmlib.stitching.hugin import configure_control_points
-from hmlib.stitching.homography_maps import create_opencv_magsac_mapping_files
+from hmlib.stitching.homography_maps import (
+    create_opencv_affine_ransac_mapping_files,
+    create_opencv_magsac_mapping_files,
+)
 from hmlib.video.video_stream import extract_frame_image
 
 from .synchronize import configure_synchronization
@@ -44,7 +47,8 @@ logger = logging.getLogger(__name__)
 
 _STITCH_FRAME_TIME_PATH = ("stitching", "stitch_frame_time")
 _STITCH_FRAME_TIME_ALT_PATH = ("stitching", "stitch-frame-time")
-MAPPING_BACKENDS = ("nona", "opencv-magsac")
+OPENCV_MAPPING_BACKENDS = ("opencv-magsac", "opencv-affine-ransac")
+MAPPING_BACKENDS = ("nona", *OPENCV_MAPPING_BACKENDS)
 _STITCH_ARTIFACT_MANIFEST = ".stitching_artifacts.json"
 
 
@@ -601,7 +605,7 @@ def build_stitching_project(
     @param scale: Optional scale factor passed to `autooptimiser`.
     @param force: If True, always rebuild, ignoring mtimes.
     @param control_point_matcher: Feature matcher used to find control points.
-    @param mapping_backend: ``nona`` or native ``opencv-magsac`` remapping.
+    @param mapping_backend: ``nona`` or a native OpenCV remapping backend.
     @param max_output_dimension: Optional maximum mapping canvas dimension.
     @return: True on success, False if seam quality tests fail.
     """
@@ -613,9 +617,9 @@ def build_stitching_project(
         raise ValueError(
             f"Unsupported mapping backend {mapping_backend!r}; choose one of: {choices}"
         )
-    if mapping_backend == "opencv-magsac" and scale not in (None, 1.0):
+    if mapping_backend in OPENCV_MAPPING_BACKENDS and scale not in (None, 1.0):
         raise ValueError(
-            "The opencv-magsac backend does not accept Hugin's relative scale; "
+            f"The {mapping_backend} backend does not accept Hugin's relative scale; "
             "use max_output_dimension instead"
         )
     dir_name = pto_path.parent
@@ -713,9 +717,17 @@ def build_stitching_project(
                 )
                 if not mapping_files:
                     raise FileNotFoundError(f"No Hugin mapping TIFFs were generated in {dir_name}")
-            else:
+            elif mapping_backend == "opencv-magsac":
                 shutil.copyfile(hm_project, autooptimiser_out)
                 mapping_files = create_opencv_magsac_mapping_files(
+                    [left_image_file, right_image_file],
+                    control_points,
+                    dir_name,
+                    max_output_dimension=max_output_dimension,
+                )
+            else:
+                shutil.copyfile(hm_project, autooptimiser_out)
+                mapping_files = create_opencv_affine_ransac_mapping_files(
                     [left_image_file, right_image_file],
                     control_points,
                     dir_name,
@@ -943,7 +955,7 @@ def _configure_video_stitching_locked(
 
     Uses audio-based synchronization, frame extraction, optional per-side
     color adjustment and PTO generation to produce mapping TIFFs with either
-    nona or native OpenCV MAGSAC++ homography maps.
+    nona, native OpenCV MAGSAC++ homography maps, or affine RANSAC maps.
 
     @param dir_name: Game directory containing videos and config.
     @param video_left: Left-side video filename or path.

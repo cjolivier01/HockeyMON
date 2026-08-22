@@ -1467,7 +1467,7 @@ class hm_opts(object):
         )
         parser.add_argument(
             "--mapping-backend",
-            choices=["nona", "opencv-magsac"],
+            choices=["nona", "opencv-magsac", "opencv-affine-ransac"],
             default="nona",
             help="Backend used to create stitching mapping TIFFs",
         )

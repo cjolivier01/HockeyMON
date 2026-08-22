@@ -173,6 +173,41 @@ def create_homography_maps(
     )
 
 
+def create_affine_ransac_maps(
+    left_points,
+    right_points,
+    left_width,
+    left_height,
+    right_width,
+    right_height,
+    reprojection_threshold=10.0,
+    confidence=0.999,
+    max_iterations=10000,
+    refine_iterations=10,
+    max_output_dimension=0,
+):
+    """Call the native affine RANSAC coordinate-map builder."""
+    native_function = getattr(_native_hockeymom, "create_affine_ransac_maps", None)
+    if native_function is None:
+        raise RuntimeError(
+            "The installed HockeyMOM extension does not provide "
+            "create_affine_ransac_maps; rebuild the native extension"
+        )
+    return native_function(
+        left_points,
+        right_points,
+        left_width,
+        left_height,
+        right_width,
+        right_height,
+        reprojection_threshold,
+        confidence,
+        max_iterations,
+        refine_iterations,
+        max_output_dimension,
+    )
+
+
 __all__ = [
     "ImageRemapper",
     "ImageBlender",
@@ -207,6 +242,7 @@ __all__ = [
     "WHDims",
     "GrowShrink",
     "compute_kmeans_clusters",
+    "create_affine_ransac_maps",
     "create_homography_maps",
     "bgr_to_i420_cuda",
     "show_cuda_tensor",
@@ -251,6 +287,16 @@ _doc(
     dictionary contains the robust inlier mask, panorama bounds, image
     placements, and uint16 inverse X/Y maps compatible with HockeyMOM's
     stitching remappers.
+    """,
+)
+
+_doc(
+    create_affine_ransac_maps,
+    """Estimate an affine transform with RANSAC and build inverse coordinate maps.
+
+    The right control points are mapped onto the left image. The returned
+    dictionary has the same panorama geometry, inlier mask, image placement,
+    and uint16 inverse X/Y map structure as ``create_homography_maps``.
     """,
 )
 

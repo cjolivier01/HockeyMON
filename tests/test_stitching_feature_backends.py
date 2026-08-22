@@ -74,8 +74,21 @@ def should_route_control_point_matchers_without_duplicate_sampling(
     assert torch.unique(result["m_kpts0"], dim=0).shape[0] == 5
 
 
+@pytest.mark.parametrize(
+    ("native_name", "builder_name"),
+    [
+        ("_native_create_homography_maps", "create_opencv_magsac_mapping_files"),
+        (
+            "_native_create_affine_ransac_maps",
+            "create_opencv_affine_ransac_mapping_files",
+        ),
+    ],
+)
 def should_write_complete_opencv_mapping_artifacts(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    native_name: str,
+    builder_name: str,
 ) -> None:
     left = np.zeros((3, 4, 3), dtype=np.uint8)
     left[:, :, 2] = 255
@@ -99,12 +112,12 @@ def should_write_complete_opencv_mapping_artifacts(
             ],
         }
 
-    monkeypatch.setattr(homography_maps, "_native_create_homography_maps", fake_native)
+    monkeypatch.setattr(homography_maps, native_name, fake_native)
     control_points = {
         "m_kpts0": torch.tensor([[0, 0], [3, 0], [3, 2], [0, 2]], dtype=torch.float32),
         "m_kpts1": torch.tensor([[0, 0], [3, 0], [3, 2], [0, 2]], dtype=torch.float32),
     }
-    mapping_files = homography_maps.create_opencv_magsac_mapping_files(
+    mapping_files = getattr(homography_maps, builder_name)(
         [str(left_file), str(right_file)], control_points, tmp_path
     )
 
@@ -125,8 +138,18 @@ def should_write_complete_opencv_mapping_artifacts(
     assert tifffile.imread(mapping_files[0]).shape == (3, 4, 4)
 
 
+@pytest.mark.parametrize(
+    ("mapping_backend", "mapping_builder_name"),
+    [
+        ("opencv-magsac", "create_opencv_magsac_mapping_files"),
+        ("opencv-affine-ransac", "create_opencv_affine_ransac_mapping_files"),
+    ],
+)
 def should_use_native_mapping_backend_in_project_builder(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    mapping_backend: str,
+    mapping_builder_name: str,
 ) -> None:
     left_file = tmp_path / "left.png"
     right_file = tmp_path / "right.png"
@@ -149,7 +172,7 @@ def should_use_native_mapping_backend_in_project_builder(
         return {"m_kpts0": points, "m_kpts1": points}
 
     def fake_mapping_files(*_args, **_kwargs):
-        captured["mapping_backend"] = "opencv-magsac"
+        captured["mapping_backend"] = mapping_backend
         outputs = [tmp_path / "mapping_0000.tif", tmp_path / "mapping_0001.tif"]
         for output in outputs:
             output.touch()
@@ -161,7 +184,7 @@ def should_use_native_mapping_backend_in_project_builder(
     monkeypatch.setattr(configure_stitching, "configure_control_points", fake_control_points)
     monkeypatch.setattr(
         configure_stitching,
-        "create_opencv_magsac_mapping_files",
+        mapping_builder_name,
         fake_mapping_files,
     )
     monkeypatch.setattr(
@@ -177,9 +200,9 @@ def should_use_native_mapping_backend_in_project_builder(
         max_control_points=20,
         skip_if_exists=False,
         control_point_matcher="loftr",
-        mapping_backend="opencv-magsac",
+        mapping_backend=mapping_backend,
     )
-    assert captured == {"matcher": "loftr", "mapping_backend": "opencv-magsac"}
+    assert captured == {"matcher": "loftr", "mapping_backend": mapping_backend}
     assert [command[0] for command in commands] == ["pto_gen", "enblend"]
     autooptimiser_file = tmp_path / "autooptimiser_out.pto"
     assert autooptimiser_file.is_file()
@@ -187,7 +210,7 @@ def should_use_native_mapping_backend_in_project_builder(
         project_file,
         autooptimiser_file,
         control_point_matcher="loftr",
-        mapping_backend="opencv-magsac",
+        mapping_backend=mapping_backend,
     )
     assert not configure_stitching._stitch_project_is_complete(
         project_file,

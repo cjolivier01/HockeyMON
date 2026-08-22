@@ -117,6 +117,11 @@ hmstitch --game-id ev-stockton-1 \
 
 # Use detector-free LoFTR matching (nona remains the mapping backend)
 hmstitch --game-id ev-stockton-1 --control-point-matcher loftr
+
+# Constrain wide-angle geometry to an affine transform with robust RANSAC
+hmstitch --game-id ev-stockton-1 \
+  --control-point-matcher dedode-lightglue \
+  --mapping-backend opencv-affine-ransac
 ```
 
 ### Notable options
@@ -126,7 +131,7 @@ hmstitch --game-id ev-stockton-1 --control-point-matcher loftr
 - `--stitch-rotate-degrees <float>` — Rotate the stitched output about its center by the given degrees; keeps same dimensions (use small values to level the horizon)
 - `--max-control-points N` — Control points for homography
 - `--control-point-matcher superpoint-lightglue|dedode-lightglue|loftr` — Feature matching backend (default: `superpoint-lightglue`); DeDoDe caps its longest input dimension at 1920 pixels and restores matches to source-image coordinates
-- `--mapping-backend nona|opencv-magsac` — Mapping TIFF generator (default: `nona`); the OpenCV option uses native `findHomography` with MAGSAC++ and writes the same RGB/alpha and X/Y map artifacts
+- `--mapping-backend nona|opencv-magsac|opencv-affine-ransac` — Mapping TIFF generator (default: `nona`); the native OpenCV options use either `findHomography` with MAGSAC++ or `estimateAffine2D` with RANSAC and write the same RGB/alpha and X/Y map artifacts
 - `--blend-mode laplacian|multiblend|gpu-hard-seam` — Blending mode
 - `--batch-size`, `--stitch-cache-size`, `--multi-gpu` — Performance tuning
 - `--show` / `--show-scaled` — Preview frames
@@ -151,7 +156,7 @@ hmcreate_control_points --left left.mp4 --right right.mp4 --synchronize-only
 - `--synchronize-only` — Print left/right frame offsets and exit
 - `--max-control-points N` — Limit control point matches
 - `--control-point-matcher superpoint-lightglue|dedode-lightglue|loftr` — Feature matching backend
-- `--mapping-backend nona|opencv-magsac` — Mapping TIFF generator
+- `--mapping-backend nona|opencv-magsac|opencv-affine-ransac` — Mapping TIFF generator
 - `--scale <float>` — Downscale when optimizing/visualizing
 
 ---

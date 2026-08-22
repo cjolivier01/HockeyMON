@@ -42,4 +42,21 @@ HomographyMapResult create_homography_maps(
     int max_iterations = 10000,
     int max_output_dimension = 0);
 
+/**
+ * Estimate a right-to-left affine transform with OpenCV RANSAC and build
+ * inverse coordinate maps for a two-image panorama.
+ */
+HomographyMapResult create_affine_ransac_maps(
+    const std::vector<std::array<double, 2>>& left_points,
+    const std::vector<std::array<double, 2>>& right_points,
+    int left_width,
+    int left_height,
+    int right_width,
+    int right_height,
+    double reprojection_threshold = 10.0,
+    double confidence = 0.999,
+    int max_iterations = 10000,
+    int refine_iterations = 10,
+    int max_output_dimension = 0);
+
 } // namespace hm::stitcher

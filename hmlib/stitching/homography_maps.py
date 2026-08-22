@@ -1,9 +1,9 @@
-"""OpenCV MAGSAC++ mapping-file generation for two-camera stitching."""
+"""Native OpenCV mapping-file generation for two-camera stitching."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -41,6 +41,38 @@ def _native_create_homography_maps(
         reprojection_threshold=3.0,
         confidence=0.999,
         max_iterations=10000,
+        max_output_dimension=max_output_dimension,
+    )
+
+
+def _native_create_affine_ransac_maps(
+    left_points: Sequence[Sequence[float]],
+    right_points: Sequence[Sequence[float]],
+    left_width: int,
+    left_height: int,
+    right_width: int,
+    right_height: int,
+    max_output_dimension: int,
+) -> Mapping[str, Any]:
+    try:
+        from hockeymom.core import create_affine_ransac_maps
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "The opencv-affine-ransac mapping backend requires a HockeyMOM "
+            "extension built with create_affine_ransac_maps support"
+        ) from exc
+
+    return create_affine_ransac_maps(
+        left_points,
+        right_points,
+        left_width,
+        left_height,
+        right_width,
+        right_height,
+        reprojection_threshold=10.0,
+        confidence=0.999,
+        max_iterations=10000,
+        refine_iterations=10,
         max_output_dimension=max_output_dimension,
     )
 
@@ -121,21 +153,25 @@ def _remap_reference_image(
     return np.dstack((remapped, alpha))
 
 
-def create_opencv_magsac_mapping_files(
+def _create_opencv_mapping_files(
     image_files: Sequence[str],
     control_points: Mapping[str, torch.Tensor],
     output_directory: str | Path,
-    max_output_dimension: int | None = None,
+    max_output_dimension: int | None,
+    native_builder: Callable[..., Mapping[str, Any]],
+    minimum_points: int,
+    estimator_name: str,
 ) -> list[str]:
-    """Create nona-compatible TIFF maps from a native MAGSAC++ homography."""
     if len(image_files) != 2:
         raise ValueError("Exactly two input images are required")
     points0 = control_points["m_kpts0"].detach().cpu().to(torch.float64).tolist()
     points1 = control_points["m_kpts1"].detach().cpu().to(torch.float64).tolist()
     if len(points0) != len(points1):
         raise ValueError("Left and right control-point counts must match")
-    if len(points0) < 4:
-        raise ValueError("At least four control-point pairs are required")
+    if len(points0) < minimum_points:
+        raise ValueError(
+            f"At least {minimum_points} control-point pairs are required for {estimator_name}"
+        )
 
     images: list[np.ndarray] = []
     for image_file in image_files:
@@ -146,7 +182,7 @@ def create_opencv_magsac_mapping_files(
 
     left_height, left_width = images[0].shape[:2]
     right_height, right_width = images[1].shape[:2]
-    result = _native_create_homography_maps(
+    result = native_builder(
         points0,
         points1,
         left_width,
@@ -157,7 +193,7 @@ def create_opencv_magsac_mapping_files(
     )
     image_maps = result["image_maps"]
     if len(image_maps) != 2:
-        raise RuntimeError("Native homography mapping returned an invalid image-map count")
+        raise RuntimeError("Native OpenCV mapping returned an invalid image-map count")
 
     output_dir = Path(output_directory)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -166,7 +202,7 @@ def create_opencv_magsac_mapping_files(
         x_map = np.asarray(image_map["x_map"], dtype=np.uint16)
         y_map = np.asarray(image_map["y_map"], dtype=np.uint16)
         if x_map.ndim != 2 or x_map.shape != y_map.shape:
-            raise RuntimeError("Native homography coordinate maps have invalid shapes")
+            raise RuntimeError("Native OpenCV coordinate maps have invalid shapes")
 
         basename = output_dir / f"mapping_{index:04d}"
         mapping_file = basename.with_suffix(".tif")
@@ -184,3 +220,39 @@ def create_opencv_magsac_mapping_files(
         mapping_files.append(str(mapping_file))
 
     return mapping_files
+
+
+def create_opencv_magsac_mapping_files(
+    image_files: Sequence[str],
+    control_points: Mapping[str, torch.Tensor],
+    output_directory: str | Path,
+    max_output_dimension: int | None = None,
+) -> list[str]:
+    """Create nona-compatible TIFF maps from a native MAGSAC++ homography."""
+    return _create_opencv_mapping_files(
+        image_files,
+        control_points,
+        output_directory,
+        max_output_dimension,
+        _native_create_homography_maps,
+        minimum_points=4,
+        estimator_name="a homography",
+    )
+
+
+def create_opencv_affine_ransac_mapping_files(
+    image_files: Sequence[str],
+    control_points: Mapping[str, torch.Tensor],
+    output_directory: str | Path,
+    max_output_dimension: int | None = None,
+) -> list[str]:
+    """Create nona-compatible TIFF maps from a native affine RANSAC fit."""
+    return _create_opencv_mapping_files(
+        image_files,
+        control_points,
+        output_directory,
+        max_output_dimension,
+        _native_create_affine_ransac_maps,
+        minimum_points=3,
+        estimator_name="an affine transform",
+    )

@@ -46,5 +46,40 @@ int main() {
   assert(scaled.canvas_height == 45);
   assert(std::abs(scaled.output_scale - 0.5) < 1e-6);
 
+  std::vector<std::array<double, 2>> affine_left_points;
+  affine_left_points.reserve(right_points.size());
+  for (const auto& point : right_points) {
+    affine_left_points.push_back(
+        {1.02 * point[0] - 0.12 * point[1] + 18.0,
+         0.08 * point[0] + 0.98 * point[1] - 4.0});
+  }
+  affine_left_points.back() = {-100.0, 200.0};
+
+  const auto affine = hm::stitcher::create_affine_ransac_maps(
+      affine_left_points,
+      right_points,
+      100,
+      80,
+      100,
+      80,
+      0.1,
+      0.999,
+      10000,
+      10,
+      0);
+  assert(std::abs(affine.right_to_left_homography[0] - 1.02) < 1e-4);
+  assert(std::abs(affine.right_to_left_homography[1] + 0.12) < 1e-4);
+  assert(std::abs(affine.right_to_left_homography[2] - 18.0) < 1e-4);
+  assert(std::abs(affine.right_to_left_homography[3] - 0.08) < 1e-4);
+  assert(std::abs(affine.right_to_left_homography[4] - 0.98) < 1e-4);
+  assert(std::abs(affine.right_to_left_homography[5] + 4.0) < 1e-4);
+  assert(affine.right_to_left_homography[6] == 0.0);
+  assert(affine.right_to_left_homography[7] == 0.0);
+  assert(affine.right_to_left_homography[8] == 1.0);
+  assert(affine.canvas_width >= 119 && affine.canvas_width <= 121);
+  assert(affine.canvas_height >= 86 && affine.canvas_height <= 88);
+  assert(affine.inlier_mask.size() == right_points.size());
+  assert(affine.inlier_mask.back() == 0);
+
   return 0;
 }

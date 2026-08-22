@@ -22,12 +22,19 @@ import tifffile
 import torch
 import yaml
 from hmlib.config import get_game_dir
-from hmlib.stitching.configure_stitching import get_enblend_bin
+from hmlib.stitching.configure_stitching import (
+    MAPPING_BACKENDS,
+    OPENCV_MAPPING_BACKENDS,
+    get_enblend_bin,
+)
 from hmlib.stitching.control_points import (
     CONTROL_POINT_MATCHERS,
     calculate_control_points as calculate_stitching_control_points,
 )
-from hmlib.stitching.homography_maps import create_opencv_magsac_mapping_files
+from hmlib.stitching.homography_maps import (
+    create_opencv_affine_ransac_mapping_files,
+    create_opencv_magsac_mapping_files,
+)
 
 # Constant marker used in PTO files to denote control points.
 _CONTROL_POINTS_LINE = "# control points"
@@ -515,17 +522,17 @@ def configure_stitching(
         max_output_dimension: Maximum generated panorama width/height. If set, the PTO is auto-scaled to fit.
         device: Torch device for computations.
         control_point_matcher: Learned matcher used for point correspondences.
-        mapping_backend: ``nona`` or ``opencv-magsac``.
+        mapping_backend: ``nona`` or a native OpenCV mapping backend.
 
     Returns:
         True if the process completes successfully.
     """
     mapping_backend = mapping_backend.strip().lower().replace("_", "-")
-    if mapping_backend not in ("nona", "opencv-magsac"):
+    if mapping_backend not in MAPPING_BACKENDS:
         raise ValueError(f"Unsupported mapping backend: {mapping_backend}")
-    if mapping_backend == "opencv-magsac" and scale not in (None, 1.0):
+    if mapping_backend in OPENCV_MAPPING_BACKENDS and scale not in (None, 1.0):
         raise ValueError(
-            "The opencv-magsac backend does not accept --scale; " "use --max-output-dimension"
+            f"The {mapping_backend} backend does not accept --scale; " "use --max-output-dimension"
         )
 
     # Define file names for saved images.
@@ -651,6 +658,13 @@ def configure_stitching(
                 dir_name,
                 max_output_dimension=max_output_dimension,
             )
+        elif mapping_backend == "opencv-affine-ransac":
+            mapping_files = create_opencv_affine_ransac_mapping_files(
+                [f1, f2],
+                control_points,
+                dir_name,
+                max_output_dimension=max_output_dimension,
+            )
         else:
             for attempt in range(3):
                 mapping_files = run_nona()
@@ -740,7 +754,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--mapping-backend",
-        choices=("nona", "opencv-magsac"),
+        choices=MAPPING_BACKENDS,
         default="nona",
         help="Backend used to generate mapping TIFFs",
     )

@@ -16,6 +16,15 @@ def _install_import_stubs() -> None:
     hmlib_stitching = types.ModuleType("hmlib.stitching")
     hmlib_stitching.__path__ = []
     hmlib_stitching_configure = types.ModuleType("hmlib.stitching.configure_stitching")
+    hmlib_stitching_configure.MAPPING_BACKENDS = (
+        "nona",
+        "opencv-magsac",
+        "opencv-affine-ransac",
+    )
+    hmlib_stitching_configure.OPENCV_MAPPING_BACKENDS = (
+        "opencv-magsac",
+        "opencv-affine-ransac",
+    )
     hmlib_stitching_configure.get_enblend_bin = lambda: "enblend"
     hmlib_stitching_control_points = types.ModuleType("hmlib.stitching.control_points")
     hmlib_stitching_control_points.CONTROL_POINT_MATCHERS = (
@@ -25,6 +34,9 @@ def _install_import_stubs() -> None:
     )
     hmlib_stitching_control_points.calculate_control_points = lambda *_args, **_kwargs: {}
     hmlib_stitching_homography_maps = types.ModuleType("hmlib.stitching.homography_maps")
+    hmlib_stitching_homography_maps.create_opencv_affine_ransac_mapping_files = (
+        lambda *_args, **_kwargs: []
+    )
     hmlib_stitching_homography_maps.create_opencv_magsac_mapping_files = (
         lambda *_args, **_kwargs: []
     )
@@ -99,6 +111,18 @@ class CreateControlPointsScaleTest(unittest.TestCase):
             self.assertEqual(
                 self.create_control_points._read_pto_canvas_size(str(pto_file)), (12092, 9267)
             )
+
+    def test_opencv_mapping_backends_reject_hugin_scale(self) -> None:
+        for backend in ("opencv-magsac", "opencv-affine-ransac"):
+            with self.subTest(backend=backend):
+                with self.assertRaisesRegex(ValueError, backend):
+                    self.create_control_points.configure_stitching(
+                        object(),
+                        object(),
+                        "/tmp/unused-stitch-test",
+                        scale=0.5,
+                        mapping_backend=backend,
+                    )
 
     def test_configure_stitching_scales_pto_before_nona_and_retries_final_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
