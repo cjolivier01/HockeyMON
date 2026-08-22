@@ -23,6 +23,21 @@ def should_normalize_control_point_matcher_aliases() -> None:
         control_points_module.normalize_control_point_matcher("unknown")
 
 
+def should_resize_dedode_inputs_to_3840_and_restore_original_coordinates() -> None:
+    image = torch.empty((3, 4320, 7680), device="meta")
+    resized, scale_x, scale_y = control_points_module._resize_for_matching(
+        image,
+        max_dimension=control_points_module._DEDODE_MAX_IMAGE_DIMENSION,
+    )
+
+    assert resized.shape == (3, 2160, 3840)
+    assert scale_x == pytest.approx(2.0)
+    assert scale_y == pytest.approx(2.0)
+    resized_point = torch.tensor([1234.5, 678.25])
+    original_point = resized_point * resized_point.new_tensor([scale_x, scale_y])
+    torch.testing.assert_close(original_point, torch.tensor([2469.0, 1356.5]))
+
+
 @pytest.mark.parametrize(
     ("matcher_name", "implementation_name"),
     [

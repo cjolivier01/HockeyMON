@@ -26,6 +26,7 @@ _MATCHER_ALIASES = {
     "lightglue": "superpoint-lightglue",
     "dedode": "dedode-lightglue",
 }
+_DEDODE_MAX_IMAGE_DIMENSION = 3840
 _LOFTR_MAX_IMAGE_DIMENSION = 1600
 
 
@@ -160,6 +161,14 @@ def _match_dedode_lightglue(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     import kornia.feature as kornia_feature
 
+    resized0, scale_x0, scale_y0 = _resize_for_matching(
+        image0,
+        max_dimension=_DEDODE_MAX_IMAGE_DIMENSION,
+    )
+    resized1, scale_x1, scale_y1 = _resize_for_matching(
+        image1,
+        max_dimension=_DEDODE_MAX_IMAGE_DIMENSION,
+    )
     amp_dtype = torch.float16 if device.type == "cuda" else torch.float32
     extractor = kornia_feature.DeDoDe.from_pretrained(
         detector_weights="L-C4-v2",
@@ -178,8 +187,8 @@ def _match_dedode_lightglue(
         .eval()
         .to(device)
     )
-    keypoints0, _, descriptors0 = extractor(image0.unsqueeze(0), n=max_num_keypoints)
-    keypoints1, _, descriptors1 = extractor(image1.unsqueeze(0), n=max_num_keypoints)
+    keypoints0, _, descriptors0 = extractor(resized0.unsqueeze(0), n=max_num_keypoints)
+    keypoints1, _, descriptors1 = extractor(resized1.unsqueeze(0), n=max_num_keypoints)
     lafs0 = kornia_feature.laf_from_center_scale_ori(keypoints0)
     lafs1 = kornia_feature.laf_from_center_scale_ori(keypoints1)
     _, matches = matcher(
@@ -187,17 +196,35 @@ def _match_dedode_lightglue(
         descriptors1[0],
         lafs0,
         lafs1,
-        hw1=tuple(image0.shape[-2:]),
-        hw2=tuple(image1.shape[-2:]),
+        hw1=tuple(resized0.shape[-2:]),
+        hw2=tuple(resized1.shape[-2:]),
     )
-    return keypoints0[0, matches[:, 0]], keypoints1[0, matches[:, 1]]
+    points0 = keypoints0[0, matches[:, 0]]
+    points1 = keypoints1[0, matches[:, 1]]
+    points0 = points0 * points0.new_tensor([scale_x0, scale_y0])
+    points1 = points1 * points1.new_tensor([scale_x1, scale_y1])
+    return points0, points1
 
 
-def _resize_for_loftr(image: torch.Tensor) -> Tuple[torch.Tensor, float, float]:
+def _resize_for_matching(
+    image: torch.Tensor,
+    max_dimension: int,
+    dimension_multiple: int = 1,
+) -> Tuple[torch.Tensor, float, float]:
+    if max_dimension <= 0:
+        raise ValueError("max_dimension must be positive")
+    if dimension_multiple <= 0:
+        raise ValueError("dimension_multiple must be positive")
     height, width = image.shape[-2:]
-    scale = min(1.0, _LOFTR_MAX_IMAGE_DIMENSION / float(max(height, width)))
-    resized_height = max(8, int(round(height * scale / 8.0)) * 8)
-    resized_width = max(8, int(round(width * scale / 8.0)) * 8)
+    scale = min(1.0, max_dimension / float(max(height, width)))
+    resized_height = max(
+        dimension_multiple,
+        int(round(height * scale / dimension_multiple)) * dimension_multiple,
+    )
+    resized_width = max(
+        dimension_multiple,
+        int(round(width * scale / dimension_multiple)) * dimension_multiple,
+    )
     if resized_height == height and resized_width == width:
         return image, 1.0, 1.0
     resized = F.interpolate(
@@ -207,6 +234,14 @@ def _resize_for_loftr(image: torch.Tensor) -> Tuple[torch.Tensor, float, float]:
         align_corners=False,
     )[0]
     return resized, width / float(resized_width), height / float(resized_height)
+
+
+def _resize_for_loftr(image: torch.Tensor) -> Tuple[torch.Tensor, float, float]:
+    return _resize_for_matching(
+        image,
+        max_dimension=_LOFTR_MAX_IMAGE_DIMENSION,
+        dimension_multiple=8,
+    )
 
 
 def _match_loftr(
