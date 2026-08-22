@@ -125,7 +125,7 @@ hmstitch --game-id ev-stockton-1 --control-point-matcher loftr
 - `--stitch-frame-time HH:MM:SS` — Choose reference frame for alignment; `--start-frame-time` to start processing at a time
 - `--stitch-rotate-degrees <float>` — Rotate the stitched output about its center by the given degrees; keeps same dimensions (use small values to level the horizon)
 - `--max-control-points N` — Control points for homography
-- `--control-point-matcher superpoint-lightglue|dedode-lightglue|loftr` — Feature matching backend (default: `superpoint-lightglue`); DeDoDe caps its longest input dimension at 3840 pixels and restores matches to source-image coordinates
+- `--control-point-matcher superpoint-lightglue|dedode-lightglue|loftr` — Feature matching backend (default: `superpoint-lightglue`); DeDoDe caps its longest input dimension at 1920 pixels and restores matches to source-image coordinates
 - `--mapping-backend nona|opencv-magsac` — Mapping TIFF generator (default: `nona`); the OpenCV option uses native `findHomography` with MAGSAC++ and writes the same RGB/alpha and X/Y map artifacts
 - `--blend-mode laplacian|multiblend|gpu-hard-seam` — Blending mode
 - `--batch-size`, `--stitch-cache-size`, `--multi-gpu` — Performance tuning

@@ -26,7 +26,7 @@ _MATCHER_ALIASES = {
     "lightglue": "superpoint-lightglue",
     "dedode": "dedode-lightglue",
 }
-_DEDODE_MAX_IMAGE_DIMENSION = 3840
+_DEDODE_MAX_IMAGE_DIMENSION = 1920
 _LOFTR_MAX_IMAGE_DIMENSION = 1600
 
 
@@ -449,7 +449,13 @@ def calculate_control_points(
             m_kpts1,
             output_directory,
         )
+    m_kpts0 = m_kpts0.detach().cpu()
+    m_kpts1 = m_kpts1.detach().cpu()
+    del image0_tensor
+    del image1_tensor
     gc.collect()
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     control_points = dict(m_kpts0=m_kpts0, m_kpts1=m_kpts1)
     return control_points
 
