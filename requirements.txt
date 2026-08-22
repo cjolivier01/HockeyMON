@@ -44,7 +44,7 @@ tifffile
 scikit-build
 bs4
 scikit-learn
-kornia
+kornia>=0.8.0
 pandas
 lmdb
 loguru

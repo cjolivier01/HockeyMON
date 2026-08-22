@@ -11,6 +11,7 @@ import tifffile
 import torch
 
 INVALID_MAP_COORDINATE = np.iinfo(np.uint16).max
+MAXIMUM_MAP_DIMENSION = int(INVALID_MAP_COORDINATE) - 1
 _TIFF_RESOLUTION = 150
 
 
@@ -164,6 +165,12 @@ def _create_opencv_mapping_files(
 ) -> list[str]:
     if len(image_files) != 2:
         raise ValueError("Exactly two input images are required")
+    if max_output_dimension is not None:
+        max_output_dimension = int(max_output_dimension)
+        if not 0 < max_output_dimension <= MAXIMUM_MAP_DIMENSION:
+            raise ValueError(
+                "max_output_dimension must be between 1 and " f"{MAXIMUM_MAP_DIMENSION}"
+            )
     points0 = control_points["m_kpts0"].detach().cpu().to(torch.float64).tolist()
     points1 = control_points["m_kpts1"].detach().cpu().to(torch.float64).tolist()
     if len(points0) != len(points1):

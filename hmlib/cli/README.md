@@ -132,6 +132,7 @@ hmstitch --game-id ev-stockton-1 \
 - `--max-control-points N` — Control points for homography
 - `--control-point-matcher superpoint-lightglue|dedode-lightglue|loftr` — Feature matching backend (default: `superpoint-lightglue`); DeDoDe caps its longest input dimension at 1920 pixels and restores matches to source-image coordinates
 - `--mapping-backend nona|opencv-magsac|opencv-affine-ransac` — Mapping TIFF generator (default: `nona`); the native OpenCV options use either `findHomography` with MAGSAC++ or `estimateAffine2D` with RANSAC and write the same RGB/alpha and X/Y map artifacts
+- `--max-output-dimension N` — Optionally scale a native OpenCV mapping canvas so neither dimension exceeds `N`
 - `--blend-mode laplacian|multiblend|gpu-hard-seam` — Blending mode
 - `--batch-size`, `--stitch-cache-size`, `--multi-gpu` — Performance tuning
 - `--show` / `--show-scaled` — Preview frames
@@ -158,6 +159,7 @@ hmcreate_control_points --left left.mp4 --right right.mp4 --synchronize-only
 - `--control-point-matcher superpoint-lightglue|dedode-lightglue|loftr` — Feature matching backend
 - `--mapping-backend nona|opencv-magsac|opencv-affine-ransac` — Mapping TIFF generator
 - `--scale <float>` — Downscale when optimizing/visualizing
+- `--max-output-dimension N` — Cap the generated panorama width and height
 
 ---
 

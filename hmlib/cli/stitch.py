@@ -658,6 +658,9 @@ def stitch_videos(
             stitch_cfg.get("control_point_matcher") or "superpoint-lightglue"
         )
         mapping_backend = str(stitch_cfg.get("mapping_backend") or "nona")
+        max_output_dimension = stitch_cfg.get("max_output_dimension")
+        if max_output_dimension is not None:
+            max_output_dimension = int(max_output_dimension)
         minimize_blend = bool(stitch_cfg.get("minimize_blend", minimize_blend))
         python_blender = bool(stitch_cfg.get("python_blender", python_blender))
         dtype = _resolve_stitch_tensor_dtype(dtype, stitch_cfg)
@@ -700,6 +703,7 @@ def stitch_videos(
             game_config=aspen_cfg_all,
             control_point_matcher=control_point_matcher,
             mapping_backend=mapping_backend,
+            max_output_dimension=max_output_dimension,
         )
 
         stitch_videos = {

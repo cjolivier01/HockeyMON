@@ -25,7 +25,24 @@ def _install_import_stubs() -> None:
         "opencv-magsac",
         "opencv-affine-ransac",
     )
+
+    def normalize_mapping_backend(value):
+        normalized = str(value).strip().lower().replace("_", "-")
+        if normalized not in hmlib_stitching_configure.MAPPING_BACKENDS:
+            raise ValueError(f"Unsupported mapping backend: {normalized}")
+        return normalized
+
+    def normalize_max_output_dimension(value):
+        if value is None:
+            return None
+        normalized = int(value)
+        if not 0 < normalized <= 65534:
+            raise ValueError("max_output_dimension must be between 1 and 65534")
+        return normalized
+
     hmlib_stitching_configure.get_enblend_bin = lambda: "enblend"
+    hmlib_stitching_configure.normalize_mapping_backend = normalize_mapping_backend
+    hmlib_stitching_configure.normalize_max_output_dimension = normalize_max_output_dimension
     hmlib_stitching_control_points = types.ModuleType("hmlib.stitching.control_points")
     hmlib_stitching_control_points.CONTROL_POINT_MATCHERS = (
         "superpoint-lightglue",
@@ -124,6 +141,17 @@ class CreateControlPointsScaleTest(unittest.TestCase):
                         mapping_backend=backend,
                     )
 
+    def test_configure_stitching_rejects_invalid_maximum_dimension(self) -> None:
+        for maximum_dimension in (-1, 0, 65535):
+            with self.subTest(maximum_dimension=maximum_dimension):
+                with self.assertRaisesRegex(ValueError, "max_output_dimension"):
+                    self.create_control_points.configure_stitching(
+                        object(),
+                        object(),
+                        "/tmp/unused-stitch-test",
+                        max_output_dimension=maximum_dimension,
+                    )
+
     def test_configure_stitching_scales_pto_before_nona_and_retries_final_mapping(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
@@ -204,6 +232,63 @@ class CreateControlPointsScaleTest(unittest.TestCase):
             )
             self.assertAlmostEqual(first_scale, 8192 / 12092)
             self.assertLess(retry_scale, first_scale)
+
+    def test_native_mapping_backend_does_not_run_autooptimiser(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            calls = []
+
+            def fake_run_stitching_command(cmd):
+                calls.append(list(cmd))
+                if cmd[0] == "pto_gen":
+                    Path(cmd[cmd.index("-o") + 1]).write_text("p f1 w100 h50\n", encoding="utf-8")
+                elif cmd[0] != "enblend":
+                    raise AssertionError(f"unexpected command: {cmd}")
+
+            def fake_native_mapping(*_args, **_kwargs):
+                outputs = [tmp_path / "mapping_0000.tif", tmp_path / "mapping_0001.tif"]
+                for output in outputs:
+                    output.write_text("mapping", encoding="utf-8")
+                return [str(output) for output in outputs]
+
+            with (
+                mock.patch.object(
+                    self.create_control_points.cv2, "imwrite", lambda *_args, **_kwargs: True
+                ),
+                mock.patch.object(
+                    self.create_control_points,
+                    "calculate_control_points",
+                    lambda *_args, **_kwargs: {},
+                ),
+                mock.patch.object(
+                    self.create_control_points, "update_pto_file", lambda *_args, **_kwargs: None
+                ),
+                mock.patch.object(self.create_control_points, "get_enblend_bin", lambda: "enblend"),
+                mock.patch.object(
+                    self.create_control_points, "_run_stitching_command", fake_run_stitching_command
+                ),
+                mock.patch.object(
+                    self.create_control_points,
+                    "create_opencv_affine_ransac_mapping_files",
+                    fake_native_mapping,
+                ),
+            ):
+                self.assertTrue(
+                    self.create_control_points.configure_stitching(
+                        object(),
+                        object(),
+                        str(tmp_path),
+                        force=True,
+                        mapping_backend="opencv-affine-ransac",
+                        max_output_dimension=2048,
+                    )
+                )
+
+            self.assertEqual([cmd[0] for cmd in calls], ["pto_gen", "enblend"])
+            self.assertEqual(
+                (tmp_path / "autooptimiser_out.pto").read_text(encoding="utf-8"),
+                (tmp_path / "hm_project.pto").read_text(encoding="utf-8"),
+            )
 
     def test_enblend_failure_removes_partial_seam(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

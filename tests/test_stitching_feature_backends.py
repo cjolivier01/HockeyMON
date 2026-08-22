@@ -23,6 +23,17 @@ def should_normalize_control_point_matcher_aliases() -> None:
         control_points_module.normalize_control_point_matcher("unknown")
 
 
+def should_normalize_mapping_backend_and_dimension() -> None:
+    assert configure_stitching.normalize_mapping_backend("OpenCV_Affine_RANSAC") == (
+        "opencv-affine-ransac"
+    )
+    assert configure_stitching.normalize_max_output_dimension("4096") == 4096
+    with pytest.raises(ValueError, match="Unsupported mapping backend"):
+        configure_stitching.normalize_mapping_backend("unknown")
+    with pytest.raises(ValueError, match="max_output_dimension"):
+        configure_stitching.normalize_max_output_dimension(65535)
+
+
 def should_resize_dedode_inputs_to_1920_and_restore_original_coordinates() -> None:
     image = torch.empty((3, 4320, 7680), device="meta")
     resized, scale_x, scale_y = control_points_module._resize_for_matching(
@@ -72,6 +83,17 @@ def should_route_control_point_matchers_without_duplicate_sampling(
     assert calls == [implementation_name]
     assert result["m_kpts0"].shape == (5, 2)
     assert torch.unique(result["m_kpts0"], dim=0).shape[0] == 5
+
+
+def should_reject_too_few_requested_control_points() -> None:
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    with pytest.raises(ValueError, match="at least four"):
+        control_points_module.calculate_control_points(
+            image,
+            image,
+            max_control_points=3,
+            device=torch.device("cpu"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -138,6 +160,17 @@ def should_write_complete_opencv_mapping_artifacts(
     assert tifffile.imread(mapping_files[0]).shape == (3, 4, 4)
 
 
+@pytest.mark.parametrize("maximum_dimension", [-1, 0, 65535])
+def should_reject_invalid_opencv_mapping_dimension(tmp_path: Path, maximum_dimension: int) -> None:
+    with pytest.raises(ValueError, match="max_output_dimension"):
+        homography_maps.create_opencv_magsac_mapping_files(
+            ["left.png", "right.png"],
+            {},
+            tmp_path,
+            max_output_dimension=maximum_dimension,
+        )
+
+
 @pytest.mark.parametrize(
     ("mapping_backend", "mapping_builder_name"),
     [
@@ -201,6 +234,7 @@ def should_use_native_mapping_backend_in_project_builder(
         skip_if_exists=False,
         control_point_matcher="loftr",
         mapping_backend=mapping_backend,
+        max_output_dimension=None,
     )
     assert captured == {"matcher": "loftr", "mapping_backend": mapping_backend}
     assert [command[0] for command in commands] == ["pto_gen", "enblend"]
@@ -217,6 +251,14 @@ def should_use_native_mapping_backend_in_project_builder(
         autooptimiser_file,
         control_point_matcher="superpoint-lightglue",
         mapping_backend="nona",
+        max_output_dimension=None,
+    )
+    assert not configure_stitching._stitch_project_is_complete(
+        project_file,
+        autooptimiser_file,
+        control_point_matcher="loftr",
+        mapping_backend=mapping_backend,
+        max_output_dimension=2048,
     )
 
 

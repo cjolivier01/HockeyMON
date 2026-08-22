@@ -26,6 +26,8 @@ from hmlib.stitching.configure_stitching import (
     MAPPING_BACKENDS,
     OPENCV_MAPPING_BACKENDS,
     get_enblend_bin,
+    normalize_mapping_backend,
+    normalize_max_output_dimension,
 )
 from hmlib.stitching.control_points import (
     CONTROL_POINT_MATCHERS,
@@ -527,13 +529,12 @@ def configure_stitching(
     Returns:
         True if the process completes successfully.
     """
-    mapping_backend = mapping_backend.strip().lower().replace("_", "-")
-    if mapping_backend not in MAPPING_BACKENDS:
-        raise ValueError(f"Unsupported mapping backend: {mapping_backend}")
+    mapping_backend = normalize_mapping_backend(mapping_backend)
     if mapping_backend in OPENCV_MAPPING_BACKENDS and scale not in (None, 1.0):
         raise ValueError(
             f"The {mapping_backend} backend does not accept --scale; " "use --max-output-dimension"
         )
+    max_output_dimension = normalize_max_output_dimension(max_output_dimension)
 
     # Define file names for saved images.
     left_image_file: str = "left.png"
@@ -613,23 +614,26 @@ def configure_stitching(
             _run_stitching_command(cmd)
 
         output_scale = float(scale) if scale else None
-        run_autooptimiser(output_scale)
-        if max_output_dimension and max_output_dimension > 0:
-            canvas_size = _read_pto_canvas_size(autooptimiser_out)
-            if canvas_size:
-                canvas_width, canvas_height = canvas_size
-                longest_dimension = max(canvas_width, canvas_height)
-                if longest_dimension > max_output_dimension:
-                    current_scale = output_scale if output_scale else 1.0
-                    output_scale = current_scale * (
-                        float(max_output_dimension) / float(longest_dimension)
-                    )
-                    print(
-                        "Scaling Hugin canvas from "
-                        f"{canvas_width}x{canvas_height} to fit max dimension "
-                        f"{max_output_dimension} (autooptimiser -x {output_scale:.6f})"
-                    )
-                    run_autooptimiser(output_scale)
+        if mapping_backend == "nona":
+            run_autooptimiser(output_scale)
+            if max_output_dimension and max_output_dimension > 0:
+                canvas_size = _read_pto_canvas_size(autooptimiser_out)
+                if canvas_size:
+                    canvas_width, canvas_height = canvas_size
+                    longest_dimension = max(canvas_width, canvas_height)
+                    if longest_dimension > max_output_dimension:
+                        current_scale = output_scale if output_scale else 1.0
+                        output_scale = current_scale * (
+                            float(max_output_dimension) / float(longest_dimension)
+                        )
+                        print(
+                            "Scaling Hugin canvas from "
+                            f"{canvas_width}x{canvas_height} to fit max dimension "
+                            f"{max_output_dimension} (autooptimiser -x {output_scale:.6f})"
+                        )
+                        run_autooptimiser(output_scale)
+        else:
+            shutil.copyfile(hm_project, autooptimiser_out)
 
         def run_nona() -> List[str]:
             cmd = [

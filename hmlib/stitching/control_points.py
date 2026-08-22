@@ -418,6 +418,9 @@ def calculate_control_points(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     matcher = normalize_control_point_matcher(matcher)
+    max_control_points = int(max_control_points)
+    if max_control_points < 4:
+        raise ValueError("max_control_points must be at least four")
     image0_tensor = _image_to_rgb_tensor(image0).to(device)
     image1_tensor = _image_to_rgb_tensor(image1).to(device)
 

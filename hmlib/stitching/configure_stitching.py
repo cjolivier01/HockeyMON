@@ -36,6 +36,7 @@ from hmlib.stitching.control_points import (
 )
 from hmlib.stitching.hugin import configure_control_points
 from hmlib.stitching.homography_maps import (
+    MAXIMUM_MAP_DIMENSION,
     create_opencv_affine_ransac_mapping_files,
     create_opencv_magsac_mapping_files,
 )
@@ -50,6 +51,25 @@ _STITCH_FRAME_TIME_ALT_PATH = ("stitching", "stitch-frame-time")
 OPENCV_MAPPING_BACKENDS = ("opencv-magsac", "opencv-affine-ransac")
 MAPPING_BACKENDS = ("nona", *OPENCV_MAPPING_BACKENDS)
 _STITCH_ARTIFACT_MANIFEST = ".stitching_artifacts.json"
+
+
+def normalize_mapping_backend(mapping_backend: str) -> str:
+    """Return a canonical mapping backend name or raise."""
+    normalized = str(mapping_backend).strip().lower().replace("_", "-")
+    if normalized not in MAPPING_BACKENDS:
+        choices = ", ".join(MAPPING_BACKENDS)
+        raise ValueError(f"Unsupported mapping backend {normalized!r}; choose one of: {choices}")
+    return normalized
+
+
+def normalize_max_output_dimension(max_output_dimension: Optional[int]) -> Optional[int]:
+    """Validate and normalize an optional native coordinate-map dimension cap."""
+    if max_output_dimension is None:
+        return None
+    normalized = int(max_output_dimension)
+    if not 0 < normalized <= MAXIMUM_MAP_DIMENSION:
+        raise ValueError(f"max_output_dimension must be between 1 and {MAXIMUM_MAP_DIMENSION}")
+    return normalized
 
 
 @contextmanager
@@ -155,6 +175,7 @@ def _stitch_project_is_complete(
     autooptimiser_path: Union[str, Path],
     control_point_matcher: Optional[str] = None,
     mapping_backend: Optional[str] = None,
+    max_output_dimension: Optional[int] = None,
 ) -> bool:
     """Return whether every artifact required to initialize stitching exists."""
     project_path = Path(project_file_path)
@@ -172,7 +193,7 @@ def _stitch_project_is_complete(
     )
     if not all(path.is_file() for path in required_paths):
         return False
-    if control_point_matcher is None and mapping_backend is None:
+    if control_point_matcher is None and mapping_backend is None and max_output_dimension is None:
         return True
 
     manifest = _read_stitch_artifact_manifest(game_dir)
@@ -181,6 +202,7 @@ def _stitch_project_is_complete(
     return manifest == {
         "control_point_matcher": control_point_matcher,
         "mapping_backend": mapping_backend,
+        "max_output_dimension": str(max_output_dimension or 0),
     }
 
 
@@ -611,17 +633,13 @@ def build_stitching_project(
     """
     pto_path = Path(project_file_path)
     control_point_matcher = normalize_control_point_matcher(control_point_matcher)
-    mapping_backend = str(mapping_backend).strip().lower().replace("_", "-")
-    if mapping_backend not in MAPPING_BACKENDS:
-        choices = ", ".join(MAPPING_BACKENDS)
-        raise ValueError(
-            f"Unsupported mapping backend {mapping_backend!r}; choose one of: {choices}"
-        )
+    mapping_backend = normalize_mapping_backend(mapping_backend)
     if mapping_backend in OPENCV_MAPPING_BACKENDS and scale not in (None, 1.0):
         raise ValueError(
             f"The {mapping_backend} backend does not accept Hugin's relative scale; "
             "use max_output_dimension instead"
         )
+    max_output_dimension = normalize_max_output_dimension(max_output_dimension)
     dir_name = pto_path.parent
     previous_manifest = _read_stitch_artifact_manifest(dir_name)
     previous_control_point_matcher = (
@@ -639,6 +657,7 @@ def build_stitching_project(
             autooptimiser_out,
             control_point_matcher=control_point_matcher,
             mapping_backend=mapping_backend,
+            max_output_dimension=max_output_dimension,
         )
         and not is_older_than(project_file_path, autooptimiser_out)
     ):
@@ -816,6 +835,7 @@ def build_stitching_project(
         manifest = {
             "control_point_matcher": control_point_matcher,
             "mapping_backend": mapping_backend,
+            "max_output_dimension": str(max_output_dimension or 0),
         }
         (Path(dir_name) / _STITCH_ARTIFACT_MANIFEST).write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -910,8 +930,12 @@ def configure_video_stitching(
     game_config: Optional[Dict[str, Any]] = None,
     control_point_matcher: str = "superpoint-lightglue",
     mapping_backend: str = "nona",
+    max_output_dimension: Optional[int] = None,
 ):
     """Configure stitching while serializing shared artifacts per game."""
+    control_point_matcher = normalize_control_point_matcher(control_point_matcher)
+    mapping_backend = normalize_mapping_backend(mapping_backend)
+    max_output_dimension = normalize_max_output_dimension(max_output_dimension)
     with _stitch_game_lock(dir_name):
         return _configure_video_stitching_locked(
             dir_name=dir_name,
@@ -930,6 +954,7 @@ def configure_video_stitching(
             game_config=game_config,
             control_point_matcher=control_point_matcher,
             mapping_backend=mapping_backend,
+            max_output_dimension=max_output_dimension,
         )
 
 
@@ -950,6 +975,7 @@ def _configure_video_stitching_locked(
     game_config: Optional[Dict[str, Any]] = None,
     control_point_matcher: str = "superpoint-lightglue",
     mapping_backend: str = "nona",
+    max_output_dimension: Optional[int] = None,
 ):
     """Configure a two-camera stitching project from game videos.
 
@@ -973,6 +999,7 @@ def _configure_video_stitching_locked(
     @param game_config: Optional in-memory game config to update with the effective stamp.
     @param control_point_matcher: Learned feature matcher backend.
     @param mapping_backend: Mapping generator backend.
+    @param max_output_dimension: Optional maximum native OpenCV mapping dimension.
     @return: Tuple ``(pto_project_file, left_frame_offset, right_frame_offset)``.
     """
     stitch_frame_time_changed = sync_stitch_frame_time_state(
@@ -1006,6 +1033,7 @@ def _configure_video_stitching_locked(
             autooptimiser_out,
             control_point_matcher=control_point_matcher,
             mapping_backend=mapping_backend,
+            max_output_dimension=max_output_dimension,
         )
         or (os.path.exists(pto_project_file) and is_older_than(pto_project_file, autooptimiser_out))
     ):
@@ -1025,6 +1053,7 @@ def _configure_video_stitching_locked(
             skip_if_exists=not force,
             control_point_matcher=control_point_matcher,
             mapping_backend=mapping_backend,
+            max_output_dimension=max_output_dimension,
         )
         if not project_built:
             raise RuntimeError("Failed to build stitching project")

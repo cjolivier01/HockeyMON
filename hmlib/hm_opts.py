@@ -1472,6 +1472,12 @@ class hm_opts(object):
             help="Backend used to create stitching mapping TIFFs",
         )
         parser.add_argument(
+            "--max-output-dimension",
+            type=int,
+            default=None,
+            help="Maximum native OpenCV mapping canvas width or height",
+        )
+        parser.add_argument(
             "--track-ids",
             type=str,
             default=None,
@@ -1752,6 +1758,7 @@ class hm_opts(object):
             ("blend_mode", "stitching.blend_mode"),
             ("control_point_matcher", "stitching.control_point_matcher"),
             ("mapping_backend", "stitching.mapping_backend"),
+            ("max_output_dimension", "stitching.max_output_dimension"),
             ("max_blend_levels", "stitching.max_blend_levels"),
             ("python_blender", "stitching.python_blender"),
             ("no_minimize_blend", "stitching.minimize_blend"),

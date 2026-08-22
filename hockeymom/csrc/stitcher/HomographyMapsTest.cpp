@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 int main() {
@@ -80,6 +82,80 @@ int main() {
   assert(affine.canvas_height >= 86 && affine.canvas_height <= 88);
   assert(affine.inlier_mask.size() == right_points.size());
   assert(affine.inlier_mask.back() == 0);
+
+  const std::vector<std::array<double, 2>> pole_right_points = {
+      {5.0, 5.0},
+      {20.0, 10.0},
+      {35.0, 30.0},
+      {50.0, 15.0},
+      {65.0, 45.0},
+      {75.0, 60.0},
+      {10.0, 70.0},
+      {45.0, 55.0},
+  };
+  std::vector<std::array<double, 2>> pole_left_points;
+  pole_left_points.reserve(pole_right_points.size());
+  for (const auto& point : pole_right_points) {
+    const double denominator = 1.0 - 0.011 * point[0];
+    pole_left_points.push_back(
+        {point[0] / denominator, point[1] / denominator});
+  }
+  bool rejected_projective_pole = false;
+  try {
+    static_cast<void>(hm::stitcher::create_homography_maps(
+        pole_left_points,
+        pole_right_points,
+        100,
+        80,
+        100,
+        80,
+        0.1,
+        0.999,
+        10000,
+        0));
+  } catch (const std::runtime_error& error) {
+    rejected_projective_pole =
+        std::string(error.what()).find("projective pole") != std::string::npos;
+  }
+  assert(rejected_projective_pole);
+
+  bool rejected_non_finite_confidence = false;
+  try {
+    static_cast<void>(hm::stitcher::create_affine_ransac_maps(
+        affine_left_points,
+        right_points,
+        100,
+        80,
+        100,
+        80,
+        0.1,
+        std::numeric_limits<double>::quiet_NaN(),
+        10000,
+        10,
+        0));
+  } catch (const std::invalid_argument&) {
+    rejected_non_finite_confidence = true;
+  }
+  assert(rejected_non_finite_confidence);
+
+  bool rejected_invalid_maximum_dimension = false;
+  try {
+    static_cast<void>(hm::stitcher::create_affine_ransac_maps(
+        affine_left_points,
+        right_points,
+        100,
+        80,
+        100,
+        80,
+        0.1,
+        0.999,
+        10000,
+        10,
+        -1));
+  } catch (const std::invalid_argument&) {
+    rejected_invalid_maximum_dimension = true;
+  }
+  assert(rejected_invalid_maximum_dimension);
 
   return 0;
 }

@@ -29,6 +29,14 @@ void validate_image_size(int width, int height, const char* label) {
   }
 }
 
+void validate_max_output_dimension(int max_output_dimension) {
+  if (max_output_dimension < 0 || max_output_dimension > kMaximumCoordinate) {
+    throw std::invalid_argument(
+        "Maximum output dimension must be zero or between 1 and " +
+        std::to_string(kMaximumCoordinate));
+  }
+}
+
 std::vector<cv::Point2d> to_cv_points(
     const std::vector<std::array<double, 2>>& points,
     const char* label) {
@@ -60,6 +68,35 @@ std::array<cv::Point2d, 4> transformed_corners(
       {static_cast<double>(width), static_cast<double>(height)},
       {0.0, static_cast<double>(height)},
   };
+  std::array<double, 4> denominators{};
+  double maximum_denominator = 0.0;
+  for (size_t index = 0; index < source.size(); ++index) {
+    const auto& point = source[index];
+    const double denominator = homography(2, 0) * point.x +
+        homography(2, 1) * point.y + homography(2, 2);
+    if (!std::isfinite(denominator)) {
+      throw std::runtime_error(
+          "Estimated transform produced a non-finite projective denominator");
+    }
+    denominators[index] = denominator;
+    maximum_denominator = std::max(maximum_denominator, std::abs(denominator));
+  }
+  const double denominator_tolerance = maximum_denominator * 1e-12;
+  bool has_positive_denominator = false;
+  bool has_negative_denominator = false;
+  for (const double denominator : denominators) {
+    if (std::abs(denominator) <= denominator_tolerance) {
+      throw std::runtime_error(
+          "Estimated transform has a projective pole on the image boundary");
+    }
+    has_positive_denominator |= denominator > 0.0;
+    has_negative_denominator |= denominator < 0.0;
+  }
+  if (has_positive_denominator && has_negative_denominator) {
+    throw std::runtime_error(
+        "Estimated transform has a projective pole within the image bounds");
+  }
+
   std::vector<cv::Point2d> destination;
   cv::perspectiveTransform(source, destination, cv::Mat(homography));
   if (destination.size() != 4) {
@@ -134,7 +171,17 @@ HomographyImageMap make_image_map(
   result.x_map.assign(pixel_count, kInvalidCoordinate);
   result.y_map.assign(pixel_count, kInvalidCoordinate);
 
-  const cv::Matx33d canvas_to_image = image_to_canvas.inv();
+  bool inverse_ok = false;
+  const cv::Matx33d canvas_to_image =
+      image_to_canvas.inv(cv::DECOMP_LU, &inverse_ok);
+  if (!inverse_ok ||
+      !std::all_of(
+          canvas_to_image.val, canvas_to_image.val + 9, [](double value) {
+            return std::isfinite(value);
+          })) {
+    throw std::runtime_error(
+        "Estimated transform produced a singular image mapping");
+  }
   cv::parallel_for_(cv::Range(0, result.height), [&](const cv::Range& range) {
     for (int row = range.start; row < range.end; ++row) {
       const double canvas_y = static_cast<double>(y0 + row);
@@ -147,6 +194,13 @@ HomographyImageMap make_image_map(
         }
         const double source_x = source_h[0] / source_h[2];
         const double source_y = source_h[1] / source_h[2];
+        if (!std::isfinite(source_x) || !std::isfinite(source_y) ||
+            source_x <= -0.5 ||
+            source_x >= static_cast<double>(source_width) - 0.5 ||
+            source_y <= -0.5 ||
+            source_y >= static_cast<double>(source_height) - 0.5) {
+          continue;
+        }
         const int rounded_x = static_cast<int>(std::llround(source_x));
         const int rounded_y = static_cast<int>(std::llround(source_y));
         if (rounded_x < 0 || rounded_x >= source_width || rounded_y < 0 ||
@@ -185,10 +239,10 @@ void validate_estimation_inputs(
         "At least " + std::to_string(minimum_points) +
         " control-point pairs are required for " + estimator_name);
   }
-  if (reprojection_threshold <= 0.0) {
+  if (!std::isfinite(reprojection_threshold) || reprojection_threshold <= 0.0) {
     throw std::invalid_argument("Reprojection threshold must be positive");
   }
-  if (confidence <= 0.0 || confidence >= 1.0) {
+  if (!std::isfinite(confidence) || confidence <= 0.0 || confidence >= 1.0) {
     throw std::invalid_argument(
         std::string(estimator_name) + " confidence must be between 0 and 1");
   }
@@ -231,7 +285,8 @@ HomographyMapResult build_map_result(
       transformed_corners(right_to_left, right_width, right_height));
   const double unscaled_width = unscaled_bounds.max_x - unscaled_bounds.min_x;
   const double unscaled_height = unscaled_bounds.max_y - unscaled_bounds.min_y;
-  if (unscaled_width <= 0.0 || unscaled_height <= 0.0) {
+  if (!std::isfinite(unscaled_width) || !std::isfinite(unscaled_height) ||
+      unscaled_width <= 0.0 || unscaled_height <= 0.0) {
     throw std::runtime_error(
         std::string("OpenCV ") + estimator_name +
         " produced invalid panorama bounds");
@@ -244,6 +299,22 @@ HomographyMapResult build_map_result(
         static_cast<double>(max_output_dimension) /
             std::max(unscaled_width, unscaled_height));
   }
+  const double canvas_width_value =
+      std::ceil(unscaled_width * output_scale - kIntegerBoundsTolerance);
+  const double canvas_height_value =
+      std::ceil(unscaled_height * output_scale - kIntegerBoundsTolerance);
+  if (!std::isfinite(canvas_width_value) ||
+      !std::isfinite(canvas_height_value) || canvas_width_value <= 0.0 ||
+      canvas_height_value <= 0.0 || canvas_width_value > kMaximumCoordinate ||
+      canvas_height_value > kMaximumCoordinate ||
+      canvas_width_value * canvas_height_value > kMaximumCanvasPixels) {
+    throw std::runtime_error(
+        std::string("OpenCV ") + estimator_name +
+        " panorama exceeds supported coordinate-map dimensions; set a smaller "
+        "maximum output dimension");
+  }
+  const int canvas_width = static_cast<int>(canvas_width_value);
+  const int canvas_height = static_cast<int>(canvas_height_value);
   const cv::Matx33d left_to_canvas(
       output_scale,
       0.0,
@@ -255,20 +326,6 @@ HomographyMapResult build_map_result(
       0.0,
       1.0);
   const cv::Matx33d right_to_canvas = left_to_canvas * right_to_left;
-  const int canvas_width = static_cast<int>(
-      std::ceil(unscaled_width * output_scale - kIntegerBoundsTolerance));
-  const int canvas_height = static_cast<int>(
-      std::ceil(unscaled_height * output_scale - kIntegerBoundsTolerance));
-  const int64_t canvas_pixels =
-      static_cast<int64_t>(canvas_width) * canvas_height;
-  if (canvas_width <= 0 || canvas_height <= 0 ||
-      canvas_width > kMaximumCoordinate || canvas_height > kMaximumCoordinate ||
-      canvas_pixels > kMaximumCanvasPixels) {
-    throw std::runtime_error(
-        std::string("OpenCV ") + estimator_name +
-        " panorama exceeds supported coordinate-map dimensions; set a smaller "
-        "maximum output dimension");
-  }
 
   result.canvas_width = canvas_width;
   result.canvas_height = canvas_height;
@@ -296,6 +353,7 @@ HomographyMapResult create_homography_maps(
     double confidence,
     int max_iterations,
     int max_output_dimension) {
+  validate_max_output_dimension(max_output_dimension);
   validate_estimation_inputs(
       left_points,
       right_points,
@@ -354,6 +412,7 @@ HomographyMapResult create_affine_ransac_maps(
     int max_iterations,
     int refine_iterations,
     int max_output_dimension) {
+  validate_max_output_dimension(max_output_dimension);
   validate_estimation_inputs(
       left_points,
       right_points,
