@@ -13,9 +13,9 @@ def _torch():
 
 def _core():
     try:
-        import hockeymom.core as core  # type: ignore
+        import hockeymon.core as core  # type: ignore
     except Exception:
-        print("SKIP: hockeymom.core not available", file=sys.stderr)
+        print("SKIP: hockeymon.core not available", file=sys.stderr)
         sys.exit(0)
     return core
 
@@ -363,7 +363,9 @@ def _run_resize_case(cfg: Dict, axis: str):
                 getattr(rstate, "canceled_stop_w", False)
                 or getattr(rstate, "canceled_stop_h", False)
             ):
-                assert bool(py_box._resize_cancel_stop_w_flash or py_box._resize_cancel_stop_h_flash)
+                assert bool(
+                    py_box._resize_cancel_stop_w_flash or py_box._resize_cancel_stop_h_flash
+                )
                 canceled_seen = True
     if cfg_full["resize_cancel"] and cfg_full["resize_stop_delay"] > 0:
         assert canceled_seen

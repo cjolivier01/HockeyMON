@@ -16,7 +16,7 @@ from hmlib.log import get_logger
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor
 from hmlib.video.ffmpeg import build_ffmpeg_output_handler, iter_ffmpeg_output_lines
 from hmlib.video.ffmpeg_mux_cmd import build_ffmpeg_raw_bitstream_mux_cmd
-from hockeymom import bgr_to_i420_cuda
+from hockeymon import bgr_to_i420_cuda
 
 try:
     import PyNvVideoCodec as nvc  # type: ignore[import-not-found]
@@ -76,7 +76,7 @@ class PyNvVideoEncoder:
     High-level GPU-only video encoder backed by PyNvVideoCodec.
 
     - Accepts BGR torch.Tensors on CUDA (single frame or batch).
-    - Uses jetson-utils (via hockeymom.bgr_to_i420_cuda) to convert
+    - Uses jetson-utils (via hockeymon.bgr_to_i420_cuda) to convert
       BGR -> planar YUV420 (I420) entirely on the GPU.
     - Feeds YUV420 frames to PyNvVideoCodec's NVENC bindings using CUDA
       memory through the DLPack interface (no CPU copies of raw frames).
@@ -815,7 +815,7 @@ class PyNvVideoEncoder:
         with self._bgr_contiguous_1:
             frame = frame.contiguous()
 
-        # Delegate BGR -> I420 conversion to jetson-utils via hockeymom binding.
+        # Delegate BGR -> I420 conversion to jetson-utils via hockeymon binding.
         with self._bgr_to_i420_cuda:
             yuv420 = bgr_to_i420_cuda(frame)
 

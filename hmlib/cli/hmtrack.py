@@ -46,7 +46,7 @@ ROOT_DIR = os.path.dirname(os.path.abspath(hmlib.__file__))
 
 def make_parser(parser: argparse.ArgumentParser = None):
     if parser is None:
-        parser = argparse.ArgumentParser("HockeyMOM Tracking")
+        parser = argparse.ArgumentParser("HockeyMON Tracking")
     parser = hm_opts.parser(parser)
     parser.add_argument(
         "--smoke-test",

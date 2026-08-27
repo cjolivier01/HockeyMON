@@ -1,4 +1,4 @@
-HockeyMOM
+HockeyMON
 
 ![Fast play tracking sample](docs/images/tv-12-1-r2_fast_play.gif)
 
@@ -15,7 +15,7 @@ For a fresh Ubuntu/Debian machine you should run, from the repo root:
 ./build_deps.sh
 ```
 
-- `env/install_deps.sh` installs the system libraries needed by the native C++ tools used by HockeyMOM:
+- `env/install_deps.sh` installs the system libraries needed by the native C++ tools used by HockeyMON:
   - Hugin CLI tools (`pto_gen`, `autooptimiser`, `nona`) for stitching.
   - Enblend/Enfuse and image/codec libraries (tiff, jpeg, png, OpenEXR, FFTW, wxWidgets, etc.).
   - These are required so the Bazel/CMake builds in `external/hugin` and `external/enblend-enfuse` succeed and the CLI binaries can run.
@@ -34,7 +34,7 @@ You can run the CLIs either from an installed wheel (preferred for end users) or
 
 ### From an installed wheel (recommended)
 
-After building wheels with `./bdist_wheel` and installing them into your environment (e.g. `pip install dist/hmlib-*.whl dist/hockeymom-*.whl`), the CLI entry points are available on your `PATH`:
+After building wheels with `./bdist_wheel` and installing them into your environment (e.g. `pip install dist/hmlib-*.whl dist/hockeymon-*.whl`), the CLI entry points are available on your `PATH`:
 
 ```bash
 # Full pipeline from a configured game directory (stitch + track)

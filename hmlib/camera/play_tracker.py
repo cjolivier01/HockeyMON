@@ -27,7 +27,7 @@ from hmlib.bbox.box_functions import (
     width,
 )
 from hmlib.builder import HM
-from hmlib.camera.camera import HockeyMOM
+from hmlib.camera.camera import HockeyMON
 from hmlib.camera.clusters import ClusterMan
 from hmlib.camera.moving_box import MovingBox
 from hmlib.config import (
@@ -44,9 +44,9 @@ from hmlib.tracking_utils.utils import get_track_mask
 from hmlib.utils.gpu import unwrap_tensor, wrap_tensor
 from hmlib.utils.image import make_channels_last
 from hmlib.utils.progress_bar import ProgressBar
-from hockeymom.core import AllLivingBoxConfig, BBox, HmLogLevel
-from hockeymom.core import PlayTracker as CppPlayTracker
-from hockeymom.core import PlayTrackerConfig
+from hockeymon.core import AllLivingBoxConfig, BBox, HmLogLevel
+from hockeymon.core import PlayTracker as CppPlayTracker
+from hockeymon.core import PlayTrackerConfig
 
 from .camera_transformer import (
     CameraNorm,
@@ -184,7 +184,7 @@ class BreakawayDetection:
 class PlayTracker(torch.nn.Module):
     def __init__(
         self,
-        hockey_mom: HockeyMOM,
+        hockey_mon: HockeyMON,
         play_box: torch.Tensor,
         device: torch.device,
         original_clip_box: Optional[torch.Tensor],
@@ -219,7 +219,7 @@ class PlayTracker(torch.nn.Module):
     ):
         """Track play and drive camera box based on detections and configs.
 
-        @param hockey_mom: `HockeyMOM` instance providing tracker and video state.
+        @param hockey_mon: `HockeyMON` instance providing tracker and video state.
         @param play_box: Box describing the allowed play region in TLBR coords.
         @param device: Torch device for computations.
         @param original_clip_box: Clip box applied to original image, if any.
@@ -283,11 +283,11 @@ class PlayTracker(torch.nn.Module):
         self._cpp_playtracker = cpp_playtracker
         self._playtracker: Union[PlayTracker, None] = None
         self._ui_dirty_paths: Set[Tuple[str, ...]] = set()
-        self._hockey_mom: HockeyMOM = hockey_mom
+        self._hockey_mon: HockeyMON = hockey_mon
         self._plot_cluster_tracking = plot_cluster_tracking or debug_play_tracker
         self._plot_speed = bool(plot_speed)
         # Amount to scale speed-related calculations based upon non-standard fps
-        self._play_box = clamp_box(play_box, hockey_mom._video_frame.bounding_box())
+        self._play_box = clamp_box(play_box, hockey_mon._video_frame.bounding_box())
         self._thread = None
         self._final_aspect_ratio = torch.tensor(16.0 / 9.0, dtype=torch.float)
         self._output_video = None
@@ -362,16 +362,16 @@ class PlayTracker(torch.nn.Module):
 
         camera_cfg = self._game_config.setdefault("rink", {}).setdefault("camera", {})
         self._camera_base_speed_x = float(
-            self._hockey_mom._camera_box_max_speed_x.detach().cpu().item()
+            self._hockey_mon._camera_box_max_speed_x.detach().cpu().item()
         )
         self._camera_base_speed_y = float(
-            self._hockey_mom._camera_box_max_speed_y.detach().cpu().item()
+            self._hockey_mon._camera_box_max_speed_y.detach().cpu().item()
         )
         self._camera_base_accel_x = float(
-            self._hockey_mom._camera_box_max_accel_x.detach().cpu().item()
+            self._hockey_mon._camera_box_max_accel_x.detach().cpu().item()
         )
         self._camera_base_accel_y = float(
-            self._hockey_mom._camera_box_max_accel_y.detach().cpu().item()
+            self._hockey_mon._camera_box_max_accel_y.detach().cpu().item()
         )
         camera_cfg.setdefault("max_speed_ratio_x", 1.0)
         camera_cfg.setdefault("max_speed_ratio_y", 1.0)
@@ -383,10 +383,10 @@ class PlayTracker(torch.nn.Module):
         self._max_accel_ratio_x = float(camera_cfg["max_accel_ratio_x"])
         self._max_accel_ratio_y = float(camera_cfg["max_accel_ratio_y"])
         follower_min_height_ratio = float(camera_cfg["follower_box_min_height_ratio"])
-        self._camera_speed_x = self._hockey_mom._camera_box_max_speed_x * self._max_speed_ratio_x
-        self._camera_speed_y = self._hockey_mom._camera_box_max_speed_y * self._max_speed_ratio_y
-        self._camera_accel_x = self._hockey_mom._camera_box_max_accel_x * self._max_accel_ratio_x
-        self._camera_accel_y = self._hockey_mom._camera_box_max_accel_y * self._max_accel_ratio_y
+        self._camera_speed_x = self._hockey_mon._camera_box_max_speed_x * self._max_speed_ratio_x
+        self._camera_speed_y = self._hockey_mon._camera_box_max_speed_y * self._max_speed_ratio_y
+        self._camera_accel_x = self._hockey_mon._camera_box_max_accel_x * self._max_accel_ratio_x
+        self._camera_accel_y = self._hockey_mon._camera_box_max_accel_y * self._max_accel_ratio_y
         self._validate_required_camera_config()
 
         # Tracking specific ids
@@ -408,12 +408,12 @@ class PlayTracker(torch.nn.Module):
         play_width = width(self._play_box)
         play_height = height(self._play_box)
 
-        assert play_width <= self._hockey_mom._video_frame.width
-        assert play_height <= self._hockey_mom._video_frame.height
+        assert play_width <= self._hockey_mon._video_frame.width
+        assert play_height <= self._hockey_mon._video_frame.height
 
         # speed_scale = 1.0
-        speed_scale = self._hockey_mom.speed_scale
-        fps_speed_scale = float(self._hockey_mom.fps_speed_scale)
+        speed_scale = self._hockey_mon.speed_scale
+        fps_speed_scale = float(self._hockey_mon.fps_speed_scale)
 
         start_box = self._play_box.clone()
 
@@ -956,7 +956,7 @@ class PlayTracker(torch.nn.Module):
                 num_clusters=cluster_count, ids=online_ids
             )
             if len(largest_cluster_ids):
-                largest_cluster_ids_box = self._hockey_mom.get_current_bounding_box(
+                largest_cluster_ids_box = self._hockey_mon.get_current_bounding_box(
                     largest_cluster_ids
                 )
                 boxes_map[cluster_count] = largest_cluster_ids_box
@@ -1140,7 +1140,7 @@ class PlayTracker(torch.nn.Module):
                 if debug or self._plot_moving_boxes:
                     # Play box
                     if (
-                        torch.sum(self._play_box == self._hockey_mom._video_frame.bounding_box())
+                        torch.sum(self._play_box == self._hockey_mon._video_frame.bounding_box())
                         != 4
                     ):
                         online_im = vis.draw_dashed_rectangle(
@@ -1213,7 +1213,7 @@ class PlayTracker(torch.nn.Module):
                     )
                     online_ids = online_ids[mask]
 
-                self._hockey_mom.append_online_objects(online_ids, online_tlwhs)
+                self._hockey_mon.append_online_objects(online_ids, online_tlwhs)
 
                 # Prefer external camera boxes provided by an upstream trunk
                 external_cam_boxes = results.get("camera_boxes", None)
@@ -1350,7 +1350,7 @@ class PlayTracker(torch.nn.Module):
             # Maybe draw trajectories...
             if self._plot_trajectories:
                 for tid in online_ids:
-                    hist = self._hockey_mom.get_history(tid)
+                    hist = self._hockey_mon.get_history(tid)
                     if hist is not None:
                         hist.draw(online_im)
 
@@ -1551,7 +1551,7 @@ class PlayTracker(torch.nn.Module):
                 vis.plot_frame_id_and_speeds(
                     online_im,
                     frame_id,
-                    *self._hockey_mom.get_velocity_and_acceleratrion_xy(),
+                    *self._hockey_mon.get_velocity_and_acceleratrion_xy(),
                 )
 
             frame_ids_list.append(frame_id)
@@ -2635,7 +2635,7 @@ class PlayTracker(torch.nn.Module):
         if frames_i <= 0:
             return frames_i
         try:
-            scale = float(self._hockey_mom.fps_speed_scale)
+            scale = float(self._hockey_mon.fps_speed_scale)
         except Exception:
             scale = 1.0
         if not scale or scale <= 0:
@@ -2652,7 +2652,7 @@ class PlayTracker(torch.nn.Module):
         if abs(v) <= 1e-12:
             return v
         try:
-            scale = float(self._hockey_mom.fps_speed_scale)
+            scale = float(self._hockey_mon.fps_speed_scale)
         except Exception:
             scale = 1.0
         if not scale or scale <= 0:
@@ -2928,7 +2928,7 @@ class PlayTracker(torch.nn.Module):
         #
         # BEGIN Breakway detection
         #
-        group_x_velocity, edge_center = self._hockey_mom.get_group_x_velocity(
+        group_x_velocity, edge_center = self._hockey_mon.get_group_x_velocity(
             min_considered_velocity=self._breakaway_detection.min_considered_group_velocity,
             group_threshhold=self._breakaway_detection.group_ratio_threshold,
         )

@@ -5,7 +5,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 print_help() {
   cat <<'EOF'
-DockerRun.sh: run HockeyMOM CUDA container commands
+DockerRun.sh: run HockeyMON CUDA container commands
 
 Usage:
   ./DockerRun.sh [global options] <command> [command args...]

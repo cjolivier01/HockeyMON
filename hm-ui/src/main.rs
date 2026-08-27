@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
 #[command(name = "hm-ui")]
-#[command(about = "HockeyMOM runtime operator UI")]
+#[command(about = "HockeyMON runtime operator UI")]
 struct Args {
     #[arg(long)]
     spec: PathBuf,

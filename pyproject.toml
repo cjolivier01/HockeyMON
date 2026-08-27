@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hmlib"
 version = "0.1.0"
-description = "HockeyMOM Python tools and pipeline helpers"
+description = "HockeyMON Python tools and pipeline helpers"
 requires-python = ">=3.10"
 
 [project.scripts]
@@ -24,8 +24,8 @@ hmscoreboard = "hmlib.scoreboard.selector:main"
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["hmlib*", "hockeymom*"]
-exclude = ["tests*", "openmm*", "hockeymom/src*"]
+include = ["hmlib*", "hockeymon*"]
+exclude = ["tests*", "openmm*", "hockeymon/src*"]
 
 [tool.setuptools.package-data]
 hmlib = [
@@ -34,9 +34,9 @@ hmlib = [
     "images/*.png",
     "config/**/*.yaml",
 ]
-hockeymom = [
+hockeymon = [
     "core.pyi",
-    "_hockeymom*.so",
+    "_hockeymon*.so",
 ]
 
 [tool.black]

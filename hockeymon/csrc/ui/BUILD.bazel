@@ -1,0 +1,28 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+INCLUDE_PREFIX = "hockeymon/csrc/ui"
+ROCM_COMPAT_COPTS = select({
+    "//bazel:torch_backend_rocm": ["-DJETSON_USE_HIP"],
+    "//conditions:default": [],
+})
+
+cc_library(
+    name = "hm_render_set",
+    srcs = glob(["*.cpp"]),
+    hdrs = glob(["*.h"]),
+    include_prefix = INCLUDE_PREFIX,
+    visibility = ["//visibility:public"],
+    defines = [
+        # Match the ABI used by the vendored PyTorch wheels.
+        "_GLIBCXX_USE_CXX11_ABI=1",
+    ],
+    copts = [
+        "-fopenmp",
+        "-fPIC",
+        "-Wno-error=comment",
+    ] + ROCM_COMPAT_COPTS,
+    deps=[
+      "@jetson-utils//cuda:cuda_compat_includes",
+      "@jetson-utils//display",
+    ]
+)

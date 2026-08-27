@@ -11,7 +11,7 @@ from mmengine.structures import InstanceData
 
 from hmlib.aspen.plugins.base import Plugin
 from hmlib.datasets.dataframe import HmDataFrameBase
-from hmlib.utils.hockeymom_compat import HmByteTrackConfig, HmTracker, HmTrackerPredictionMode
+from hmlib.utils.hockeymon_compat import HmByteTrackConfig, HmTracker, HmTrackerPredictionMode
 
 logger = logging.getLogger(__name__)
 

@@ -88,5 +88,5 @@ init_cfg:
   prefix: detector.
   # checkpoint: https://download.openmmlab.com/mmdetection/v2.0/yolox/yolox_s_8x8_300e_coco/yolox_s_8x8_300e_coco_20211121_095711-4592a793.pth
   # checkpoint: pretrained/mmdetection/yolox_s_8x8_300e_coco_80e_ch_with_detector_prefix.pth
-  checkpoint: https://github.com/cjolivier01/HockeyMOM/releases/download/v0.0.1/yolox_s_8x8_300e_coco_80e_ch_with_detector_prefix.pth
-  # checkpoint: https://github.com/cjolivier01/HockeyMOM/releases/download/v0.0.1/yolox_s_8x8_300e_coco_1312x480_80e_ch_2240x800_1e_with_detector_prefix.pth
+  checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/yolox_s_8x8_300e_coco_80e_ch_with_detector_prefix.pth
+  # checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/yolox_s_8x8_300e_coco_1312x480_80e_ch_2240x800_1e_with_detector_prefix.pth

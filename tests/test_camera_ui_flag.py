@@ -38,25 +38,25 @@ def _load_play_tracker(monkeypatch):
     class NativeStub:
         pass
 
-    hockeymom = ModuleType("hockeymom")
-    hockeymom.__path__ = []  # type: ignore[attr-defined]
-    hockeymom_core = ModuleType("hockeymom.core")
-    hockeymom_core.AllLivingBoxConfig = NativeStub
-    hockeymom_core.BBox = NativeStub
-    hockeymom_core.HmLogLevel = NativeStub
-    hockeymom_core.LivingBox = NativeStub
-    hockeymom_core.PlayTracker = NativeStub
-    hockeymom_core.PlayTrackerConfig = NativeStub
-    hockeymom_core.WHDims = NativeStub
-    hockeymom_core.compute_kmeans_clusters = lambda **_kwargs: ([], {})
+    hockeymon = ModuleType("hockeymon")
+    hockeymon.__path__ = []  # type: ignore[attr-defined]
+    hockeymon_core = ModuleType("hockeymon.core")
+    hockeymon_core.AllLivingBoxConfig = NativeStub
+    hockeymon_core.BBox = NativeStub
+    hockeymon_core.HmLogLevel = NativeStub
+    hockeymon_core.LivingBox = NativeStub
+    hockeymon_core.PlayTracker = NativeStub
+    hockeymon_core.PlayTrackerConfig = NativeStub
+    hockeymon_core.WHDims = NativeStub
+    hockeymon_core.compute_kmeans_clusters = lambda **_kwargs: ([], {})
 
     jersey = ModuleType("hmlib.jersey")
     jersey.__path__ = []  # type: ignore[attr-defined]
     jersey_tracker = ModuleType("hmlib.jersey.jersey_tracker")
     jersey_tracker.JerseyTracker = NativeStub
 
-    monkeypatch.setitem(sys.modules, "hockeymom", hockeymom)
-    monkeypatch.setitem(sys.modules, "hockeymom.core", hockeymom_core)
+    monkeypatch.setitem(sys.modules, "hockeymon", hockeymon)
+    monkeypatch.setitem(sys.modules, "hockeymon.core", hockeymon_core)
     monkeypatch.setitem(sys.modules, "hmlib.jersey", jersey)
     monkeypatch.setitem(sys.modules, "hmlib.jersey.jersey_tracker", jersey_tracker)
     sys.modules.pop("hmlib.camera.clusters", None)

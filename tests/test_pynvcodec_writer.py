@@ -19,19 +19,19 @@ def _ensure_repo_on_path() -> Path:
     return repo_root
 
 
-def _ensure_hockeymom_ext(repo_root: Path) -> None:
+def _ensure_hockeymon_ext(repo_root: Path) -> None:
     """
     When running tests via plain pytest (outside Bazel), prefer the Bazel-built
-    hockeymom extension if available so that new symbols are present.
+    hockeymon extension if available so that new symbols are present.
     """
-    ext_key = "hockeymom._hockeymom"
+    ext_key = "hockeymon._hockeymon"
     if ext_key in sys.modules and hasattr(sys.modules[ext_key], "bgr_to_i420_cuda"):
         return
 
-    candidate_paths = [repo_root / "bazel-bin" / "hockeymom" / "src" / "_hockeymom.so"]
+    candidate_paths = [repo_root / "bazel-bin" / "hockeymon" / "src" / "_hockeymon.so"]
     bazel_out = repo_root / "bazel-out"
     if bazel_out.is_dir():
-        candidate_paths.extend(sorted(bazel_out.glob("*/bin/hockeymom/src/_hockeymom.so")))
+        candidate_paths.extend(sorted(bazel_out.glob("*/bin/hockeymon/src/_hockeymon.so")))
 
     ext_path = None
     for path in candidate_paths:
@@ -62,7 +62,7 @@ def _require_torch_cuda():
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
-    _ensure_hockeymom_ext(_ensure_repo_on_path())
+    _ensure_hockeymon_ext(_ensure_repo_on_path())
     return torch
 
 

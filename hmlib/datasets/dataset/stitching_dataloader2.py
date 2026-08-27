@@ -26,7 +26,7 @@ from hmlib.tracking_utils.timer import Timer
 from hmlib.ui import show_image
 from hmlib.utils import MeanTracker
 from hmlib.utils.gpu import StreamTensorBase, cuda_stream_scope, unwrap_tensor, wrap_tensor
-from hmlib.utils.hockeymom_compat import CudaStitchPanoF32, CudaStitchPanoU8
+from hmlib.utils.hockeymon_compat import CudaStitchPanoF32, CudaStitchPanoU8
 from hmlib.utils.image import (
     image_height,
     image_width,

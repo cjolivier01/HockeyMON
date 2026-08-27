@@ -31,9 +31,9 @@ define run_develop_with_backend
 	fi; \
 	source ./.bazel_setup.sh; \
 	if [ "$${TORCH_BACKEND}" = "rocm" ] || [ "$${TORCH_BACKEND}" = "cuda" ] || command -v nvcc >/dev/null 2>&1 || [ -f /usr/local/cuda/include/cuda_runtime.h ]; then \
-		$(BAZEL) run --config=release //hockeymom:link_ext; \
+		$(BAZEL) run --config=release //hockeymon:link_ext; \
 	else \
-		echo "Skipping hockeymom native extension link: neither ROCm nor CUDA toolkit/backend detected"; \
+		echo "Skipping hockeymon native extension link: neither ROCm nor CUDA toolkit/backend detected"; \
 	fi; \
 	$(BAZEL) run --config=release //hmlib:develop -- --workspace=$(TOPDIR)
 endef
@@ -69,15 +69,15 @@ test-cuda:
 	$(call run_bazel_with_backend,cuda,test --config=release //...)
 
 wheel:
-	$(call run_bazel_with_backend,,run --config=release //hockeymom:bdist_wheel)
+	$(call run_bazel_with_backend,,run --config=release //hockeymon:bdist_wheel)
 	$(call run_bazel_with_backend,,run --config=release //hmlib:bdist_wheel)
 
 wheel-rocm:
-	$(call run_bazel_with_backend,rocm,run --config=release //hockeymom:bdist_wheel)
+	$(call run_bazel_with_backend,rocm,run --config=release //hockeymon:bdist_wheel)
 	$(call run_bazel_with_backend,rocm,run --config=release //hmlib:bdist_wheel)
 
 wheel-cuda:
-	$(call run_bazel_with_backend,cuda,run --config=release //hockeymom:bdist_wheel)
+	$(call run_bazel_with_backend,cuda,run --config=release //hockeymon:bdist_wheel)
 	$(call run_bazel_with_backend,cuda,run --config=release //hmlib:bdist_wheel)
 
 docs:
@@ -121,20 +121,20 @@ print_targets:
 		'' \
 		'Documentation' \
 		'--------------' \
-		'docs         Builds both hockeymom and hmlib Doxygen archives via //:all_doxygen_docs; run when you need refreshed API docs.' \
+		'docs         Builds both hockeymon and hmlib Doxygen archives via //:all_doxygen_docs; run when you need refreshed API docs.' \
 		'' \
 		'Developer Workflow' \
 		'------------------' \
-		'develop      Builds hm-ui, refreshes hockeymom extension symlinks when the detected backend is ROCm or CUDA, then installs hmlib for development.' \
+		'develop      Builds hm-ui, refreshes hockeymon extension symlinks when the detected backend is ROCm or CUDA, then installs hmlib for development.' \
 		'develop-rocm Same as develop, but forces the ROCm torch backend.' \
 		'develop-cuda Same as develop, but forces the CUDA torch backend.' \
 		'hmtrack-rust-ui  Build hm-ui, then run hmtrack with the Rust camera UI. Pass hmtrack args with ARGS="--game-id chicago-3 ...".' \
 		'test         Runs the release-configured Bazel test suite using the auto-detected torch backend.' \
 		'test-rocm    Runs the release-configured Bazel test suite while forcing the ROCm torch backend.' \
 		'test-cuda    Runs the release-configured Bazel test suite while forcing the CUDA torch backend.' \
-		'wheel        Builds release wheels for hockeymom and hmlib using the auto-detected torch backend.' \
-		'wheel-rocm   Builds release wheels for hockeymom and hmlib while forcing the ROCm torch backend.' \
-		'wheel-cuda   Builds release wheels for hockeymom and hmlib while forcing the CUDA torch backend.' \
+		'wheel        Builds release wheels for hockeymon and hmlib using the auto-detected torch backend.' \
+		'wheel-rocm   Builds release wheels for hockeymon and hmlib while forcing the ROCm torch backend.' \
+		'wheel-cuda   Builds release wheels for hockeymon and hmlib while forcing the CUDA torch backend.' \
 		'' \
 		'Maintenance & Cleanup' \
 		'---------------------' \

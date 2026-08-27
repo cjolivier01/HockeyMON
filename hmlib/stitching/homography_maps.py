@@ -25,10 +25,10 @@ def _native_create_homography_maps(
     max_output_dimension: int,
 ) -> Mapping[str, Any]:
     try:
-        from hockeymom.core import create_homography_maps
+        from hockeymon.core import create_homography_maps
     except (ImportError, AttributeError) as exc:
         raise RuntimeError(
-            "The opencv-magsac mapping backend requires a HockeyMOM extension "
+            "The opencv-magsac mapping backend requires a HockeyMON extension "
             "built with create_homography_maps support"
         ) from exc
 
@@ -56,10 +56,10 @@ def _native_create_affine_ransac_maps(
     max_output_dimension: int,
 ) -> Mapping[str, Any]:
     try:
-        from hockeymom.core import create_affine_ransac_maps
+        from hockeymon.core import create_affine_ransac_maps
     except (ImportError, AttributeError) as exc:
         raise RuntimeError(
-            "The opencv-affine-ransac mapping backend requires a HockeyMOM "
+            "The opencv-affine-ransac mapping backend requires a HockeyMON "
             "extension built with create_affine_ransac_maps support"
         ) from exc
 

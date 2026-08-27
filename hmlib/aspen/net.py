@@ -1039,7 +1039,7 @@ class AspenNet(torch.nn.Module):
         self._progress_state_enabled = True
         self._progress_last_sample_active = None
         try:
-            from hockeymom._hockeymom import AspenGraphSampler  # type: ignore
+            from hockeymon._hockeymon import AspenGraphSampler  # type: ignore
 
             sampler = AspenGraphSampler(max_samples=24, min_interval_ms=12, max_interval_ms=40)
             names = [node.name for node in self.exec_order]

@@ -12,7 +12,7 @@ import pytest
 import torch
 from torch.testing import assert_close
 
-from hmlib.camera.camera import HockeyMOM
+from hmlib.camera.camera import HockeyMON
 from hmlib.camera.play_tracker import PlayTracker
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -91,7 +91,7 @@ def _base_game_config() -> Dict:
 
 
 def _build_tracker(game_cfg: Dict, overrides: Dict, cpp_playtracker: bool) -> PlayTracker:
-    hockey_mom = HockeyMOM(
+    hockey_mon = HockeyMON(
         image_width=IMAGE_WIDTH,
         image_height=IMAGE_HEIGHT,
         fps=30.0,
@@ -102,7 +102,7 @@ def _build_tracker(game_cfg: Dict, overrides: Dict, cpp_playtracker: bool) -> Pl
         [0.0, 0.0, float(IMAGE_WIDTH), float(IMAGE_HEIGHT)], dtype=torch.float32
     )
     return PlayTracker(
-        hockey_mom=hockey_mom,
+        hockey_mon=hockey_mon,
         play_box=play_box,
         device=DEVICE,
         original_clip_box=None,

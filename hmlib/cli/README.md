@@ -1,4 +1,4 @@
-## HockeyMOM command-line tools (hm*)
+## HockeyMON command-line tools (hm*)
 
 This folder contains user-facing CLI commands that are installed with hm-prefixed names when you build/install the wheel. Each command targets a common workflow like stitching two camera angles, tracking players, clipping highlights, etc.
 

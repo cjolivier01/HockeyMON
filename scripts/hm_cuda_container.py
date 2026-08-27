@@ -289,7 +289,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="hm_cuda_container.py",
         description=(
-            "Build and run a CUDA Docker image with HockeyMOM fully installed (Bazel-built wheels). "
+            "Build and run a CUDA Docker image with HockeyMON fully installed (Bazel-built wheels). "
             "By default, only $HOME/Videos is mounted into the container."
         ),
         parents=[common],

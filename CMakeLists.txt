@@ -1,11 +1,11 @@
 #
-# HockeyMOM Top-Level CMake Configuration File
+# HockeyMON Top-Level CMake Configuration File
 #
 cmake_minimum_required(VERSION 3.8)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/external/hugin/CMakeModules")
 
-project(hockeymom)
+project(hockeymon)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
   set(BUILD_RELEASE_FLAGS "-g -O3")
@@ -188,8 +188,8 @@ endif(PYTHONLIBS_FOUND)
 # find_package(Protobuf REQUIRED)
 set(HAS_UNINSTALL_TARGET 1)
 
-set(HOCKEYMOM_TOP_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-set(HOCKEYMOM_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
+set(HOCKEYMON_TOP_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+set(HOCKEYMON_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
 add_subdirectory(external/pybind11)
 include_directories(SYSTEM external/pybind11/include)
@@ -226,4 +226,4 @@ set(BUILD_SHARED_LIBS OFF)
 # add_subdirectory(external/opencv-python/opencv)
 
 # add_subdirectory(external/hugin)
-add_subdirectory(hockeymom)
+add_subdirectory(hockeymon)

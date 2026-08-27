@@ -1,0 +1,32 @@
+# Doxyfile for hockeymon native & Python bindings (scoped to this submodule)
+PROJECT_NAME           = "hockeymon"
+PROJECT_NUMBER         = 0.1
+PROJECT_BRIEF          = "Panorama stitching, blending & tracking (C++/CUDA + pybind11)"
+OUTPUT_DIRECTORY       = doxygen_out
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h *.hpp *.c *.cc *.cpp *.cu *.cuh *.py
+# Limit to this package
+EXCLUDE                = ../external ../openmm ../hmlib
+EXCLUDE_PATTERNS       = */third_party/* */__pycache__/*
+GENERATE_HTML          = YES
+GENERATE_XML           = YES
+GENERATE_LATEX         = NO
+QUIET                  = YES
+JAVADOC_AUTOBRIEF      = YES
+MULTILINE_CPP_IS_BRIEF = YES
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+EXTRACT_ANON_NSPACES   = YES
+FULL_PATH_NAMES        = NO
+WARN_AS_ERROR          = NO
+WARN_IF_UNDOCUMENTED   = NO
+WARN_LOGFILE           = doxygen.warnings.log
+HAVE_DOT               = NO
+CALL_GRAPH             = NO
+CALLER_GRAPH           = NO
+# README discovery (local init file not used as main page)
+USE_MDFILE_AS_MAINPAGE = 
+MARKDOWN_SUPPORT       = YES
+SHOW_INCLUDE_FILES     = NO
+SEARCHENGINE           = NO

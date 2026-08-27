@@ -71,7 +71,7 @@ data_preprocessor:
   type: mmyolo.YOLOv5DetDataPreprocessor
 init_cfg:
   # checkpoint: https://download.openmmlab.com/mmyolo/v0/yolov8/yolov8_m_syncbn_fast_8xb16-500e_coco/yolov8_m_syncbn_fast_8xb16-500e_coco_20230115_192200-c22e560a.pth
-  checkpoint: https://github.com/cjolivier01/HockeyMOM/releases/download/v0.0.1/hm_crowdhuman_e85_yolov8_m_1984_736.pth
+  checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/hm_crowdhuman_e85_yolov8_m_1984_736.pth
   type: Pretrained
 neck:
   act_cfg:

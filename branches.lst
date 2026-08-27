@@ -1,7 +1,7 @@
 external/hm-cupano            colivier/hm
-external/fast_pytorch_kmeans  colivier/hockeymom
-external/hugin                colivier/hockeymom
+external/fast_pytorch_kmeans  colivier/hockeymon
+external/hugin                colivier/hockeymon
 external/jetson-utils         colivier/hm
 xmodels/LightGlue             colivier/hm
-xmodels/SVHNClassifier        colivier/hockeymom
+xmodels/SVHNClassifier        colivier/hockeymon
 openmm                        colivier/mmv2
