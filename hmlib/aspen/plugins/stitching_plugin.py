@@ -20,7 +20,7 @@ from hmlib.datasets.dataset.mot_video import MOTLoadVideoWithOrig
 from hmlib.log import logger
 from hmlib.stitching.blender2 import create_stitcher
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor, wrap_tensor
-from hmlib.utils.hockeymom_compat import (
+from hmlib.utils.hockeymon_compat import (
     CudaStitchPanoF32,
     CudaStitchPanoNF32,
     CudaStitchPanoNU8,

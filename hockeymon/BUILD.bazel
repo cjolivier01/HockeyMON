@@ -1,0 +1,84 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("@rules_python//python:packaging.bzl", "py_wheel")
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@py_soabi//:soabi.bzl", "SOABI", "PLATFORM", "ABI")  # Now this load will succeed
+
+config_setting(
+    name = "arm64",
+    constraint_values = ["@platforms//cpu:arm64"],
+)
+
+config_setting(
+    name = "aarch64",
+    constraint_values = ["@platforms//cpu:aarch64"],
+)
+
+selects.config_setting_group(
+    name = "arm64_or_aarch64",
+    match_any = [
+        ":arm64",
+        ":aarch64",
+    ],
+)
+
+genrule(
+  name = "hockeymon_ext",
+  srcs = ["//hockeymon/src:_hockeymon.so"],
+  outs = ["_hockeymon.%s.so" % SOABI],
+  cmd = "cp $(location //hockeymon/src:_hockeymon.so) $@",
+  visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "link_ext",
+    srcs = ["scripts/link_ext.py"],
+    data = [":hockeymon_ext"],
+    args = [SOABI],
+    tags = ["manual"],
+)
+
+py_wheel(
+    name = "hockeymon_wheel",
+    distribution = "hockeymon",
+    version = "0.1.0",
+    python_tag = ABI,
+    abi = ABI,
+    platform = PLATFORM,
+    tags = ["python-wheel", "manual"],
+    deps = [
+        ":hockeymon_ext",
+        ":hockeymon",
+        "@enblend-enfuse//:enblend"
+    ] + select({
+        ":arm64_or_aarch64": [],
+        "//conditions:default": ["@multiblend//:multiblend"],
+    }),
+)
+
+py_library(
+  name = "hockeymon",
+  data = [":hockeymon_ext"],
+  srcs = [
+    "__init__.py",
+    "core.py",
+  ],
+  imports = [".."],
+  visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "bdist_wheel",
+    srcs = ["scripts/bdist_wheel.py"],
+    data = [":hockeymon_wheel"],
+    tags = ["python-wheel", "manual"],
+)
+
+# Local Doxygen documentation for hockeymon C++/CUDA & pybind layer
+genrule(
+  name = "doxygen_docs",
+  srcs = ["Doxyfile"] + glob(["csrc/**/*.h", "csrc/**/*.hpp", "csrc/**/*.cpp", "src/**/*.h", "src/**/*.cpp", "*.py"]),
+  cmd = "if command -v doxygen >/dev/null 2>&1; then doxygen $(location Doxyfile) && tar -czf $@ -C doxygen_out html xml; else echo 'doxygen missing' > $@; fi",
+  outs = ["hockeymon_doxygen_docs.tar.gz"],
+  visibility = ["//visibility:public"],
+  tags = ["manual"],
+)

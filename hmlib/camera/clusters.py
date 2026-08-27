@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from fast_pytorch_kmeans import KMeans
 
-from hockeymom.core import compute_kmeans_clusters
+from hockeymon.core import compute_kmeans_clusters
 
 
 class ClusterSnapshot:

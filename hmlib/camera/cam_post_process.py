@@ -1,7 +1,7 @@
 """Camera post-processing utilities for arena estimation and video output.
 
 This module computes the play/arena box from rink profiles and input frames,
-configures `HockeyMOM` video geometry, and optionally drives `VideoOutput`
+configures `HockeyMON` video geometry, and optionally drives `VideoOutput`
 for camera debugging/training videos. Camera play tracking logic is handled
 by `PlayTrackerPlugin` and the underlying `PlayTracker` module.
 """

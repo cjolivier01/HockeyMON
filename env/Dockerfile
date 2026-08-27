@@ -304,7 +304,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Build + install native tools and wheels
 #
 ####################################################################
-# Build only the Hugin CLI tools used by HockeyMOM.
+# Build only the Hugin CLI tools used by HockeyMON.
 # The upstream CMake install rules assume a full build, so we build the
 # needed targets and manually install the resulting binaries + huginbase.
 RUN set -eux; \
@@ -330,12 +330,12 @@ RUN export HOME="/home/${USERNAME}" \
   && cd /opt/hm/src/hm \
   && rm -rf dist && mkdir -p dist \
   && export CUDA_BAZEL_ARCHS="sm_75;sm_80;sm_86;sm_89;sm_90;compute_120:compute_120,sm_120" \
-  && ./bazel/bazel.sh run //hockeymom:bdist_wheel \
+  && ./bazel/bazel.sh run //hockeymon:bdist_wheel \
   && ./bazel/bazel.sh run //hmlib:bdist_wheel
 
 USER root
 RUN cd /opt/hm/src/hm \
-  && pip install --no-cache-dir dist/hockeymom-*.whl dist/hmlib-*.whl
+  && pip install --no-cache-dir dist/hockeymon-*.whl dist/hmlib-*.whl
 
 ####################################################################
 #

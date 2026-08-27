@@ -657,9 +657,9 @@ class HmUiProcess:
         runfiles_dir = os.environ.get("RUNFILES_DIR")
         if runfiles_dir:
             for candidate in (
-                Path(runfiles_dir) / "hockeymom" / "hmlib" / "bin" / "hm-ui",
+                Path(runfiles_dir) / "hockeymon" / "hmlib" / "bin" / "hm-ui",
                 Path(runfiles_dir) / "hmlib" / "bin" / "hm-ui",
-                Path(runfiles_dir) / "hockeymom" / "hm-ui" / "hm-ui-bin",
+                Path(runfiles_dir) / "hockeymon" / "hm-ui" / "hm-ui-bin",
                 Path(runfiles_dir) / "hm-ui" / "hm-ui-bin",
             ):
                 if candidate.exists() and os.access(candidate, os.X_OK):

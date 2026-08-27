@@ -1,0 +1,72 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+INCLUDE_PREFIX = "hockeymon/csrc/bytetrack"
+
+cc_library(
+    name = "bytetrack",
+    srcs = [
+        "BYTETracker.cpp",
+        "BYTETrackerCuda.cpp",
+        "BYTETrackerCudaStatic.cpp",
+        "BaseTracker.cpp",
+        "HmTracker.cpp",
+        "STrack.cpp",
+        "Utils.cpp",
+    ],
+    hdrs = [
+        "BYTETracker.h",
+        "BYTETrackerCuda.h",
+        "BYTETrackerCudaStatic.h",
+        "BaseTracker.h",
+        "HmTracker.h",
+        "STrack.h",
+        "Utils.h",
+    ],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@libtorch",
+        "//hockeymon/csrc/pytorch:bytetrack_cuda_ops",
+        ":bytetrack_lib",
+    ],
+)
+
+cc_test(
+    name = "byte_tracker_cuda_test",
+    srcs = ["byte_tracker_cuda_test.cpp"],
+    linkopts = [
+        # Ubuntu 26.04's OpenMPI packages no longer ship libmpi_cxx.so.40.
+        # This test binary links against libtorch_cpu.so, which still declares
+        # that optional SONAME dependency.
+        "-Wl,--allow-shlib-undefined",
+    ],
+    deps = [
+        ":bytetrack",
+        "//hockeymon/csrc/pytorch:bytetrack_cuda_ops",
+        "@libtorch",
+    ],
+)
+
+cc_library(
+    name = "bytetrack_lib",
+    srcs = [
+        "BYTETrackerUtils.cpp",
+        "KalmanFilter.cpp",
+        "Lapjv.cpp",
+        "Tracker.cpp",
+    ],
+    hdrs = [
+        "KalmanFilter.h",
+        "Lapjv.h",
+        "Tracker.h",
+    ],
+    include_prefix = INCLUDE_PREFIX,
+    visibility = ["//visibility:public"],
+    defines = [
+        # Match the ABI used by the vendored PyTorch wheels.
+        "_GLIBCXX_USE_CXX11_ABI=1",
+    ],
+    deps = [
+        "@eigen",
+    ],
+)

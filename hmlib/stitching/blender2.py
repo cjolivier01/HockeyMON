@@ -27,7 +27,7 @@ from hmlib.stitching.synchronize import synchronize_by_audio
 from hmlib.tracking_utils.timer import Timer
 from hmlib.ui import show_image
 from hmlib.utils.gpu import GpuAllocator
-from hmlib.utils.hockeymom_compat import (
+from hmlib.utils.hockeymon_compat import (
     BlenderConfig,
     CudaStitchPanoF32,
     CudaStitchPanoNF32,

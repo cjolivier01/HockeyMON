@@ -158,7 +158,7 @@ _FP_TYPES: Set[torch.dtype] = {
 
 
 class VideoOutput(torch.nn.ModuleDict):
-    """Synchronous video writer for final HockeyMOM frames.
+    """Synchronous video writer for final HockeyMON frames.
 
     This module owns the lifecycle of one or more output video streams and
     encapsulates tensor-to-video conversion and IO. It does **not** perform

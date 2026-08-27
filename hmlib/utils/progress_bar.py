@@ -1,4 +1,4 @@
-"""Rich terminal progress bar and table utilities for HockeyMOM CLIs.
+"""Rich terminal progress bar and table utilities for HockeyMON CLIs.
 
 Provides a rich-based, stationary progress UI used by many command-line
 tools in :mod:`hmlib`.

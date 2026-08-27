@@ -37,7 +37,7 @@ from hmlib.utils.gpu import StreamTensorBase, cuda_stream_scope, unwrap_tensor, 
 from hmlib.utils.image import make_channels_last, make_visible_image
 
 try:
-    from hockeymom.core import show_cuda_tensor
+    from hockeymon.core import show_cuda_tensor
 except ImportError:  # pragma: no cover - optional native extension
     show_cuda_tensor = None
 

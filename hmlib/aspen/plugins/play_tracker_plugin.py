@@ -6,7 +6,7 @@ import torch
 
 from hmlib.bbox.box_functions import center, height, make_box_at_center, width
 from hmlib.builder import HM
-from hmlib.camera.camera import HockeyMOM
+from hmlib.camera.camera import HockeyMON
 from hmlib.camera.camera_controller_modes import normalize_play_tracker_camera_controller
 from hmlib.camera.play_tracker import PlayTracker as _PlayTracker
 from hmlib.config import get_nested_value
@@ -62,7 +62,7 @@ class PlayTrackerPlugin(Plugin):
         save_cluster_centroids: bool = False,
     ) -> None:
         super().__init__(enabled=enabled)
-        self._hockey_mom: Optional[HockeyMOM] = None
+        self._hockey_mon: Optional[HockeyMON] = None
         self._play_tracker: Optional[_PlayTracker] = None
         self._device: Optional[torch.device] = None
         self._final_aspect_ratio = torch.tensor(16.0 / 9.0, dtype=torch.float)
@@ -172,7 +172,7 @@ class PlayTrackerPlugin(Plugin):
         except Exception:
             pass
 
-        self._hockey_mom = HockeyMOM(
+        self._hockey_mon = HockeyMON(
             image_width=W,
             image_height=H,
             fps=fps,
@@ -218,7 +218,7 @@ class PlayTrackerPlugin(Plugin):
                     track_ids = None
 
         self._play_tracker = _PlayTracker(
-            hockey_mom=self._hockey_mom,
+            hockey_mon=self._hockey_mon,
             play_box=seed_box,
             device=self._device,
             original_clip_box=self._clip_box,

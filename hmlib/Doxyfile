@@ -2,14 +2,14 @@
 
 PROJECT_NAME           = "hmlib"
 PROJECT_NUMBER         = 0.1
-PROJECT_BRIEF          = "High-level HockeyMOM Python library (pipelines, CLI, utilities)"
+PROJECT_BRIEF          = "High-level HockeyMON Python library (pipelines, CLI, utilities)"
 
 OUTPUT_DIRECTORY       = doxygen_out
 RECURSIVE              = YES
 FILE_PATTERNS          = *.py
 
 # Limit to this package tree
-EXCLUDE                = ../external ../openmm ../hockeymom ../buildfiles ../bazel-* ../env ../output_workdirs
+EXCLUDE                = ../external ../openmm ../hockeymon ../buildfiles ../bazel-* ../env ../output_workdirs
 EXCLUDE_PATTERNS       = */__pycache__/* */tests/*
 
 GENERATE_HTML          = YES
@@ -37,4 +37,3 @@ USE_MDFILE_AS_MAINPAGE =
 MARKDOWN_SUPPORT       = YES
 SHOW_INCLUDE_FILES     = NO
 SEARCHENGINE           = NO
-

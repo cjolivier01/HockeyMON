@@ -2,7 +2,7 @@
 name = "hm-ui"
 version = "0.1.0"
 edition = "2021"
-description = "Rust operator control UI for HockeyMOM runtime camera tuning"
+description = "Rust operator control UI for HockeyMON runtime camera tuning"
 
 [dependencies]
 anyhow = "1.0"

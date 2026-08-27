@@ -6,7 +6,7 @@ from typing import Dict, Optional, Tuple
 import torch
 
 try:
-    from hockeymom.core import HmByteTrackConfig  # type: ignore
+    from hockeymon.core import HmByteTrackConfig  # type: ignore
 except Exception:  # pragma: no cover - optional fallback for non-native envs
     HmByteTrackConfig = None  # type: ignore[assignment, misc]
 

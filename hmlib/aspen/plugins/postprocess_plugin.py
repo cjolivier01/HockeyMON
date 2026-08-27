@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from hmlib.bbox.box_functions import center, clamp_box, height, make_box_at_center, width
-from hmlib.camera.camera import HockeyMOM
+from hmlib.camera.camera import HockeyMON
 from hmlib.config import get_nested_value
 from hmlib.utils.image import image_height, image_width
 from hmlib.utils.path import add_prefix_to_filename
@@ -16,7 +16,7 @@ from .base import Plugin
 
 class CamPostProcessPlugin(Plugin):
     """
-    Computes the camera arena/play box and initializes HockeyMOM geometry.
+    Computes the camera arena/play box and initializes HockeyMON geometry.
 
     Expects in context:
       - shared.initial_args: original CLI args dict (required)
@@ -54,7 +54,7 @@ class CamPostProcessPlugin(Plugin):
         self._counter: int = 0
 
         # Core post-processing state (initialized on first frame)
-        self._hockey_mom: Optional[HockeyMOM] = None
+        self._hockey_mon: Optional[HockeyMON] = None
         self._final_aspect_ratio = torch.tensor(16.0 / 9.0, dtype=torch.float)
         self._arena_box: Optional[torch.Tensor] = None
         self.final_frame_width: Optional[int] = None
@@ -100,7 +100,7 @@ class CamPostProcessPlugin(Plugin):
         self._counter = 0
 
         # Reset per-run state
-        self._hockey_mom = None
+        self._hockey_mon = None
         self._arena_box = None
         self.final_frame_width = None
         self.final_frame_height = None
@@ -235,7 +235,7 @@ class CamPostProcessPlugin(Plugin):
             )
 
     def is_initialized(self) -> bool:
-        return self._hockey_mom is not None
+        return self._hockey_mon is not None
 
     @staticmethod
     def calculate_play_box(
@@ -269,7 +269,7 @@ class CamPostProcessPlugin(Plugin):
         self._counter += 1
         if not self._postprocess:
             return results
-        if self._hockey_mom is None:
+        if self._hockey_mon is None:
             data_samples = results.get("data_samples")
             if data_samples is None or not hasattr(data_samples, "video_data_samples"):
                 return results
@@ -304,10 +304,10 @@ class CamPostProcessPlugin(Plugin):
         arena: List[int],
         device: torch.device,
     ) -> None:
-        assert self._hockey_mom is None
+        assert self._hockey_mon is None
 
-        # Initialize HockeyMOM video geometry and cache arena box
-        self._hockey_mom = HockeyMOM(
+        # Initialize HockeyMON video geometry and cache arena box
+        self._hockey_mon = HockeyMON(
             image_width=img_width,
             image_height=img_height,
             fps=self._fps,
@@ -315,18 +315,18 @@ class CamPostProcessPlugin(Plugin):
             camera_name=self._camera_name,
         )
         self._arena_box = (
-            self._hockey_mom.video.bounding_box()
+            self._hockey_mon.video.bounding_box()
             if not getattr(self._args, "crop_play_box", False)
             else torch.as_tensor(arena, dtype=torch.float, device=device)
         )
         self.secondary_init()
 
     def secondary_init(self) -> None:
-        assert self._hockey_mom is not None
+        assert self._hockey_mon is not None
         play_box: torch.Tensor = (
             self._arena_box
             if self._arena_box is not None
-            else self._hockey_mom.video.bounding_box()
+            else self._hockey_mon.video.bounding_box()
         )
         play_width, play_height = width(play_box), height(play_box)
 
@@ -343,15 +343,15 @@ class CamPostProcessPlugin(Plugin):
                 self.final_frame_width = play_width
         else:
             if getattr(self._args, "crop_output_image", True):
-                self.final_frame_height = self._hockey_mom.video.height
-                self.final_frame_width = self._hockey_mom.video.height * self._final_aspect_ratio
+                self.final_frame_height = self._hockey_mon.video.height
+                self.final_frame_width = self._hockey_mon.video.height * self._final_aspect_ratio
                 if self.final_frame_width > MAX_VIDEO_WIDTH:
                     self.final_frame_width = MAX_VIDEO_WIDTH
                     self.final_frame_height = self.final_frame_width / self._final_aspect_ratio
 
             else:
-                self.final_frame_height = self._hockey_mom.video.height
-                self.final_frame_width = self._hockey_mom.video.width
+                self.final_frame_height = self._hockey_mon.video.height
+                self.final_frame_width = self._hockey_mon.video.width
 
         self.final_frame_width = int(self.final_frame_width + 0.5)  # type: ignore[arg-type]
         self.final_frame_height = int(self.final_frame_height + 0.5)  # type: ignore[arg-type]
@@ -369,10 +369,10 @@ class CamPostProcessPlugin(Plugin):
         return None
 
     def get_arena_box(self) -> torch.Tensor:
-        assert self._hockey_mom is not None
+        assert self._hockey_mon is not None
         if self._arena_box is not None:
             return self._arena_box
-        return self._hockey_mom.video.bounding_box()
+        return self._hockey_mon.video.bounding_box()
 
     # ------------------------------------------------------------------
     # Aspen Plugin API

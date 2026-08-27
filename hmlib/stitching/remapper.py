@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import torch
 
-import hockeymom.core as core
+import hockeymon.core as core
 from hmlib.log import get_root_logger
 from hmlib.stitching.configure_stitching import get_image_geo_position
 from hmlib.stitching.image_remapper import ImageRemapper

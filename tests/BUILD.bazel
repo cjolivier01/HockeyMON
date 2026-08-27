@@ -114,7 +114,7 @@ sh_test(
         "HM_TEST_EXPECT_TORCH_BACKEND": "cuda",
     },
     data = [
-        "//hockeymom:hockeymom",
+        "//hockeymon:hockeymon",
         "//hmlib:hmlib.lib",
         "python_runtime.sh",
         "test_bytetrack_cuda.py",
@@ -132,7 +132,7 @@ sh_test(
         "HM_TEST_EXPECT_TORCH_BACKEND": "rocm",
     },
     data = [
-        "//hockeymom:hockeymom",
+        "//hockeymon:hockeymon",
         "//hmlib:hmlib.lib",
         "python_runtime.sh",
         "test_bytetrack_cuda.py",

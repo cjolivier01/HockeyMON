@@ -864,12 +864,12 @@ def draw_corner_boxes(image, bbox, thickness=2, color=(0, 255, 0)):
     return image
 
 
-# def plot_kmeans_intertias(hockey_mom: HockeyMOM):
+# def plot_kmeans_intertias(hockey_mon: HockeyMON):
 #     inertias = []
-#     object_count = len(hockey_mom.online_image_center_points)
+#     object_count = len(hockey_mon.online_image_center_points)
 #     for i in range(1, object_count):
 #         kmeans = KMeans(n_clusters=i, n_init="auto")
-#         kmeans.fit(hockey_mom.online_image_center_points)
+#         kmeans.fit(hockey_mon.online_image_center_points)
 #         inertias.append(kmeans.inertia_)
 
 #     plt.plot(range(1, object_count), inertias, marker="o")
@@ -879,9 +879,9 @@ def draw_corner_boxes(image, bbox, thickness=2, color=(0, 255, 0)):
 #     plt.show()
 
 
-# def plot_kmeans_scatter(hockey_mom: HockeyMOM, n_clusters: int = 3):
+# def plot_kmeans_scatter(hockey_mon: HockeyMON, n_clusters: int = 3):
 #     kmeans = KMeans(n_clusters=n_clusters)
-#     kmeans.fit(hockey_mom.online_image_center_points)
-#     for x, y in hockey_mom.online_image_center_points:
+#     kmeans.fit(hockey_mon.online_image_center_points)
+#     for x, y in hockey_mon.online_image_center_points:
 #         plt.scatter(x, y, c=kmeans.labels_)
 #     plt.show()

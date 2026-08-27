@@ -149,9 +149,9 @@ def should_unsharp_mask_camera(camera_name: str) -> bool:
     return False
 
 
-class HockeyMOM:
+class HockeyMON:
     """
-    The Observer (The Mom)
+    The Observer (The Mon)
     """
 
     # Frames per second that normal speeds are calculated for
@@ -174,7 +174,7 @@ class HockeyMOM:
         self._max_history = max_history
         self._online_ids: Set[int] = set()
         self._id_to_tlwhs_history_map = dict()
-        self._fps_speed_scale: float = fps / HockeyMOM.BASE_FPS
+        self._fps_speed_scale: float = fps / HockeyMON.BASE_FPS
         self._image_size_speed_scale: float = image_width / WIDTH_NORMALIZATION_SIZE
         self._speed_scale = self._fps_speed_scale / self._image_size_speed_scale
 

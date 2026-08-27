@@ -1,5 +1,5 @@
 workspace(
-    name="hockeymom",
+    name="hockeymon",
 )
 
 load("//tools/packaging/wheel:ubuntu_glibc_repository.bzl", "ubuntu_glibc_repository")
@@ -215,7 +215,7 @@ conda_repository(
 )
 
 
-################################ HockeyMOM Sub-Modules ################################
+################################ HockeyMON Sub-Modules ################################
 git_repository(
     name = "hm-cupano",
     commit = "723a6a46c55ff2e6be021b429b34a755428d7b93",

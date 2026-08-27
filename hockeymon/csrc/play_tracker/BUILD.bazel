@@ -1,0 +1,23 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+INCLUDE_PREFIX = "hockeymon/csrc/play_tracker"
+
+cc_library(
+    name = "play_tracker",
+    srcs = glob(["*.cpp"]),
+    hdrs = glob(["*.h"]),
+    include_prefix = INCLUDE_PREFIX,
+    visibility = ["//visibility:public"],
+    defines = [
+        # Match the ABI used by the vendored PyTorch wheels.
+        "_GLIBCXX_USE_CXX11_ABI=1",
+    ],
+    copts = [
+        "-fopenmp",
+        "-fPIC",
+        "-Wno-error=comment",
+    ],
+    deps=[
+      "//hockeymon/csrc/kmeans:kmeans",
+    ]
+)

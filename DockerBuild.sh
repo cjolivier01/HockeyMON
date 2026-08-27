@@ -3,7 +3,7 @@ set -euo pipefail
 
 print_help() {
   cat <<'EOF'
-DockerBuild.sh: build the HockeyMOM CUDA Docker image
+DockerBuild.sh: build the HockeyMON CUDA Docker image
 
 Usage:
   ./DockerBuild.sh [options...]

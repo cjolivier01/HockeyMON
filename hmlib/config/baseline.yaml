@@ -342,14 +342,14 @@ model:
 #  detection:
     # config: config/models/hm2/hm_crowdhuman_yolox_s_2240x800.py
     # checkpoint: /mnt/data/pretrained/mmdetection/yolox_s_8x8_300e_coco_1312x480_80e_ch_2240x800_1e_with_detector_prefix.pth
-    # checkpoint: https://github.com/cjolivier01/HockeyMOM/releases/download/v0.0.1/yolox_s_8x8_300e_coco_1312x480_80e_ch_2240x800_1e_with_detector_prefix.pth
+    # checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/yolox_s_8x8_300e_coco_1312x480_80e_ch_2240x800_1e_with_detector_prefix.pth
     
     # config: /mnt/monster-data/colivier/src/hm/openmm/rundir/work_dirs/yolov8_m_syncbn_fast_8xb16-500e_coco/hm_crowdhuman_yolov8_m_1984_736.py
     # checkpoint: https://download.openmmlab.com/mmyolo/v0/yolov8/yolov8_m_syncbn_fast_8xb16-500e_coco/yolov8_m_syncbn_fast_8xb16-500e_coco_20230115_192200-c22e560a.pth
   # pose:
   #   config: config/models/body_2d_keypoint/rtmpose/coco/rtmpose-l_8xb256-420e_aic-coco-384x288.py
   #   # checkpoint: https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/rtmpose-l_simcc-aic-coco_pt-aic-coco_420e-384x288-97d6cb0f_20230228.pth
-  #   checkpoint: https://github.com/cjolivier01/HockeyMOM/releases/download/v0.0.1/rtmpose-m_8xb64-crowdpose_harpe-256x192_best_PCK_epoch_1178.pth
+  #   checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/rtmpose-m_8xb64-crowdpose_harpe-256x192_best_PCK_epoch_1178.pth
     
 
     # RTMPOSE
@@ -365,7 +365,7 @@ model:
   # Pose models used by Aspen pose/action pipelines
   pose_harpet:
     config: config/models/body_2d_keypoint/rtmpose/harpet/rtmpose-m_8xb64-crowdpose_harpe-256x192.py
-    checkpoint: https://github.com/cjolivier01/HockeyMOM/releases/download/v0.0.1/rtmpose-m_8xb64-crowdpose_harpe-256x192_best_PCK_epoch_1178.pth
+    checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/rtmpose-m_8xb64-crowdpose_harpe-256x192_best_PCK_epoch_1178.pth
 
   pose_coco:
     config: config/models/body_2d_keypoint/rtmpose/coco/rtmpose-l_8xb256-420e_aic-coco-384x288.py
@@ -378,7 +378,7 @@ model:
   ice_rink_segm:
     config: config/models/ice_rink/mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco.py
     # checkpoint: pretrained/mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco/ice_rink_iter_30000.pth
-    checkpoint: https://github.com/cjolivier01/HockeyMOM/releases/download/v0.0.1/ice_rink_iter_30000.pth
+    checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/ice_rink_iter_30000.pth
 
   svnh_classifier:
     config: null

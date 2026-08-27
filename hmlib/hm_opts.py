@@ -265,7 +265,7 @@ def copy_opts(src: object, dest: object, parser: argparse.ArgumentParser):
 
 
 class hm_opts(object):
-    """Shared command-line options used by most HockeyMOM tools.
+    """Shared command-line options used by most HockeyMON tools.
 
     The :meth:`parser` static method populates an :class:`argparse.ArgumentParser`
     with all common flags (I/O, caching, profiling, Aspen, ONNX/TensorRT, UI, etc.),

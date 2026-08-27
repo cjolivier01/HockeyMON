@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 import torch
 
-from hmlib.camera.camera import HockeyMOM
+from hmlib.camera.camera import HockeyMON
 from hmlib.camera.play_tracker import PlayTracker
 
 
@@ -60,7 +60,7 @@ def _base_game_config() -> Dict[str, Any]:
 
 def should_store_camera_color_only_under_rink_level():
     cfg = _base_game_config()
-    hockey_mom = HockeyMOM(
+    hockey_mon = HockeyMON(
         image_width=1920,
         image_height=1080,
         fps=30.0,
@@ -69,7 +69,7 @@ def should_store_camera_color_only_under_rink_level():
     )
     play_box = torch.tensor([0.0, 0.0, 1920.0, 1080.0], dtype=torch.float32)
     tracker = PlayTracker(
-        hockey_mom=hockey_mom,
+        hockey_mon=hockey_mon,
         play_box=play_box,
         device=torch.device("cpu"),
         original_clip_box=None,
@@ -153,7 +153,7 @@ def should_clear_rink_geometry_when_stitch_rotation_changes(monkeypatch):
     )
 
     cfg = _base_game_config()
-    hockey_mom = HockeyMOM(
+    hockey_mon = HockeyMON(
         image_width=1920,
         image_height=1080,
         fps=30.0,
@@ -162,7 +162,7 @@ def should_clear_rink_geometry_when_stitch_rotation_changes(monkeypatch):
     )
     play_box = torch.tensor([0.0, 0.0, 1920.0, 1080.0], dtype=torch.float32)
     tracker = PlayTracker(
-        hockey_mom=hockey_mom,
+        hockey_mon=hockey_mon,
         play_box=play_box,
         device=torch.device("cpu"),
         original_clip_box=None,

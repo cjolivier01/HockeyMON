@@ -2,7 +2,7 @@
 
 ## Current wheel behavior
 
-`make wheel` builds the `hockeymom` and `hmlib` wheels, but the wheels are not
+`make wheel` builds the `hockeymon` and `hmlib` wheels, but the wheels are not
 self-contained for creating Hugin projects and remap files from raw camera
 inputs.
 
@@ -33,7 +33,7 @@ installed under `$CONDA_PREFIX/lib/hugin`; the installed executables use an
 installs the three executables and `libhuginbase` into `/usr/local` before it
 builds and installs the Python wheels.
 
-The generated `hockeymom` wheel also currently contains root-level
+The generated `hockeymon` wheel also currently contains root-level
 `multiblend` and `src/enblend` files because those Bazel targets are listed as
 wheel dependencies. The package-local Python resolver does not use those
 paths. The intentional runtime copies are the ones under `hmlib/bin`.
@@ -64,7 +64,7 @@ them.
   at every subprocess call site.
 - Determine the intended ARM behavior for `multiblend` and Hugin before
   advertising ARM wheels as self-contained.
-- Remove the duplicate/unusable blend-tool payload from the `hockeymom` wheel,
+- Remove the duplicate/unusable blend-tool payload from the `hockeymon` wheel,
   if it is not required by the native extension.
 - Add a clean-environment wheel test which installs only the produced wheels,
   removes repository and Conda tool paths from `PATH`, and exercises PTO
@@ -77,7 +77,7 @@ them.
 - `Makefile`: `wheel` and separate `deps` targets
 - `build_deps.sh`: Hugin installation into `$CONDA_PREFIX`
 - `hmlib/BUILD.bazel`: embedded blend tools and wheel data
-- `hockeymom/BUILD.bazel`: native wheel dependencies
+- `hockeymon/BUILD.bazel`: native wheel dependencies
 - `external/hugin/BUILD.bazel`: Hugin CLI build targets and install tree
 - `hmlib/stitching/configure_stitching.py`: binary resolution and subprocesses
 - `hmlib/cli/create_control_points.py`: Hugin subprocesses

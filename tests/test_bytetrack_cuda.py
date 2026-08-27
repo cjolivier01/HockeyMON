@@ -4,13 +4,13 @@ import unittest
 try:
     import torch
 except ImportError:
-    raise RuntimeError("torch is required for the HockeyMOM GPU runtime tests")
+    raise RuntimeError("torch is required for the HockeyMON GPU runtime tests")
 
 from hmlib.utils.torch_backend import torch_backend
 
 if not torch.cuda.is_available():
     raise RuntimeError(
-        "torch.cuda.is_available() is false; the HockeyMOM GPU runtime tests require a usable GPU backend"
+        "torch.cuda.is_available() is false; the HockeyMON GPU runtime tests require a usable GPU backend"
     )
 
 EXPECTED_BACKEND = os.environ.get("HM_TEST_EXPECT_TORCH_BACKEND")
@@ -28,7 +28,7 @@ try:
 except RuntimeError as exc:
     GPU_TRACKING_RUNTIME_ERROR = str(exc)
 
-from hockeymom.core import HmByteTrackConfig, HmByteTrackerCuda, HmByteTrackerCudaStatic, HmTracker
+from hockeymon.core import HmByteTrackConfig, HmByteTrackerCuda, HmByteTrackerCudaStatic, HmTracker
 
 
 def _make_data(device: torch.device, frame_id: int, boxes, labels, scores):

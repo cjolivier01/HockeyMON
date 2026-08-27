@@ -164,9 +164,9 @@ aspen:
       class: hmlib.aspen.plugins.tracker_plugin.TrackerPlugin
       depends: [ice_boundaries]
       params:
-        # tracker_class: hockeymom.core.HmByteTrackerCuda  # Uncomment to enable static-shape CUDA tracker
-        # tracker_class: hockeymom.core.HmByteTrackerCudaStatic  # Uncomment to enable static-shape CUDA tracker
-        # tracker_class: hockeymom.core.HmDcfTrackerCudaStatic  # NvDCF-style CUDA tracker (static shape + ReID)
+        # tracker_class: hockeymon.core.HmByteTrackerCuda  # Uncomment to enable static-shape CUDA tracker
+        # tracker_class: hockeymon.core.HmByteTrackerCudaStatic  # Uncomment to enable static-shape CUDA tracker
+        # tracker_class: hockeymon.core.HmDcfTrackerCudaStatic  # NvDCF-style CUDA tracker (static shape + ReID)
         # tracker_class: hmlib.tracking_utils.bytetrack.HmByteTrackerCudaStatic  # Static-shape CUDA tracker (Python)
         # tracker_kwargs:
         #   device: cuda:0

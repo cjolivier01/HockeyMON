@@ -1,4 +1,4 @@
-"""Configuration helpers and YAML-backed defaults for HockeyMOM.
+"""Configuration helpers and YAML-backed defaults for HockeyMON.
 
 This package intentionally re-exports the public API from `hmlib/config.py`.
 

@@ -1,0 +1,16 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+INCLUDE_PREFIX = "hockeymon/csrc/df"
+
+cc_library(
+    name = "df_tracker",
+    srcs = ["DfTrackerCudaStatic.cpp"],
+    hdrs = ["DfTrackerCudaStatic.h"],
+    includes = ["."],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@libtorch",
+        "//hockeymon/csrc/bytetrack:bytetrack",
+        "//hockeymon/csrc/pytorch:bytetrack_cuda_ops",
+    ],
+)

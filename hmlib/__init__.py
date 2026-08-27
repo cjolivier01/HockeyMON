@@ -1,7 +1,7 @@
-"""High-level HockeyMOM Python package.
+"""High-level HockeyMON Python package.
 
 This package exposes reusable pipelines, CLI helpers and utility code on top of
-the core :mod:`hockeymom` native extension.
+the core :mod:`hockeymon` native extension.
 
 @see @ref hmlib.hm_opts "hmlib.hm_opts" for shared CLI options.
 @see @ref hmlib.hm_transforms "hmlib.hm_transforms" for common data transforms.

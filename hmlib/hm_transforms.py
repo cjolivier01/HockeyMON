@@ -1,4 +1,4 @@
-"""Custom image and tensor transforms used in HockeyMOM pipelines.
+"""Custom image and tensor transforms used in HockeyMON pipelines.
 
 Extends MMDetection/MMPose-style transforms with GPU-aware resizing,
 stream-compatible interpolation and mixed tensor/NumPy handling.

@@ -1,6 +1,6 @@
 # hm-ui
 
-Rust operator UI for HockeyMOM runtime camera controls.
+Rust operator UI for HockeyMON runtime camera controls.
 
 `hm-ui` is a sidecar process. The Python tracker owns the video pipeline and writes a JSON control spec/state file; `hm-ui` renders the controls and writes value changes back.
 

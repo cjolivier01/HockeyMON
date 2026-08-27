@@ -1,7 +1,7 @@
 """Game- and camera-specific YAML configuration helpers.
 
 This module loads, merges and saves configuration files used throughout
-HockeyMOM pipelines (games, rinks, cameras and private overrides).
+HockeyMON pipelines (games, rinks, cameras and private overrides).
 
 @see @ref hmlib.hm_opts.hm_opts "hm_opts" for CLI flags that drive these configs.
 @see @ref hmlib.game_audio.transfer_audio "transfer_audio" for one consumer.

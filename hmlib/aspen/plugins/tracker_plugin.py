@@ -8,7 +8,7 @@ from mmengine.structures import InstanceData
 from hmlib.constants import WIDTH_NORMALIZATION_SIZE
 from hmlib.log import get_logger
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor, wrap_tensor
-from hmlib.utils.hockeymom_compat import HmByteTrackConfig, HmTrackerPredictionMode
+from hmlib.utils.hockeymon_compat import HmByteTrackConfig, HmTrackerPredictionMode
 
 from .base import Plugin
 
@@ -44,7 +44,7 @@ class TrackerPlugin(Plugin):
         self._cpp_tracker = bool(cpp_tracker)
         if tracker_class is None:
             default_class = (
-                "hockeymom.core.HmTracker"
+                "hockeymon.core.HmTracker"
                 if cpp_tracker
                 else "hmlib.tracking_utils.bytetrack.HmByteTrackerCuda"
             )

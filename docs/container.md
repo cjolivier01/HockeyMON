@@ -1,6 +1,6 @@
-# HockeyMOM CUDA Container (User Guide)
+# HockeyMON CUDA Container (User Guide)
 
-This repo provides a CUDA-enabled Docker image that includes HockeyMOM (native extension + Python wheels) and its CLI tools.
+This repo provides a CUDA-enabled Docker image that includes HockeyMON (native extension + Python wheels) and its CLI tools.
 
 ## Prerequisites (host)
 

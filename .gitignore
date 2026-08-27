@@ -17,7 +17,7 @@ debug_tensorboard
 /h-demo*
 /hm-ui/target/
 hockey_league.db
-hockeymom.egg-info
+hockeymon.egg-info
 .idea
 /keypoints.png
 /*.log
