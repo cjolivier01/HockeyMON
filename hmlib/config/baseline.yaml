@@ -117,6 +117,14 @@ stitching:
     biplane: [45, 0]
     triplane: [60]
     general-panini: [100, 0, 0]
+  # Framing applied after Hugin alignment when NONA is selected. A fixed
+  # 180-degree view with the full projection canvas retains the
+  # rounded dual-camera boundary; each AUTO choice can be enabled in the UI.
+  projection_framing:
+    auto_fov: false
+    horizontal_fov: 180
+    auto_canvas: true
+    auto_crop: false
   # Opt in to Hugin's automatic alignment pass during stitching calibration.
   run_autooptimizer: false
   max_output_dimension: null
