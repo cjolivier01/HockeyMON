@@ -453,7 +453,11 @@ void TranslatingBox::adjust_speed(
 
 void TranslatingBox::begin_stop_delay(
     std::optional<IntValue> delay_x, std::optional<IntValue> delay_y) {
-  if (delay_x.has_value() && *delay_x > 0) {
+  // A sustained overshoot can request braking on every frame. Keep the
+  // original linear deceleration deadline instead of restarting it into an
+  // asymptotic drift away from the target.
+  const bool braking_x = state_.stop_delay_x && *state_.stop_delay_x != 0;
+  if (delay_x.has_value() && *delay_x > 0 && !braking_x) {
     state_.stop_delay_x = *delay_x;
     state_.stop_delay_x_counter = 0;
     // Decelerate linearly to zero over N frames
@@ -461,7 +465,8 @@ void TranslatingBox::begin_stop_delay(
         static_cast<FloatValue>(*delay_x);
     state_.stop_trigger_dir_x = sign(state_.current_speed_x);
   }
-  if (delay_y.has_value() && *delay_y > 0) {
+  const bool braking_y = state_.stop_delay_y && *state_.stop_delay_y != 0;
+  if (delay_y.has_value() && *delay_y > 0 && !braking_y) {
     state_.stop_delay_y = *delay_y;
     state_.stop_delay_y_counter = 0;
     state_.stop_decel_y = -state_.current_speed_y /
@@ -475,12 +480,14 @@ void TranslatingBox::set_braking_params(
     bool cancel_on_opposite,
     IntValue cancel_hysteresis_frames,
     IntValue stop_delay_cooldown_frames,
-    IntValue post_nonstop_stop_delay_count) {
+    IntValue post_nonstop_stop_delay_count,
+    IntValue time_to_dest_speed_limit_frames) {
   config_.stop_translation_on_dir_change_delay = stop_on_dir_change_delay;
   config_.cancel_stop_on_opposite_dir = cancel_on_opposite;
   config_.cancel_stop_hysteresis_frames = cancel_hysteresis_frames;
   config_.stop_delay_cooldown_frames = stop_delay_cooldown_frames;
   config_.post_nonstop_stop_delay_count = post_nonstop_stop_delay_count;
+  config_.time_to_dest_speed_limit_frames = time_to_dest_speed_limit_frames;
 }
 
 void TranslatingBox::set_translation_constraints(
@@ -494,6 +501,13 @@ void TranslatingBox::set_translation_constraints(
   config_.max_accel_y = max_accel_y;
   // Clamp current speeds to new limits
   clamp_speed(1.0);
+}
+
+void TranslatingBox::set_camera_geometry(
+    FloatValue arena_angle_from_vertical,
+    FloatValue dynamic_acceleration_scaling) {
+  config_.arena_angle_from_vertical = arena_angle_from_vertical;
+  config_.dynamic_acceleration_scaling = dynamic_acceleration_scaling;
 }
 
 /**

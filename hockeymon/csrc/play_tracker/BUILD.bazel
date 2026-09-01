@@ -1,10 +1,13 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 INCLUDE_PREFIX = "hockeymon/csrc/play_tracker"
 
 cc_library(
     name = "play_tracker",
-    srcs = glob(["*.cpp"]),
+    srcs = glob(
+        ["*.cpp"],
+        exclude = ["*Test.cpp"],
+    ),
     hdrs = glob(["*.h"]),
     include_prefix = INCLUDE_PREFIX,
     visibility = ["//visibility:public"],
@@ -17,7 +20,13 @@ cc_library(
         "-fPIC",
         "-Wno-error=comment",
     ],
-    deps=[
-      "//hockeymon/csrc/kmeans:kmeans",
-    ]
+    deps = [
+        "//hockeymon/csrc/kmeans:kmeans",
+    ],
+)
+
+cc_test(
+    name = "resizing_box_test",
+    srcs = ["ResizingBoxTest.cpp"],
+    deps = [":play_tracker"],
 )

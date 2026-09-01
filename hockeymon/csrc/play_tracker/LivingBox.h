@@ -97,6 +97,28 @@ struct ILivingBox : virtual public IBasicLivingBox {
   // Begin a per-axis stop delay externally (e.g., overshoot cases)
   virtual void begin_stop_delay(
       std::optional<IntValue> delay_x, std::optional<IntValue> delay_y) = 0;
+
+  // Runtime tuning keeps the current box, velocity, and braking state intact.
+  virtual void set_braking(
+      IntValue stop_on_dir_change_delay,
+      bool cancel_on_opposite,
+      IntValue cancel_hysteresis_frames,
+      IntValue stop_delay_cooldown_frames,
+      IntValue post_nonstop_stop_delay_count,
+      IntValue time_to_dest_speed_limit_frames) = 0;
+
+  virtual void set_translation_constraints(
+      FloatValue max_speed_x,
+      FloatValue max_speed_y,
+      FloatValue max_accel_x,
+      FloatValue max_accel_y) = 0;
+
+  virtual void set_camera_geometry(
+      FloatValue arena_angle_from_vertical,
+      FloatValue dynamic_acceleration_scaling) = 0;
+
+  virtual void set_resizing_shrink_thresholds(
+      FloatValue width_ratio, FloatValue height_ratio) = 0;
 };
 
 /* clang-format off */

@@ -17,12 +17,14 @@ struct ResizingState {
   FloatValue stop_decel_w{0.0};
   FloatValue stop_trigger_dir_w{0.0};
   IntValue cancel_opp_w_count{0};
+  bool deadband_stop_w{false};
   IntValue cooldown_w_counter{0};
   std::optional<IntValue> stop_delay_h{0};
   IntValue stop_delay_h_counter{0};
   FloatValue stop_decel_h{0.0};
   FloatValue stop_trigger_dir_h{0.0};
   IntValue cancel_opp_h_count{0};
+  bool deadband_stop_h{false};
   IntValue cooldown_h_counter{0};
   bool canceled_stop_w{false};
   bool canceled_stop_h{false};
@@ -40,6 +42,8 @@ class ResizingBox : virtual public IBasicLivingBox {
   const ResizingConfig& get_config() const;
 
   GrowShrink get_grow_shrink_wh(const BBox& bbox) const;
+  void set_shrink_thresholds(
+      FloatValue width_ratio, FloatValue height_ratio);
 
  protected:
   SizeDiff get_proposed_next_size_change() const;
@@ -64,7 +68,15 @@ class ResizingBox : virtual public IBasicLivingBox {
 
   void clamp_resizing();
 
-  const ResizingConfig config_;
+  void begin_width_deadband_stop();
+
+  void begin_height_deadband_stop();
+
+  void clear_width_stop(bool start_cooldown);
+
+  void clear_height_stop(bool start_cooldown);
+
+  ResizingConfig config_;
   ResizingState state_;
 };
 

@@ -64,7 +64,8 @@ class TranslatingBox : virtual public IBasicLivingBox {
       bool cancel_on_opposite,
       IntValue cancel_hysteresis_frames,
       IntValue stop_delay_cooldown_frames,
-      IntValue post_nonstop_stop_delay_count);
+      IntValue post_nonstop_stop_delay_count,
+      IntValue time_to_dest_speed_limit_frames);
 
   // Update translation constraints (max speeds/accels) at runtime
   void set_translation_constraints(
@@ -72,6 +73,10 @@ class TranslatingBox : virtual public IBasicLivingBox {
       FloatValue max_speed_y,
       FloatValue max_accel_x,
       FloatValue max_accel_y);
+
+  void set_camera_geometry(
+      FloatValue arena_angle_from_vertical,
+      FloatValue dynamic_acceleration_scaling);
 
   /**
    * Scale the current speed by the given ratio

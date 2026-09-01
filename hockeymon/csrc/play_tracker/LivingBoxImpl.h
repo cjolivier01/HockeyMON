@@ -96,22 +96,36 @@ class LivingBox : public ILivingBox,
       bool cancel_on_opposite,
       IntValue cancel_hysteresis_frames,
       IntValue stop_delay_cooldown_frames,
-      IntValue post_nonstop_stop_delay_count) {
+      IntValue post_nonstop_stop_delay_count,
+      IntValue time_to_dest_speed_limit_frames) override {
     TranslatingBox::set_braking_params(
         stop_on_dir_change_delay,
         cancel_on_opposite,
         cancel_hysteresis_frames,
         stop_delay_cooldown_frames,
-        post_nonstop_stop_delay_count);
+        post_nonstop_stop_delay_count,
+        time_to_dest_speed_limit_frames);
   }
 
   void set_translation_constraints(
       FloatValue max_speed_x,
       FloatValue max_speed_y,
       FloatValue max_accel_x,
-      FloatValue max_accel_y) {
+      FloatValue max_accel_y) override {
     TranslatingBox::set_translation_constraints(
         max_speed_x, max_speed_y, max_accel_x, max_accel_y);
+  }
+
+  void set_camera_geometry(
+      FloatValue arena_angle_from_vertical,
+      FloatValue dynamic_acceleration_scaling) override {
+    TranslatingBox::set_camera_geometry(
+        arena_angle_from_vertical, dynamic_acceleration_scaling);
+  }
+
+  void set_resizing_shrink_thresholds(
+      FloatValue width_ratio, FloatValue height_ratio) override {
+    ResizingBox::set_shrink_thresholds(width_ratio, height_ratio);
   }
 
  protected:
