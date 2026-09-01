@@ -27,9 +27,68 @@ void ResizingBox::set_destination(const BBox& dest_box) {
 const ResizingConfig& ResizingBox::get_config() const {
   return config_;
 }
+void ResizingBox::set_shrink_thresholds(
+    FloatValue width_ratio, FloatValue height_ratio) {
+  config_.size_ratio_thresh_shrink_dw = width_ratio;
+  config_.size_ratio_thresh_shrink_dh = height_ratio;
+}
 
 const ResizingState& ResizingBox::get_state() const {
   return state_;
+}
+
+void ResizingBox::clear_width_stop(bool start_cooldown) {
+  state_.stop_delay_w = zero_int();
+  state_.stop_delay_w_counter = zero_int();
+  state_.stop_decel_w = 0.0f;
+  state_.stop_trigger_dir_w = 0.0f;
+  state_.cancel_opp_w_count = zero_int();
+  state_.cooldown_w_counter =
+      start_cooldown ? config_.resizing_stop_delay_cooldown_frames : zero_int();
+  state_.deadband_stop_w = false;
+}
+
+void ResizingBox::clear_height_stop(bool start_cooldown) {
+  state_.stop_delay_h = zero_int();
+  state_.stop_delay_h_counter = zero_int();
+  state_.stop_decel_h = 0.0f;
+  state_.stop_trigger_dir_h = 0.0f;
+  state_.cancel_opp_h_count = zero_int();
+  state_.cooldown_h_counter =
+      start_cooldown ? config_.resizing_stop_delay_cooldown_frames : zero_int();
+  state_.deadband_stop_h = false;
+}
+
+void ResizingBox::begin_width_deadband_stop() {
+  if (isZero(state_.current_speed_w)) {
+    state_.current_speed_w = 0.0f;
+    return;
+  }
+  clear_width_stop(/*start_cooldown=*/false);
+  if (config_.resizing_stop_on_dir_change_delay <= 0) {
+    state_.current_speed_w = 0.0f;
+    return;
+  }
+  state_.stop_delay_w = config_.resizing_stop_on_dir_change_delay;
+  state_.stop_decel_w = -state_.current_speed_w /
+      static_cast<FloatValue>(config_.resizing_stop_on_dir_change_delay);
+  state_.deadband_stop_w = true;
+}
+
+void ResizingBox::begin_height_deadband_stop() {
+  if (isZero(state_.current_speed_h)) {
+    state_.current_speed_h = 0.0f;
+    return;
+  }
+  clear_height_stop(/*start_cooldown=*/false);
+  if (config_.resizing_stop_on_dir_change_delay <= 0) {
+    state_.current_speed_h = 0.0f;
+    return;
+  }
+  state_.stop_delay_h = config_.resizing_stop_on_dir_change_delay;
+  state_.stop_decel_h = -state_.current_speed_h /
+      static_cast<FloatValue>(config_.resizing_stop_on_dir_change_delay);
+  state_.deadband_stop_h = true;
 }
 
 SizeDiff ResizingBox::get_proposed_next_size_change() const {
@@ -77,6 +136,8 @@ void ResizingBox::set_destination_size(
 
   auto dw = dest_width - current_w;
   auto dh = dest_height - current_h;
+  bool width_in_deadband = false;
+  bool height_in_deadband = false;
 
   if (config_.sticky_sizing) {
     //
@@ -88,16 +149,22 @@ void ResizingBox::set_destination_size(
     bool dw_thresh = dw < 0 && dw < -resize_rates.shrink_width;
     const bool want_bigger_w = dw > 0 && dw > resize_rates.grow_width;
     dw_thresh |= want_bigger_w;
-    if (!dw_thresh) {
+    if (dw_thresh) {
+      dw += want_bigger_w ? -resize_rates.grow_width : resize_rates.shrink_width;
+    } else {
       dw = 0.0f;
+      width_in_deadband = true;
     }
 
     // dh
     bool dh_thresh = dh < 0 && dh < -resize_rates.shrink_height;
     const bool want_bigger_h = dh > 0 && dh > resize_rates.grow_height;
     dh_thresh |= want_bigger_h;
-    if (!dh_thresh) {
+    if (dh_thresh) {
+      dh += want_bigger_h ? -resize_rates.grow_height : resize_rates.shrink_height;
+    } else {
       dh = 0.0f;
+      height_in_deadband = true;
     }
 
     bool freeze_size = !dw_thresh && !dh_thresh;
@@ -123,11 +190,35 @@ void ResizingBox::set_destination_size(
     //
   }
 
+  if (state_.size_is_frozen) {
+    // A frozen box does not apply its latent velocity. Drop it along with any
+    // braking state so it cannot reappear when another axis unfreezes sizing.
+    state_.current_speed_w = 0.0f;
+    state_.current_speed_h = 0.0f;
+    clear_width_stop(/*start_cooldown=*/false);
+    clear_height_stop(/*start_cooldown=*/false);
+  } else if (config_.sticky_sizing) {
+    if (width_in_deadband) {
+      if (!state_.deadband_stop_w && !isZero(state_.current_speed_w))
+        begin_width_deadband_stop();
+    } else if (state_.deadband_stop_w) {
+      // A moving target should resume immediately instead of waiting for a
+      // no-longer-relevant deadband stop to expire.
+      clear_width_stop(/*start_cooldown=*/false);
+    }
+    if (height_in_deadband) {
+      if (!state_.deadband_stop_h && !isZero(state_.current_speed_h))
+        begin_height_deadband_stop();
+    } else if (state_.deadband_stop_h) {
+      clear_height_stop(/*start_cooldown=*/false);
+    }
+  }
+
   state_.canceled_stop_w = false;
   state_.canceled_stop_h = false;
 
-  FloatValue accel_w = dw;
-  FloatValue accel_h = dh;
+  FloatValue accel_w = state_.deadband_stop_w ? state_.stop_decel_w : dw;
+  FloatValue accel_h = state_.deadband_stop_h ? state_.stop_decel_h : dh;
 
   // Only consider triggering new stop-delays if not already braking on axis
   if ((!state_.stop_delay_w || *state_.stop_delay_w == 0) &&
@@ -247,14 +338,15 @@ void ResizingBox::set_destination_size(
 
   adjust_size(/*accel_w=*/accel_w, /*accel_h=*/accel_h);
 
-  // Time-to-destination speed limiting (per-axis)
+  // Time-to-destination speed limiting (per-axis). For sticky sizing, dist is
+  // the signed distance to the deadband edge, not to the raw destination.
   auto limit_speed_ttg = [&](FloatValue& v, const FloatValue dist, const FloatValue prev_v) {
     if (config_.resizing_time_to_dest_speed_limit_frames > 0) {
       const FloatValue sgn = sign(dist);
       if (sgn != 0.0f) {
         const FloatValue new_sgn = sign(v);
         const bool increasing = std::abs(v) > std::abs(prev_v);
-        if (new_sgn == sgn && increasing) {
+        if (new_sgn == sgn && (config_.sticky_sizing || increasing)) {
           const FloatValue limit = std::abs(dist) /
               static_cast<FloatValue>(config_.resizing_time_to_dest_speed_limit_frames);
           const FloatValue vmax = limit;
@@ -280,12 +372,14 @@ void ResizingBox::set_destination_size(
     const FloatValue next_speed_w = state_.current_speed_w;
     if (std::abs(next_speed_w) < std::abs(state_.stop_decel_w) + kEpsilon) {
       state_.current_speed_w = 0.0f;
+      clear_width_stop(/*start_cooldown=*/true);
     }
   }
   if (state_.stop_delay_h && *state_.stop_delay_h != 0) {
     const FloatValue next_speed_h = state_.current_speed_h;
     if (std::abs(next_speed_h) < std::abs(state_.stop_decel_h) + kEpsilon) {
       state_.current_speed_h = 0.0f;
+      clear_height_stop(/*start_cooldown=*/true);
     }
   }
 }
@@ -330,27 +424,15 @@ void ResizingBox::update_stop_delays() {
   if (state_.stop_delay_w != zero()) {
     state_.stop_delay_w_counter += 1;
     if (state_.stop_delay_w_counter >= state_.stop_delay_w) {
-      state_.stop_delay_w = zero();
-      state_.stop_delay_w_counter = zero();
-      state_.stop_decel_w = 0.0f;
       state_.current_speed_w = 0.0f;
-      if (config_.resizing_stop_delay_cooldown_frames > 0) {
-        state_.cooldown_w_counter =
-            config_.resizing_stop_delay_cooldown_frames;
-      }
+      clear_width_stop(/*start_cooldown=*/true);
     }
   }
   if (state_.stop_delay_h != zero()) {
     state_.stop_delay_h_counter += 1;
     if (state_.stop_delay_h_counter >= state_.stop_delay_h) {
-      state_.stop_delay_h = zero();
-      state_.stop_delay_h_counter = zero();
-      state_.stop_decel_h = 0.0f;
       state_.current_speed_h = 0.0f;
-      if (config_.resizing_stop_delay_cooldown_frames > 0) {
-        state_.cooldown_h_counter =
-            config_.resizing_stop_delay_cooldown_frames;
-      }
+      clear_height_stop(/*start_cooldown=*/true);
     }
   }
   if (state_.cooldown_w_counter > 0) {
