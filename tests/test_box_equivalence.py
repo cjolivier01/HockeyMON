@@ -399,7 +399,26 @@ def main():
     _should_limit_resize_speed_ttg()
     _should_snap_translation_speed_ttg()
     _should_snap_resize_speed_ttg()
+    _should_preserve_legacy_set_braking_call()
     print("box equivalence tests: OK")
+
+
+def _should_preserve_legacy_set_braking_call():
+    core = _core()
+    arena = (0.0, 0.0, 1920.0, 1080.0)
+    initial_ttg_frames = 37
+    config = make_cpp_config(
+        core,
+        arena,
+        {"time_to_dest_speed_limit_frames": initial_ttg_frames},
+    )
+    box = core.LivingBox("cpp", core.BBox(400.0, 400.0, 800.0, 600.0), config)
+
+    box.set_braking(3, True, 4, 5, 6)
+    assert box.translation_config().time_to_dest_speed_limit_frames == initial_ttg_frames
+
+    box.set_braking(3, True, 4, 5, 6, 41)
+    assert box.translation_config().time_to_dest_speed_limit_frames == 41
 
 
 def _should_not_brake_when_not_moving():

@@ -1,3 +1,6 @@
+bazel-bin
+bazel-out
+bazel-testlogs
 openmm/mmcv/bazel-bin
 openmm/mmcv/bazel-mmcv
 openmm/mmcv/bazel-out

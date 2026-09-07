@@ -453,6 +453,9 @@ class PlayTracker(torch.nn.Module):
             # Create and configure `AllLivingBoxConfig` for `_current_roi_aspect`
             #
             current_roi_aspect_config = AllLivingBoxConfig()
+            current_roi_aspect_config.time_to_dest_speed_limit_frames = (
+                current_roi_config.time_to_dest_speed_limit_frames
+            )
 
             kEXTRA_FOLLOWING_SCALE_DOWN = 1
 
@@ -2411,6 +2414,7 @@ class PlayTracker(torch.nn.Module):
             cooldown_scaled = self._scale_frames_for_fps(cooldown)
             ov_delay_scaled = self._scale_frames_for_fps(ov_delay)
             postns_scaled = self._scale_frames_for_fps(postns)
+            ttg_scaled = self._scale_frames_for_fps(ttg)
 
             # Update YAML-like config so all downstream reads are consistent
             self._set_ui_config_value(
@@ -2508,12 +2512,18 @@ class PlayTracker(torch.nn.Module):
                 mb._max_speed_y = torch.tensor(msy, dtype=torch.float, device=mb.device)
                 mb._max_accel_x = torch.tensor(maxx, dtype=torch.float, device=mb.device)
                 mb._max_accel_y = torch.tensor(maxy, dtype=torch.float, device=mb.device)
+                mb._ttg_limit_frames = torch.tensor(
+                    int(ttg_scaled), dtype=torch.int64, device=mb.device
+                )
             if isinstance(self._current_roi_aspect, MovingBox) and apply_follower:
                 mb = self._current_roi_aspect
                 mb._max_speed_x = torch.tensor(msx, dtype=torch.float, device=mb.device)
                 mb._max_speed_y = torch.tensor(msy, dtype=torch.float, device=mb.device)
                 mb._max_accel_x = torch.tensor(maxx, dtype=torch.float, device=mb.device)
                 mb._max_accel_y = torch.tensor(maxy, dtype=torch.float, device=mb.device)
+                mb._ttg_limit_frames = torch.tensor(
+                    int(ttg_scaled), dtype=torch.int64, device=mb.device
+                )
 
             # Apply to Python movers live (if available)
             if isinstance(self._current_roi_aspect, MovingBox):
@@ -2541,6 +2551,7 @@ class PlayTracker(torch.nn.Module):
                             int(hyst_scaled),
                             int(cooldown_scaled),
                             int(postns_scaled),
+                            int(ttg_scaled),
                         )
                         lb.set_translation_constraints(msx, msy, maxx, maxy)
                     if apply_follower:
@@ -2551,6 +2562,7 @@ class PlayTracker(torch.nn.Module):
                             int(hyst_scaled),
                             int(cooldown_scaled),
                             int(postns_scaled),
+                            int(ttg_scaled),
                         )
                         lb.set_translation_constraints(msx, msy, maxx, maxy)
                     self._playtracker.set_breakaway_braking(int(ov_delay_scaled), ov_scal)
