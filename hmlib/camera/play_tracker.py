@@ -2411,6 +2411,7 @@ class PlayTracker(torch.nn.Module):
             cooldown_scaled = self._scale_frames_for_fps(cooldown)
             ov_delay_scaled = self._scale_frames_for_fps(ov_delay)
             postns_scaled = self._scale_frames_for_fps(postns)
+            ttg_scaled = self._scale_frames_for_fps(ttg)
 
             # Update YAML-like config so all downstream reads are consistent
             self._set_ui_config_value(
@@ -2541,6 +2542,7 @@ class PlayTracker(torch.nn.Module):
                             int(hyst_scaled),
                             int(cooldown_scaled),
                             int(postns_scaled),
+                            int(ttg_scaled),
                         )
                         lb.set_translation_constraints(msx, msy, maxx, maxy)
                     if apply_follower:
@@ -2551,6 +2553,7 @@ class PlayTracker(torch.nn.Module):
                             int(hyst_scaled),
                             int(cooldown_scaled),
                             int(postns_scaled),
+                            int(ttg_scaled),
                         )
                         lb.set_translation_constraints(msx, msy, maxx, maxy)
                     self._playtracker.set_breakaway_braking(int(ov_delay_scaled), ov_scal)

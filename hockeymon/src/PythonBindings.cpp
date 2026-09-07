@@ -1741,7 +1741,8 @@ void init_living_boxes(::pybind11::module_& m) {
           py::arg("cancel_on_opposite"),
           py::arg("cancel_hysteresis_frames"),
           py::arg("stop_delay_cooldown_frames"),
-          py::arg("post_nonstop_stop_delay_count"))
+          py::arg("post_nonstop_stop_delay_count"),
+          py::arg("time_to_dest_speed_limit_frames"))
       .def(
           "set_translation_constraints",
           &LivingBox::set_translation_constraints,
