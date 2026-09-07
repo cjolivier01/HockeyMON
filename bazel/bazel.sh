@@ -41,6 +41,25 @@ fi
 export PYTHON_BIN_PATH
 
 BAZEL_WORKSPACE_ROOT="$(find_bazel_workspace_root)"
+
+for arg in "$@"; do
+  if [[ "${arg}" != "//..." || -z "${BAZEL_WORKSPACE_ROOT}" ]]; then
+    continue
+  fi
+
+  workspace_link="${BAZEL_WORKSPACE_ROOT}/bazel-$(basename "${BAZEL_WORKSPACE_ROOT}")"
+  if [[ -L "${workspace_link}" ]]; then
+    if ! expected_execution_root="$(bazelisk info execution_root --color=no 2>/dev/null)"; then
+      printf '%s\n' \
+        "Warning: could not determine Bazel's execution root; leaving ${workspace_link} unchanged." >&2
+    elif [[ "$(readlink -f "${workspace_link}" || true)" != "${expected_execution_root}" ]]; then
+      printf '%s\n' "Removing stale Bazel workspace symlink: ${workspace_link}" >&2
+      unlink "${workspace_link}"
+    fi
+  fi
+  break
+done
+
 case "${1:-}:${BAZEL_WORKSPACE_ROOT}" in
   build:"${REPO_ROOT}"|coverage:"${REPO_ROOT}"|run:"${REPO_ROOT}"|test:"${REPO_ROOT}")
     CUDA_BAZEL_ARCHS="$(detect_cuda_bazel_archs)"

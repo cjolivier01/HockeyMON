@@ -1736,6 +1736,28 @@ void init_living_boxes(::pybind11::module_& m) {
           py::arg("delay_y") = py::none())
       .def(
           "set_braking",
+          [](LivingBox& self,
+             IntValue stop_on_dir_change_delay,
+             bool cancel_on_opposite,
+             IntValue cancel_hysteresis_frames,
+             IntValue stop_delay_cooldown_frames,
+             IntValue post_nonstop_stop_delay_count) {
+            self.set_braking(
+                stop_on_dir_change_delay,
+                cancel_on_opposite,
+                cancel_hysteresis_frames,
+                stop_delay_cooldown_frames,
+                post_nonstop_stop_delay_count,
+                self.TranslatingBox::get_config()
+                    .time_to_dest_speed_limit_frames);
+          },
+          py::arg("stop_on_dir_change_delay"),
+          py::arg("cancel_on_opposite"),
+          py::arg("cancel_hysteresis_frames"),
+          py::arg("stop_delay_cooldown_frames"),
+          py::arg("post_nonstop_stop_delay_count"))
+      .def(
+          "set_braking",
           &LivingBox::set_braking,
           py::arg("stop_on_dir_change_delay"),
           py::arg("cancel_on_opposite"),

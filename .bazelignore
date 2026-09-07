@@ -1,5 +1,4 @@
 bazel-bin
-bazel-hm
 bazel-out
 bazel-testlogs
 openmm/mmcv/bazel-bin
