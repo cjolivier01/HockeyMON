@@ -97,6 +97,24 @@ stitching:
   # Controlled by --aspen-stitching / --no-aspen-stitching.
   aspen-stitching: true
   enabled: true
+  # Source-camera lens presets. Hugin consumes horizontal_fov directly; the
+  # vertical value is retained with the shared mapping configuration for
+  # algorithms that model both axes. Games select a preset with camera_config
+  # and may store per-game values under camera_fov in their private config.yaml.
+  camera_configs:
+    gopro-hero-11:
+      display_name: "GoPro Hero 11"
+      horizontal_fov: 108
+      vertical_fov: 90
+    gopro-mission-1:
+      display_name: "GoPro Mission 1"
+      horizontal_fov: 127.2
+      vertical_fov: 95
+    insta-ace-pro-2:
+      display_name: "Insta Ace Pro 2"
+      horizontal_fov: 108
+      vertical_fov: 90
+  camera_config: "gopro-mission-1"
   pto_project_file: null
   stitch_frame_time: "00:00:00"
   calibration_frame_count: 4
