@@ -182,3 +182,110 @@ def should_fail_permanently_after_uncertain_csv_append(tmp_path, monkeypatch):
         dataframe.close()
     assert path.read_bytes() == uncertain_bytes
     assert len(dataframe._dataframe_list) == 1
+
+
+def should_drain_amd_encoder_even_when_input_flush_fails():
+    from hmlib.video.py_amd_codec import PyAmdVideoEncoder
+
+    calls = []
+    process = SimpleNamespace(
+        stdin=SimpleNamespace(close=_fail("input flush failed")),
+        wait=lambda timeout: calls.append("wait"),
+        returncode=0,
+    )
+    encoder = SimpleNamespace(
+        _process=process,
+        _opened=True,
+        _stdout_thread=None,
+        _stderr_thread=None,
+        _stderr_tail=[],
+        _check_background_error=lambda: calls.append("check worker"),
+    )
+    with pytest.raises(FinalizationError, match="input flush failed"):
+        PyAmdVideoEncoder.close(encoder)
+    assert calls == ["wait", "check worker"]
+    assert encoder._process is None
+
+
+def should_close_nvenc_bitstream_after_encoder_flush_failure(tmp_path):
+    from hmlib.video.py_nv_encoder import PyNvVideoEncoder
+
+    encoder = PyNvVideoEncoder.__new__(PyNvVideoEncoder)
+    encoder._opened = True
+    encoder._encoder = SimpleNamespace(EndEncode=_fail("EndEncode failed"))
+    stream = (tmp_path / "video.h264").open("wb")
+    stream.write(b"recoverable")
+    encoder._bitstream_file = stream
+    with pytest.raises(OSError, match="EndEncode failed"):
+        encoder.close()
+    assert stream.closed
+    assert not encoder._opened
+    assert (tmp_path / "video.h264").read_bytes() == b"recoverable"
+
+
+def should_fail_requested_audio_mux_without_video_only_retry(tmp_path, monkeypatch):
+    import shutil
+    from hmlib.video import py_nv_encoder as nv
+
+    audio = tmp_path / "audio.mp4"
+    audio.write_bytes(b"audio")
+    encoder = nv.PyNvVideoEncoder.__new__(nv.PyNvVideoEncoder)
+    encoder.output_path = tmp_path / "ordinary-name.mp4"
+    encoder._mux_audio_file = str(audio)
+    encoder._mux_audio_stream = 0
+    encoder._mux_audio_offset_seconds = 0
+    encoder._mux_audio_aac_bitrate = "192k"
+    encoder._ffmpeg_output_handler = None
+    encoder._frames_in_current_bitstream = 3
+    encoder.fps = 30
+    encoder.codec = "h264"
+    calls = []
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(nv.subprocess, "check_output", lambda *args, **kwargs: "aac")
+
+    class Process:
+        stdout = None
+        stderr = None
+
+        def __init__(self, cmd, **kwargs):
+            calls.append(cmd)
+
+        def wait(self):
+            return 1
+
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(nv.subprocess, "Popen", Process)
+    monkeypatch.setattr(
+        nv,
+        "build_ffmpeg_output_handler",
+        lambda *args, **kwargs: SimpleNamespace(close=lambda code: None),
+    )
+    with pytest.raises(RuntimeError, match="ffmpeg muxer failed"):
+        encoder._mux_bitstream_file_with_ffmpeg(tmp_path / "video.h264")
+    assert len(calls) == 1
+    assert str(audio) in calls[0]
+
+
+def should_flush_fast_camera_when_follower_flush_fails(tmp_path):
+    from hmlib.aspen.plugins.save_plugins import SaveCameraPlugin
+
+    plugin = SaveCameraPlugin()
+    plugin._camera_dataframe = SimpleNamespace(close=_fail("follower fsync failed"))
+    plugin._camera_fast_dataframe = _camera(tmp_path / "camera_fast.csv")
+    _add_frame(plugin._camera_fast_dataframe, 1)
+    with pytest.raises(FinalizationError, match="follower fsync failed"):
+        plugin.finalize()
+    assert (tmp_path / "camera_fast.csv").read_text() == "1,1,2,3,4\n"
+
+
+def should_propagate_camera_write_failure_immediately():
+    from hmlib.aspen.plugins.save_plugins import SaveCameraPlugin
+
+    plugin = SaveCameraPlugin(save_fast=False)
+    plugin._camera_dataframe = SimpleNamespace(
+        add_frame_records=lambda **kwargs: _fail("CSV full")()
+    )
+    with pytest.raises(OSError, match="CSV full"):
+        plugin.forward({"frame_id": 1, "current_box": np.array([1, 2, 3, 4])})

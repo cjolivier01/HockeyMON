@@ -14,6 +14,7 @@ from hmlib.tracking_utils.detection_dataframe import DetectionDataFrame
 from hmlib.tracking_utils.pose_dataframe import PoseDataFrame
 from hmlib.tracking_utils.tracking_dataframe import TrackingDataFrame
 from hmlib.tracking_utils.utils import get_track_mask
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor
 from hmlib.utils.path import add_prefix_to_filename
 
@@ -632,39 +633,25 @@ class SaveCameraPlugin(SavePluginBase):
         def _to_tlbr_array(box_obj: Any) -> Optional[np.ndarray]:
             if box_obj is None:
                 return None
-            if isinstance(box_obj, StreamTensorBase):
-                try:
-                    box_obj = unwrap_tensor(box_obj)
-                except Exception:
-                    return None
-            try:
-                if hasattr(box_obj, "detach"):
-                    arr = box_obj.detach().cpu().numpy()
-                else:
-                    arr = np.asarray(box_obj)
-            except Exception:
-                return None
+            box_obj = unwrap_tensor(box_obj)
+            if isinstance(box_obj, torch.Tensor):
+                arr = box_obj.detach().cpu().numpy()
+            else:
+                arr = np.asarray(box_obj)
             if arr.ndim == 1:
                 arr = arr.reshape(1, -1)
             if arr.ndim != 2 or arr.shape[1] != 4:
-                return None
+                raise ValueError(f"Camera CSV requires Nx4 boxes; received shape {arr.shape}")
             return arr.astype(np.float32, copy=False)
 
-        try:
-            tlbr = _to_tlbr_array(current_box)
-            if df is not None and tlbr is not None and frame_id0 >= 0:
-                for i in range(int(tlbr.shape[0])):
-                    df.add_frame_records(frame_id=frame_id0 + i, tlbr=tlbr[i : i + 1])
-        except Exception:
-            pass
-
-        try:
-            tlbr_fast = _to_tlbr_array(current_fast_box)
-            if fast_df is not None and tlbr_fast is not None and frame_id0 >= 0:
-                for i in range(int(tlbr_fast.shape[0])):
-                    fast_df.add_frame_records(frame_id=frame_id0 + i, tlbr=tlbr_fast[i : i + 1])
-        except Exception:
-            pass
+        for dataframe, box in ((df, current_box), (fast_df, current_fast_box)):
+            if dataframe is None or box is None:
+                continue
+            tlbr = _to_tlbr_array(box)
+            if frame_id0 < 0:
+                raise ValueError("Camera CSV requires a nonnegative frame_id")
+            for i in range(int(tlbr.shape[0])):
+                dataframe.add_frame_records(frame_id=frame_id0 + i, tlbr=tlbr[i : i + 1])
 
         out: Dict[str, Any] = {}
         if df is not None:
@@ -680,7 +667,9 @@ class SaveCameraPlugin(SavePluginBase):
         return {"camera_dataframe", "camera_fast_dataframe"}
 
     def finalize(self):
+        actions = []
         if self._camera_dataframe is not None:
-            self._camera_dataframe.close()
+            actions.append(("camera CSV", self._camera_dataframe.close))
         if self._camera_fast_dataframe is not None:
-            self._camera_fast_dataframe.close()
+            actions.append(("fast camera CSV", self._camera_fast_dataframe.close))
+        finalize_resources(actions)

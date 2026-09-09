@@ -2487,7 +2487,6 @@ def _main(args, num_gpu):
                     shutil.copy2(src_path, dst_path)
                 except Exception:
                     traceback.print_exc()
-        logger.info("Completed")
     except Exception as ex:
         print(ex)
         traceback.print_exc()
@@ -2501,6 +2500,7 @@ def _main(args, num_gpu):
         if mux_audio_temp_file is not None:
             actions.append(("temporary mux audio", mux_audio_temp_file.close))
         finalize_resources(actions, primary_error=sys.exc_info()[1])
+    logger.info("Completed")
 
 
 def setup_logging():
