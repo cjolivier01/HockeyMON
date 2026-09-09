@@ -234,6 +234,7 @@ sh_test(
         "//hmlib:hmlib.lib",
         "python_runtime.sh",
         "test_stitching_feature_backends.py",
+        "stitching_fixtures.py",
     ],
     env_inherit = [
         "CONDA_PREFIX",
@@ -258,6 +259,7 @@ sh_test(
         "//hmlib:hmlib.lib",
         "python_runtime.sh",
         "test_stitching_settings.py",
+        "stitching_fixtures.py",
     ],
     env_inherit = [
         "CONDA_PREFIX",
@@ -609,4 +611,12 @@ sh_test(
         "CONDA_PREFIX",
         "PYTHON_BIN_PATH",
     ],
+)
+
+sh_test(
+    name = "test_stitching_artifacts",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_stitching_artifacts.py", "cv2", "numpy", "pytest", "tifffile", "torch"],
+    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_stitching_artifacts.py", "stitching_fixtures.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )

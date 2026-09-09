@@ -10,6 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+from stitching_fixtures import write_generation
 
 from hmlib.stitching import configure_stitching
 from hmlib.stitching.projections import apply_projection, read_panorama_geometry
@@ -139,13 +140,7 @@ def should_fingerprint_effective_settings_and_preserve_inactive_tuning():
 
 
 def should_invalidate_cache_after_camera_or_framing_change(tmp_path):
-    for name in (
-        "hm_project.pto",
-        "autooptimiser_out.pto",
-        "seam_file.png",
-        *(f"mapping_{index:04d}{suffix}.tif" for index in range(2) for suffix in ("", "_x", "_y")),
-    ):
-        (tmp_path / name).touch()
+    write_generation(tmp_path)
     settings = _nona()
     (tmp_path / ".stitching_artifacts.json").write_text(json.dumps(settings.manifest()))
     args = (tmp_path / "hm_project.pto", tmp_path / "autooptimiser_out.pto")

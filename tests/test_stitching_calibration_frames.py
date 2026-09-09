@@ -95,6 +95,9 @@ def should_reject_changing_camera_geometry_and_invalid_points(tmp_path):
 def should_retry_rejected_geometry_and_preserve_late_failures(monkeypatch, tmp_path, terminal):
     extracted = []
     attempts = []
+    for name in ("left.mp4", "right.mp4"):
+        (tmp_path / name).write_bytes(b"video")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         configure_stitching, "BasicVideoInfo", lambda path: SimpleNamespace(frame_count=100)
     )
@@ -114,8 +117,8 @@ def should_retry_rejected_geometry_and_preserve_late_failures(monkeypatch, tmp_p
 
     def build(**kwargs):
         attempts.append(kwargs)
-        # Each PTO uses stable references, never filenames in a deleted sample directory.
-        assert [Path(name).name for name in kwargs["image_files"]] == ["left.png", "right.png"]
+        # The transactional builder owns stable image publication.
+        assert all(Path(name).is_file() for name in kwargs["image_files"])
         if len(attempts) == 1:
             raise failure
         return True

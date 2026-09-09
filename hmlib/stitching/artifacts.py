@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -72,7 +73,12 @@ def _read_journal(directory: Path) -> dict | None:
     names = set()
     for entry in journal["entries"]:
         name = entry.get("name", "")
-        if not name or Path(name).name != name or name in names or name.startswith(".stitching-"):
+        if (
+            not name
+            or Path(name).name != name
+            or name in names
+            or (name.startswith(".stitching") and name != ".stitching_artifacts.json")
+        ):
             raise ValueError(f"Invalid stitching recovery artifact name: {name!r}")
         names.add(name)
         for key in ("old", "new"):
@@ -174,7 +180,9 @@ def publish_artifacts(directory: Path, stage: Path, names: list[str]) -> None:
     previous.mkdir()
     entries = []
     for name in names:
-        if Path(name).name != name or name.startswith(".stitching-"):
+        if Path(name).name != name or (
+            name.startswith(".stitching") and name != ".stitching_artifacts.json"
+        ):
             raise ValueError(f"Invalid stitching artifact name: {name!r}")
         source, target = stage / name, directory / name
         new, old = _identity(source), _identity(target)
@@ -222,4 +230,14 @@ def artifact_stage(directory: str | Path) -> Iterator[Path]:
             yield stage
         finally:
             if stage.exists() and not (directory / _JOURNAL).exists():
-                shutil.rmtree(stage)
+                primary_error = sys.exc_info()[1]
+                try:
+                    shutil.rmtree(stage)
+                except Exception:
+                    if primary_error is None:
+                        raise
+                    logger.exception(
+                        "Failed to remove stitching stage %s after %s; retaining evidence",
+                        stage,
+                        primary_error,
+                    )

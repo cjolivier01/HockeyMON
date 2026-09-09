@@ -88,7 +88,17 @@ def read_png_layout(path: PathLike) -> PngLayout:
             if chunk_type == b"IHDR":
                 if layout is not None or length != 13:
                     raise ValueError(f"Invalid PNG IHDR chunk: {path}")
-                width, height = struct.unpack(">II", retained_data[:8])
+                width, height, depth, color, compression, filtering, interlace = struct.unpack(
+                    ">IIBBBBB", retained_data
+                )
+                if (
+                    color != 0
+                    or depth not in (1, 2, 4, 8, 16)
+                    or compression != 0
+                    or filtering != 0
+                    or interlace not in (0, 1)
+                ):
+                    raise ValueError(f"Unsupported grayscale PNG seam format: {path}")
                 if width == 0 or height == 0:
                     raise ValueError(f"Invalid PNG dimensions: {path}")
                 validate_canvas(width, height)

@@ -79,15 +79,23 @@ def _bounded_tiff_ifd(path: Path, size: int) -> None:
             17: 8,
             18: 8,
         }
+        total_payload = 0
+        seen_tags = set()
         for _ in range(count):
             tag, kind, length, value = struct.unpack(
                 order + entry_format, read(struct.calcsize(entry_format))
             )
+            if tag in seen_tags:
+                raise ValueError(f"Duplicate stitching TIFF tag {tag}: {path}")
+            seen_tags.add(tag)
             if kind not in type_sizes:
                 raise ValueError(f"Unsupported stitching TIFF tag type {kind}: {path}")
             payload = length * type_sizes[kind]
+            total_payload += payload
             if payload > MAX_METADATA_BYTES:
                 raise ValueError(f"Oversized stitching TIFF tag {tag}: {path}")
+            if total_payload > 4 * MAX_METADATA_BYTES:
+                raise ValueError(f"Oversized aggregate stitching TIFF metadata: {path}")
             if payload > inline_size and (value > size or payload > size - value):
                 raise ValueError(f"Truncated stitching TIFF tag {tag}: {path}")
         if struct.unpack(order + offset_format, read(offset_size))[0] != 0:
@@ -102,6 +110,12 @@ def validate_mapping_tiff(path: str | Path, *, coordinates: bool = False) -> tup
         page = tif.pages[0]
         width, height = int(page.imagewidth), int(page.imagelength)
         validate_canvas(width, height)
+        if (
+            page.samplesperpixel not in (1, 3, 4)
+            or page.dtype.kind not in ("u", "f")
+            or page.dtype.itemsize > 4
+        ):
+            raise ValueError(f"Unsupported stitching TIFF raster format: {path}")
         if coordinates:
             if page.samplesperpixel != 1 or page.dtype != np.dtype("uint16"):
                 raise ValueError(f"Expected a uint16 single-channel coordinate map: {path}")
@@ -147,3 +161,27 @@ def validate_artifact_generation(
     ):
         raise ValueError(f"Stitching seam lies outside the {width}x{height} canvas")
     return width, height
+
+
+def read_mapping_arrays(directory: str | Path, basename: str):
+    """Read one placement/x/y tuple from a stable, bounded file generation."""
+    import cv2
+
+    from hmlib.stitching.artifacts import stitching_lock
+    from hmlib.stitching.configure_stitching import get_image_geo_position
+
+    directory = Path(directory)
+    with stitching_lock(directory):
+        placement = directory / f"{basename}.tif"
+        dimensions = validate_mapping_tiff(placement)
+        maps = []
+        for axis in ("x", "y"):
+            path = directory / f"{basename}_{axis}.tif"
+            if validate_mapping_tiff(path, coordinates=True) != dimensions:
+                raise ValueError(f"Mismatched stitching coordinate map: {path}")
+            array = cv2.imread(str(path), cv2.IMREAD_ANYDEPTH)
+            if array is None or array.shape != dimensions[::-1] or array.dtype != np.uint16:
+                raise ValueError(f"Could not decode stitching coordinate map: {path}")
+            maps.append(array)
+        xpos, ypos = get_image_geo_position(str(placement))
+        return xpos, ypos, maps[0], maps[1]
