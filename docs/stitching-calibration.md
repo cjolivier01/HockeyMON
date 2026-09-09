@@ -44,9 +44,9 @@ bitmap after calibration.
 
 NONA framing supports Auto FOV/canvas/crop and a manual crop expressed as
 `[left, right, top, bottom]` fractions of the full projected canvas. A custom crop
-and Auto crop cannot be active together. OpenCV backends retain inactive NONA
-framing settings for a later switch; their mapping is determined by the fitted
-rectilinear transform.
+and Auto crop cannot be active together. OpenCV mapping is determined by the fitted rectilinear transform. Non-default
+projection framing, including a selected rink with nonzero rotation, requires
+NONA; unsupported framing is rejected before calibration.
 
 `max_output_dimension` caps both canvas dimensions. `max_output_width` caps width.
 NONA caps the full projected canvas before remapping (including any crop), so

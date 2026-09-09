@@ -36,6 +36,8 @@ def _nona(**values):
 def should_resolve_camera_and_inherit_rink_without_mutating_config():
     config = {
         "stitching": {
+            "mapping_backend": "nona",
+            "run_autooptimizer": True,
             "camera_config": "gopro-mission-1",
             "camera_fov": {"vertical_fov": 98},
             "rink_config": "venue",
@@ -254,3 +256,32 @@ def should_forward_effective_config_to_calibration_worker(monkeypatch, tmp_path)
     assert captured["settings"].control_point_matcher == "loftr"
     assert captured["settings"].horizontal_fov == 108
     assert captured["settings"].max_output_width == 1920
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"rink_config": "vallco"},
+        {"projection_framing": {"rotation_degrees": [0, -20, 0]}},
+        {"projection_framing": {"crop": [0.1, 0.9, 0, 1]}},
+        {"projection_framing": {"auto_crop": True}},
+        {"projection_framing": {"auto_fov": True}},
+        {"projection_framing": {"auto_canvas": False}},
+        {"projection_framing": {"horizontal_fov": 150}},
+    ],
+)
+def should_require_nona_for_nondefault_effective_framing(values):
+    with pytest.raises(ValueError, match="requires mapping_backend=nona"):
+        read_stitching_settings({"stitching": values})
+
+
+def should_allow_explicit_zero_rotation_to_disable_native_rink_default():
+    settings = read_stitching_settings(
+        {
+            "stitching": {
+                "rink_config": "vallco",
+                "projection_framing": {"rotation_degrees": [0, 0, 0]},
+            }
+        }
+    )
+    assert settings.mapping_backend == "opencv-magsac"

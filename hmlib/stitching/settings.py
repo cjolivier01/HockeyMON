@@ -311,6 +311,11 @@ def read_stitching_settings(
         raise ValueError(
             f"{projection} horizontal FOV exceeds projection limit {maximum_projection_fov(projection, parameters):.6g}"
         )
+    if backend != "nona" and framing != ProjectionFraming():
+        raise ValueError(
+            "Non-default projection framing (including rink rotation and crop) requires "
+            "mapping_backend=nona and run_autooptimizer=true"
+        )
     width = normalize_max_output_dimension(stitch.get("max_output_width"))
     return StitchingSettings(
         matcher,
