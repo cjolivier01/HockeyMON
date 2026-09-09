@@ -537,3 +537,30 @@ sh_test(
         "PYTHON_BIN_PATH",
     ],
 )
+
+sh_test(
+    name="test_output_finalization",
+    srcs=["runtime_pytest.sh"],
+    args=[
+        "tests/test_output_finalization.py",
+        "cv2",
+        "mmcv",
+        "mmengine",
+        "networkx",
+        "numpy",
+        "pandas",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data=[
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_output_finalization.py",
+    ],
+    env_inherit=[
+        "CONDA_PREFIX",
+        "PYTHON_BIN_PATH",
+    ],
+)

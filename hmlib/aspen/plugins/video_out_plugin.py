@@ -322,10 +322,7 @@ class VideoOutPlugin(Plugin):
     def finalize(self) -> None:
         if self._vo is not None:
             with self.profile_scope("video_out.finalize"):
-                try:
-                    self._vo.stop()
-                except Exception:
-                    pass
+                self._vo.stop()
 
     def input_keys(self):
         if not hasattr(self, "_input_keys"):

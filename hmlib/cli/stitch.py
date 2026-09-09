@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import math
 import os
+import sys
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -23,6 +24,7 @@ from hmlib.hm_opts import _get_baseline_runtime_config, hm_opts, preferred_arg
 from hmlib.log import get_root_logger
 from hmlib.orientation import configure_game_videos
 from hmlib.stitching.configure_stitching import clean_stitch_game_artifacts
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.iterators import CachedIterator
 from hmlib.utils.path import add_prefix_to_filename
 
@@ -1082,13 +1084,11 @@ def stitch_videos(
         except StopIteration:
             pass
         finally:
-            data_loader.close()
+            actions = [("stitch dataloader", data_loader.close)]
             if shower is not None:
-                shower.close()
-            try:
-                aspen_net.finalize()
-            except Exception:
-                pass
+                actions.append(("stitch preview", shower.close))
+            actions.append(("stitch pipeline", aspen_net.finalize))
+            finalize_resources(actions, primary_error=sys.exc_info()[1])
     return lfo, rfo
 
 
