@@ -362,6 +362,29 @@ sh_test(
 )
 
 sh_test(
+    name="test_scoreboard_selector_web",
+    srcs=["runtime_pytest.sh"],
+    args=[
+        "tests/test_scoreboard_selector_web.py",
+        "cv2",
+        "mmengine",
+        "numpy",
+        "PIL",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data=[
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "//hmlib:scoreboard_selector_assets",
+        "python_runtime.sh",
+        "test_scoreboard_selector_web.py",
+    ],
+    env_inherit=["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
     name="test_shower_rocm_preview",
     srcs=["test_shower_rocm_preview.sh"],
     data=[
