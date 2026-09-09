@@ -1516,7 +1516,7 @@ class hm_opts(object):
             dest="output_video_bit_rate",
             type=int,
             default=None,
-            help="Output video bit-rate",
+            help="Explicit output video bitrate in bps; by default scale from source pixel density",
         )
 
         # Jersey framework toggles (Koshkina trunk) for reuse across CLIs

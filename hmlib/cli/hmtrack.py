@@ -1516,6 +1516,7 @@ def _main(args, num_gpu):
     dataloader = None
     postprocessor = None
     mux_audio_temp_file = None
+    source_video_paths: List[str] = []
     opts = copy_opts(src=args, dest=argparse.Namespace(), parser=hm_opts.parser())
     try:
 
@@ -1942,6 +1943,7 @@ def _main(args, num_gpu):
         postprocessor = None
         if args.input_video:
             input_video_files = args.input_video.split(",")
+            source_video_paths = input_video_files
             aspen_stitching_cli = getattr(args, "aspen_stitching", None)
             if aspen_stitching_cli is None:
                 use_aspen_stitching = bool(
@@ -1973,6 +1975,7 @@ def _main(args, num_gpu):
                     assert dir_name
                     input_video_files = game_videos
 
+                source_video_paths = list(game_videos["left"]) + list(game_videos["right"])
                 left_vid = BasicVideoInfo(",".join(game_videos["left"]))
                 right_vid = BasicVideoInfo(",".join(game_videos["right"]))
 
@@ -2335,9 +2338,6 @@ def _main(args, num_gpu):
 
         if not args.audio_only:
 
-            if not args.output_video_bit_rate:
-                args.output_video_bit_rate = dataloader.get_max_attribute("bit_rate")
-
             if not args.no_play_tracking:
 
                 #
@@ -2362,6 +2362,7 @@ def _main(args, num_gpu):
             other_kwargs = {
                 "dataloader": dataloader,
                 "postprocessor": postprocessor,
+                "source_video_paths": source_video_paths,
             }
 
             run_mmtrack(

@@ -38,3 +38,17 @@ This ports the output lifecycle and publication behavior from hstream commits
 Main10/P010 archive backend. HM's current decoder outputs RGBP/uint8, its native
 stitch input is uint8, and its encoder accepts uint8/YUV420. Floating-point image
 processing alone does not preserve a 10-bit source through those conversions.
+
+## Automatic output bitrate
+
+The default `video_out.bit_rate: null` selects the greatest video bitrate per
+pixel across the actual input cameras and chapters. That ratio is multiplied
+by the final encoder width and height after crop/resize/letterboxing. For
+example, a 30 Mbps 1920×1080 camera produces a 120 Mbps 3840×2160 archive, or a
+7.5 Mbps 960×540 output. Ratios use integer arithmetic and round half up.
+
+Set `--output-video-bit-rate` or `video_out.bit_rate` to a positive integer to
+keep an explicit bitrate. Metadata that lacks a bitrate or dimensions produces
+a warning and is excluded from selection. If no usable source metadata is
+available, encoding uses the previous 55 Mbps default and reports that fallback.
+Probe errors propagate. This behavior ports hstream commit `3078abb8`.

@@ -588,3 +588,27 @@ sh_test(
         "PYTHON_BIN_PATH",
     ],
 )
+
+sh_test(
+    name="test_video_bitrate",
+    srcs=["runtime_pytest.sh"],
+    args=[
+        "tests/test_video_bitrate.py",
+        "cv2",
+        "mmengine",
+        "numpy",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data=[
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_video_bitrate.py",
+    ],
+    env_inherit=[
+        "CONDA_PREFIX",
+        "PYTHON_BIN_PATH",
+    ],
+)

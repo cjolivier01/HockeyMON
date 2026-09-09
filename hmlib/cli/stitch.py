@@ -959,6 +959,7 @@ def stitch_videos(
             "device": encoder_device,
             "work_dir": work_dir,
             "progress_bar": progress_bar,
+            "source_video_paths": list(videos["left"]) + list(videos["right"]),
         }
         if profiler is not None:
             aspen_shared["profiler"] = profiler
