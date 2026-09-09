@@ -332,6 +332,16 @@ class ApplyCameraPlugin(Plugin):
                 for transform in getattr(self._pipeline, "transforms", []):
                     if transform.__class__.__name__ == "HmPerspectiveRotation":
                         self._perspective_rotation_tf = transform
+                        # Geometry changes take effect when calibration/tracking
+                        # restarts. Freeze suppression with the loaded panorama,
+                        # while retaining live adjustment of saved edge angles.
+                        from hmlib.stitching.settings import read_stitching_settings
+
+                        settings = read_stitching_settings(self._game_config)
+                        transform.set_camera_space_leveling(
+                            settings.mapping_backend == "nona"
+                            and any(settings.framing.rotation_degrees[1:])
+                        )
                         break
             if self._perspective_rotation_tf is not None and self._game_config is not None:
                 angle = get_nested_value(

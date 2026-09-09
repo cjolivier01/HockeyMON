@@ -99,7 +99,10 @@ def should_clamp_apply_camera_output_height_from_game_config(monkeypatch):
 
 
 @requires_torch
-def should_refresh_fixed_edge_rotation_angle_from_runtime_config(monkeypatch):
+@pytest.mark.parametrize(
+    "rotation,expected", [(None, True), ([0, 0, 0], False), ([12, 0, 0], False)]
+)
+def should_refresh_fixed_edge_rotation_angle_from_runtime_config(monkeypatch, rotation, expected):
     _install_mmcv_transforms_stub(monkeypatch)
     from hmlib.camera import apply_camera_plugin as apply_camera_module
 
@@ -109,6 +112,9 @@ def should_refresh_fixed_edge_rotation_angle_from_runtime_config(monkeypatch):
 
         def set_fixed_edge_rotation_angle(self, value) -> None:
             self.values.append(value)
+
+        def set_camera_space_leveling(self, enabled) -> None:
+            self.leveling = enabled
 
     perspective = HmPerspectiveRotation()
 
@@ -124,6 +130,14 @@ def should_refresh_fixed_edge_rotation_angle_from_runtime_config(monkeypatch):
 
     monkeypatch.setattr(apply_camera_module, "Compose", RuntimeCompose)
     game_config = {"rink": {"camera": {"fixed_edge_rotation_angle": 12.5}}}
+    game_config["stitching"] = {
+        "mapping_backend": "nona",
+        "run_autooptimizer": True,
+        "projection": "equirectangular",
+        "rink_config": "rink",
+        "rink_configs": {"rink": {"rotation_degrees": [0, -20, 5]}},
+        "projection_framing": {"rotation_degrees": rotation},
+    }
     plugin = apply_camera_module.ApplyCameraPlugin(
         video_out_pipeline=[{"type": "HmPerspectiveRotation"}],
         crop_output_image=False,
@@ -138,3 +152,35 @@ def should_refresh_fixed_edge_rotation_angle_from_runtime_config(monkeypatch):
     plugin(context)
 
     assert perspective.values == [12.5, [15.0, 35.0]]
+    assert perspective.leveling is expected
+
+
+@requires_torch
+def should_suppress_and_restore_program_rotation_without_discarding_angles(monkeypatch):
+    from hmlib.transforms import perspective_rotation as module
+
+    calls = []
+
+    def rotate_image(**kwargs):
+        calls.append(kwargs["angle"])
+        return kwargs["img"]
+
+    monkeypatch.setattr(module, "rotate_image", rotate_image)
+    transform = module.HmPerspectiveRotation(fixed_edge_rotation_angle=[12, 24])
+    monkeypatch.setattr(
+        transform,
+        "_get_gaussian",
+        lambda _: types.SimpleNamespace(get_gaussian_y_from_image_x_position=lambda *a, **kw: 1),
+    )
+    data = {
+        "img": torch.zeros((1, 10, 20, 3)),
+        "camera_box": torch.tensor([[0.0, 0.0, 10.0, 10.0]]),
+    }
+    transform.set_camera_space_leveling(True)
+    assert transform(data) is data
+    assert calls == []
+    transform.set_fixed_edge_rotation_angle([15, 30])
+    transform.set_camera_space_leveling(False)
+    transform(data)
+    assert calls == [-15]
+    assert transform._fixed_edge_rotation_angle == (15, 30)
