@@ -39,13 +39,17 @@ def _identity(path: Path):
 
 
 def _write_journal(directory: Path, journal: dict) -> None:
-    temporary = directory / (_JOURNAL + ".tmp")
-    with temporary.open("w", encoding="utf-8") as stream:
-        json.dump(journal, stream, sort_keys=True)
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, directory / _JOURNAL)
-    _sync_directory(directory)
+    descriptor, name = tempfile.mkstemp(prefix=_JOURNAL + ".", suffix=".tmp", dir=directory)
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(journal, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, directory / _JOURNAL)
+        _sync_directory(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _read_journal(directory: Path) -> dict | None:
@@ -122,21 +126,28 @@ def recover_artifacts(directory: Path) -> None:
 
 
 @contextmanager
-def stitching_lock(directory: str | Path) -> Iterator[None]:
+def stitching_lock(directory: str | Path, *, blocking: bool = True) -> Iterator[None]:
     """Serialize loaders/builders across threads and processes; allow nested calls."""
     directory = Path(directory).resolve()
     directory.mkdir(parents=True, exist_ok=True)
     with _locks_guard:
         lock = _locks.setdefault(directory, threading.RLock())
-    with lock:
+    if not lock.acquire(blocking=blocking):
+        raise BlockingIOError(f"Stitching artifacts are busy: {directory}")
+    try:
         held = getattr(_held, "directories", None)
         if held is None:
             held = _held.directories = set()
         if directory in held:
             yield
             return
-        with (directory / ".stitching.lock").open("a+") as stream:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        descriptor = os.open(
+            directory / ".stitching.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+        )
+        with os.fdopen(descriptor, "a+") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("Stitching lock must be a regular file")
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
             held.add(directory)
             try:
                 recover_artifacts(directory)
@@ -144,6 +155,8 @@ def stitching_lock(directory: str | Path) -> Iterator[None]:
             finally:
                 held.remove(directory)
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock.release()
 
 
 def publish_artifacts(directory: Path, stage: Path, names: list[str]) -> None:
@@ -184,11 +197,15 @@ def publish_artifacts(directory: Path, stage: Path, names: list[str]) -> None:
         _sync_directory(directory)
         journal["phase"] = "committed"
         _write_journal(directory, journal)
-    except BaseException as error:
+    except BaseException:
         try:
             recover_artifacts(directory)
         except Exception as recovery_error:
-            error.add_note(f"Stitching recovery also failed; journal retained: {recovery_error}")
+            logger.error(
+                "Stitching recovery also failed; journal retained: %s",
+                recovery_error,
+                exc_info=True,
+            )
         raise
     (directory / _JOURNAL).unlink()
     _sync_directory(directory)
