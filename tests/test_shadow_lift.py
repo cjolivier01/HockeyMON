@@ -45,6 +45,43 @@ def should_preserve_identity_without_conversion_or_allocation(dtype):
         assert _adjust(source, shadow_lift=0, shadow_lift_black_point=True) is source
 
 
+@pytest.mark.parametrize("use_numpy", [False, True])
+@pytest.mark.parametrize("batched", [False, True])
+def should_preserve_grayscale_grading_without_shadow_lift(use_numpy, batched):
+    image = np.full((2, 1, 5, 7) if batched else (1, 5, 7), 40, dtype=np.float32)
+    source = image if use_numpy else torch.from_numpy(image)
+    output = _adjust(source, brightness=1.5, exposure_ev=1, contrast=1.2, white_balance=[1, 1, 1])
+    assert output.shape == image.shape
+    np.testing.assert_allclose(np.asarray(output), 120.0)
+
+
+@pytest.mark.parametrize("setting", [{"shadow_lift": 20}, {"white_balance": [1, 2, 1]}])
+def should_reject_color_specific_grading_on_grayscale(setting):
+    with pytest.raises(ValueError, match="require three color channels"):
+        _adjust(torch.zeros(1, 5, 7), **setting)
+
+
+@pytest.mark.parametrize("owner", ["plugin", "dataset"])
+def should_use_bgr_for_static_stitching_color_pipelines(owner):
+    if owner == "plugin":
+        from hmlib.aspen.plugins.stitching_plugin import StitchingPlugin
+
+        cls = StitchingPlugin
+    else:
+        from hmlib.datasets.dataset.stitching_dataloader2 import StitchDataset
+
+        cls = StitchDataset
+    instance = cls.__new__(cls)
+    instance._config_ref = None
+    instance._left_color_pipeline_cfg = [{"type": "HmImageColorAdjust", "shadow_lift": 100}]
+    instance._right_color_pipeline_cfg = None
+    instance._build_color_pipelines()
+    source = np.broadcast_to(np.array([100, 50, 20])[:, None, None], (3, 5, 7)).astype(np.float32)
+    expected = _adjust(source, shadow_lift=100, channel_order="bgr")
+    actual = instance._left_color_pipeline({"img": source})["img"]
+    np.testing.assert_allclose(actual, expected)
+
+
 def should_preserve_hue_and_apply_correct_bgr_weights():
     rgb = np.broadcast_to(np.array([0.1, 0.25, 0.5])[:, None, None] * 255, (3, 5, 7)).copy()
     output = _adjust(rgb, shadow_lift=100)

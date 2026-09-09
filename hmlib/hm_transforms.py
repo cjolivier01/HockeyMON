@@ -1298,6 +1298,15 @@ class HmImageColorAdjust:
             img = img.to(dtype)
         return img
 
+    def _validate_color_channels(self, channels: int) -> None:
+        if channels not in (1, 3, 4):
+            raise ValueError("Color adjustments require grayscale, RGB, or RGBA input")
+        if channels == 1 and (
+            self.shadow_lift > 0
+            or (self.white_balance is not None and not self._isclose(self.white_balance, [1, 1, 1]))
+        ):
+            raise ValueError("Shadow lift and white balance require three color channels")
+
     def _adjust_tensor(self, t: torch.Tensor) -> torch.Tensor:
         # Only convert dtype/layout if any adjustment is non-identity
         need_adjust = self._has_any_adjustment()
@@ -1308,8 +1317,7 @@ class HmImageColorAdjust:
         # Only convert once if needed
         if not icf:
             t = make_channels_first(t)
-        if t.shape[-3] not in (3, 4):
-            raise ValueError("Color adjustments require three color channels and optional alpha")
+        self._validate_color_channels(t.shape[-3])
         original = t
         alpha = t[..., 3:4, :, :] if t.shape[-3] == 4 else None
         t = t[..., :3, :, :]
@@ -1356,8 +1364,7 @@ class HmImageColorAdjust:
             a = make_channels_first(a)
         # Convert to float for ops
         orig_dtype = a.dtype
-        if a.shape[-3] not in (3, 4):
-            raise ValueError("Color adjustments require three color channels and optional alpha")
+        self._validate_color_channels(a.shape[-3])
         original = a
         alpha = a[..., 3:4, :, :] if a.shape[-3] == 4 else None
         a = a[..., :3, :, :]
@@ -1368,7 +1375,7 @@ class HmImageColorAdjust:
             a = a.astype(np.float32)
         if maximum != 255.0:
             a = a * (255.0 / maximum)
-        if self.white_balance is not None:
+        if self.white_balance is not None and not self._isclose(self.white_balance, [1, 1, 1]):
             gains = np.array(self.white_balance, dtype=a.dtype).reshape(3, 1, 1)
             if a.ndim == 4:
                 gains = gains.reshape(1, 3, 1, 1)
