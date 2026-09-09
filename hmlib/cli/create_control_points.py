@@ -418,7 +418,11 @@ def configure_stitching(
     """
     camera_fov = None
     if fov is not None:
-        camera_fov = dict((game_config or {}).get("stitching", {}).get("camera_fov", {}))
+        stitch_config = (game_config or {}).get("stitching")
+        if stitch_config is None:
+            stitch_config = {}
+        inherited_fov = stitch_config.get("camera_fov")
+        camera_fov = dict(inherited_fov) if inherited_fov is not None else {}
         camera_fov["horizontal_fov"] = fov
     settings = settings or read_stitching_settings(
         game_config,
@@ -627,7 +631,10 @@ def main() -> None:
     else:
         stitch_frame_time = args.stitch_frame_time
         if stitch_frame_time is None:
-            stitch_frame_time = game_config.get("stitching", {}).get("stitch_frame_time")
+            stitch_config = game_config.get("stitching")
+            stitch_frame_time = (
+                stitch_config.get("stitch_frame_time") if stitch_config is not None else None
+            )
         base_frame_offset = 0
         if stitch_frame_time is not None:
             base_frame_offset = time_to_frame(str(stitch_frame_time), BasicVideoInfo(args.left).fps)

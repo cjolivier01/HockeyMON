@@ -24,6 +24,19 @@ def _points():
     return {"m_kpts0": torch.ones((8, 2)), "m_kpts1": torch.ones((8, 2))}
 
 
+@pytest.mark.parametrize("stitch_config", [None, {"camera_fov": None}])
+def should_apply_explicit_fov_over_null_inherited_settings(monkeypatch, tmp_path, stitch_config):
+    monkeypatch.setattr(cli, "calculate_control_points", lambda *args, **kwargs: _points())
+    calls = []
+    monkeypatch.setattr(
+        cli, "build_stitching_project", lambda **kwargs: calls.append(kwargs) or True
+    )
+    cli.configure_stitching(
+        _frame(), _frame(), str(tmp_path), game_config={"stitching": stitch_config}, fov=100
+    )
+    assert calls[0]["settings"].horizontal_fov == 100
+
+
 def should_delegate_frame_calibration_with_settings_device_and_temporary_inputs(
     monkeypatch, tmp_path
 ):

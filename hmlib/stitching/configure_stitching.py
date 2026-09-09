@@ -1141,6 +1141,7 @@ def _configure_video_stitching_locked(
             force=False,
             skip_if_exists=False,
             settings=settings,
+            scale=scale,
             lens_calibration=lens_calibration,
             lens_calibration_resolved=True,
         ):
