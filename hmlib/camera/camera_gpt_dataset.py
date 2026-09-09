@@ -130,10 +130,22 @@ def scan_game_max_xy(
     return max_x, max_y
 
 
+def _contiguous_frame_runs(frames: list[int]) -> list[list[int]]:
+    """Split sorted frame IDs wherever numeric timeline adjacency is lost."""
+    runs: list[list[int]] = []
+    for frame in frames:
+        if not runs or frame != runs[-1][-1] + 1:
+            runs.append([frame])
+        else:
+            runs[-1].append(frame)
+    return runs
+
+
 @dataclass
 class _LoadedGame:
     game_id: str
     frames: list[int]
+    frame_runs: list[list[int]]
     tracks_by_frame: Dict[int, np.ndarray]
     cam_slow_tlwh_by_frame: Dict[int, np.ndarray]  # normalized TLWH
     cam_fast_tlwh_by_frame: Dict[int, np.ndarray]  # normalized TLWH
@@ -261,6 +273,7 @@ def _load_game(
             frames_set = frames_set.intersection(set(cams_fast["Frame"].unique()))
     frames = sorted(frames_set)
     frames_int = [int(f) for f in frames]
+    frame_runs = _contiguous_frame_runs(frames_int)
 
     tracks_by_frame: Dict[int, np.ndarray] = {}
     if not tracks.empty:
@@ -317,6 +330,7 @@ def _load_game(
     return _LoadedGame(
         game_id=paths.game_id,
         frames=frames_int,
+        frame_runs=frame_runs,
         tracks_by_frame=tracks_by_frame,
         cam_slow_tlwh_by_frame=cam_slow_tlwh_by_frame,
         cam_fast_tlwh_by_frame=cam_fast_tlwh_by_frame,
@@ -418,10 +432,11 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
             )
         except Exception as ex:
             raise RuntimeError(f"Failed to load camera GPT CSVs for game {game_id!r}") from ex
-        if len(loaded.frames) < self._seq_len:
-            self._unusable_reasons[
-                game_id
-            ] = f"only {len(loaded.frames)} usable frames for seq_len={self._seq_len}"
+        longest_run = max((len(run) for run in loaded.frame_runs), default=0)
+        if longest_run < self._seq_len:
+            self._unusable_reasons[game_id] = (
+                f"longest contiguous run has {longest_run} frames for seq_len={self._seq_len}"
+            )
             return None
         self._unusable_reasons.pop(game_id, None)
         self._cache[game_id] = loaded
@@ -469,7 +484,8 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
                 games = self._usable_game_paths(games)
                 continue
 
-            frames = game.frames
+            eligible_runs = [run for run in game.frame_runs if len(run) >= self._seq_len]
+            frames = rng.choice(eligible_runs)
             start = rng.randint(0, len(frames) - self._seq_len)
             seq_frames = frames[start : start + self._seq_len]
 
@@ -610,6 +626,89 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
             yield out
 
 
+def _hstream_manifest_allows_generation(
+    base_path: Path,
+    suffix_part: str,
+    tracking_path: Path,
+    camera_path: Path,
+    camera_fast_path: Path,
+) -> bool:
+    """Reject incomplete hstream publications while preserving legacy CSV discovery."""
+    manifest_path = base_path / f"hstream_telemetry{suffix_part}.json"
+    if not manifest_path.exists():
+        return True
+    if not manifest_path.is_file():
+        return False
+
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+
+    if not isinstance(manifest, dict):
+        return False
+
+    compatibility = manifest.get("hm_compatibility")
+    if not isinstance(compatibility, dict):
+        return False
+
+    def compatibility_file(key: str) -> Optional[str]:
+        artifact = compatibility.get(key)
+        if not isinstance(artifact, dict):
+            return None
+        filename = artifact.get("file")
+        return filename if isinstance(filename, str) else None
+
+    return (
+        manifest.get("schema") == "hstream-playtracker-telemetry-v1"
+        and manifest.get("publication_state") == "committed"
+        and manifest.get("completed") is True
+        and manifest.get("eligible_for_training") is True
+        and compatibility_file("tracking_csv") == tracking_path.name
+        and compatibility_file("camera_csv") == camera_path.name
+        and compatibility_file("camera_fast_csv") == camera_fast_path.name
+        and camera_fast_path.is_file()
+    )
+
+
+def _latest_complete_camera_generation(
+    game_dir: str,
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Return matching tracking/camera paths from the newest complete generation."""
+    base_path = Path(game_dir)
+    if not base_path.is_dir():
+        return None, None, None
+
+    tracking_candidates: list[tuple[int, str, Path]] = []
+    bare_tracking = base_path / "tracking.csv"
+    if bare_tracking.is_file():
+        tracking_candidates.append((0, "", bare_tracking))
+    for tracking_path in base_path.glob("tracking-*.csv"):
+        suffix = tracking_path.stem[len("tracking-") :]
+        if suffix.isdigit() and tracking_path.is_file():
+            tracking_candidates.append((int(suffix), suffix, tracking_path))
+
+    for _, suffix, tracking_path in sorted(
+        tracking_candidates, key=lambda candidate: candidate[0], reverse=True
+    ):
+        suffix_part = f"-{suffix}" if suffix else ""
+        camera_path = base_path / f"camera{suffix_part}.csv"
+        if not camera_path.is_file():
+            continue
+        camera_fast_path = base_path / f"camera_fast{suffix_part}.csv"
+        if not _hstream_manifest_allows_generation(
+            base_path, suffix_part, tracking_path, camera_path, camera_fast_path
+        ):
+            continue
+        return (
+            str(tracking_path),
+            str(camera_path),
+            str(camera_fast_path) if camera_fast_path.is_file() else None,
+        )
+
+    return None, None, None
+
+
 def resolve_csv_paths(
     game_id: str,
     game_dir: str,
@@ -619,20 +718,27 @@ def resolve_csv_paths(
     camera_fast_csv_name: Optional[str] = None,
     pose_csv_name: Optional[str] = None,
 ) -> Optional[GameCsvPaths]:
-    """Resolve required CSVs inside a game directory (latest suffix wins).
+    """Resolve required CSVs inside a game directory.
 
     The optional ``*_csv_name`` arguments allow selecting fixed filenames such as
-    ``camera_annotated.csv`` produced by manual editing tools.
+    ``camera_annotated.csv`` produced by manual editing tools. When both required
+    names are automatic, tracking and camera are selected from the newest complete
+    suffix generation so an interrupted publisher cannot mix two generations.
     """
     from hmlib.datasets.dataframe import find_latest_dataframe_file
 
-    if tracking_csv_name:
+    automatic_generation = not tracking_csv_name and not camera_csv_name
+    if automatic_generation:
+        tracking, camera, generation_camera_fast = _latest_complete_camera_generation(game_dir)
+    elif tracking_csv_name:
         tracking_path = str(Path(game_dir) / tracking_csv_name)
         tracking = tracking_path if Path(tracking_path).is_file() else None
     else:
         tracking = find_latest_dataframe_file(game_dir, "tracking")
 
-    if camera_csv_name:
+    if automatic_generation:
+        pass
+    elif camera_csv_name:
         camera_path = str(Path(game_dir) / camera_csv_name)
         camera = camera_path if Path(camera_path).is_file() else None
     else:
@@ -644,6 +750,8 @@ def resolve_csv_paths(
     if camera_fast_csv_name:
         fast_path = str(Path(game_dir) / camera_fast_csv_name)
         camera_fast = fast_path if Path(fast_path).is_file() else None
+    elif automatic_generation:
+        camera_fast = generation_camera_fast
     else:
         camera_fast = find_latest_dataframe_file(game_dir, "camera_fast")
 
