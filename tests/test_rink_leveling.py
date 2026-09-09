@@ -173,6 +173,7 @@ def should_save_previewed_crop_without_materializing_inherited_rotation(tmp_path
         ".stitching_artifacts.json",
         "left camera.png",
         "settings",
+        "inherited_config",
         "state",
         "token",
     ],
@@ -185,6 +186,8 @@ def should_refuse_stale_or_unpreviewed_saves(tmp_path, changed):
         preview = session.preview(state)
         if changed == "settings":
             config["stitching"]["max_output_dimension"] = 1000
+        elif changed == "inherited_config":
+            config["stitching"]["frame_offsets"] = {"left": 12, "right": 18}
         elif changed == "state":
             state["rotation_degrees"][1] += 1
         elif changed == "token":

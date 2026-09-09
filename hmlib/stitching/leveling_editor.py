@@ -175,9 +175,13 @@ class LevelingSession:
         return stitching_lock(self.game_dir, blocking=False)
 
     def _snapshot(self):
+        config = self.config_loader()
         return (
             tuple(_digest(path) for path in self._paths),
-            read_stitching_settings(self.config_loader()).manifest(),
+            read_stitching_settings(config).manifest(),
+            # Include inherited settings outside StitchingSettings too (for
+            # example frame offsets and source-video selection).
+            yaml.safe_dump(config, sort_keys=True),
         )
 
     def _check_fresh(self):
