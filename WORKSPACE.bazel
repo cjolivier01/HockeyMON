@@ -218,7 +218,7 @@ conda_repository(
 ################################ HockeyMON Sub-Modules ################################
 git_repository(
     name = "hm-cupano",
-    commit = "723a6a46c55ff2e6be021b429b34a755428d7b93",
+    commit = "982ff242be277936acfcfaa01c89c1b7c20ba6d8",
     remote = "https://github.com/cjolivier01/hm-cupano.git",
 )
 
@@ -235,7 +235,7 @@ local_rocm_repository(
 
 git_repository(
      name = "jetson-utils",
-    commit = "cd0f92e2436cbde7ddb8ca26818f4ee57156ee3c",
+    commit = "7efddeb92797c15a6a2dfea67244013b2c05b53d",
      remote = "https://github.com/cjolivier01/jetson-utils.git",
 )
 
