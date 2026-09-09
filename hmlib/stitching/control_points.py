@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from hmlib.stitching.calibration import CalibrationAlignmentError
 from hmlib.utils.image import image_height, image_width
 
 CONTROL_POINT_MATCHERS = (
@@ -437,7 +438,7 @@ def calculate_control_points(
             m_kpts0, m_kpts1 = _match_loftr(image0_tensor, image1_tensor, device)
 
     if m_kpts0.shape[0] < 4:
-        raise RuntimeError(
+        raise CalibrationAlignmentError(
             f"{matcher} found {m_kpts0.shape[0]} matches; at least four are required"
         )
     indices = select_evenly_spaced(m_kpts0, max_control_points)

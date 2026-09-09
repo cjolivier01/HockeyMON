@@ -10,6 +10,8 @@ import numpy as np
 import tifffile
 import torch
 
+from hmlib.stitching.calibration import CalibrationAlignmentError
+
 INVALID_MAP_COORDINATE = np.iinfo(np.uint16).max
 MAXIMUM_MAP_DIMENSION = int(INVALID_MAP_COORDINATE) - 1
 _TIFF_RESOLUTION = 150
@@ -200,16 +202,23 @@ def _create_opencv_mapping_files(
 
     left_height, left_width = images[0].shape[:2]
     right_height, right_width = images[1].shape[:2]
-    result = native_builder(
-        points0,
-        points1,
-        left_width,
-        left_height,
-        right_width,
-        right_height,
-        int(max_output_dimension or 0),
-        int(max_output_width or 0),
-    )
+    try:
+        result = native_builder(
+            points0,
+            points1,
+            left_width,
+            left_height,
+            right_width,
+            right_height,
+            int(max_output_dimension or 0),
+            int(max_output_width or 0),
+        )
+    except RuntimeError as exc:
+        # The rebuilt extension distinguishes rejected geometry from allocation,
+        # I/O and artifact failures. Older extensions' untyped errors stay fatal.
+        if type(exc).__name__ == "CalibrationAlignmentError":
+            raise CalibrationAlignmentError(str(exc)) from exc
+        raise
     image_maps = result["image_maps"]
     if len(image_maps) != 2:
         raise RuntimeError("Native OpenCV mapping returned an invalid image-map count")

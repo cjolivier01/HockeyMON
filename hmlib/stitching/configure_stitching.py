@@ -11,8 +11,11 @@ import json
 import logging
 import os
 import shutil
+import re
+import tempfile
 import subprocess
 from contextlib import contextmanager
+from dataclasses import replace
 import fcntl
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
@@ -33,7 +36,12 @@ from hmlib.config import (
 from hmlib.stitching.control_points import (
     calculate_control_points,
 )
-from hmlib.stitching.hugin import configure_control_points
+from hmlib.stitching.hugin import configure_control_points, write_control_points
+from hmlib.stitching.calibration import (
+    CalibrationAlignmentError,
+    calibration_candidates,
+    sample_frame_indices,
+)
 from hmlib.stitching.homography_maps import (
     create_opencv_affine_ransac_mapping_files,
     create_opencv_magsac_mapping_files,
@@ -49,6 +57,7 @@ from hmlib.stitching.settings import (
     validate_output_scale,
 )
 from hmlib.video.video_stream import extract_frame_image
+from hmlib.video.ffmpeg import BasicVideoInfo
 
 from .synchronize import configure_synchronization
 
@@ -132,10 +141,18 @@ def get_enblend_bin() -> str:
     return "enblend"
 
 
-def _run_stitching_command(cmd: Sequence[str]) -> None:
+def _run_stitching_command(cmd: Sequence[str]) -> str:
     """Run an external stitching command and fail if it does not complete."""
     logger.info("Running stitching command: %s", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    try:
+        result = subprocess.run(
+            cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.error("Stitching command failed: %s\n%s", " ".join(cmd), exc.stdout)
+        raise
+    logger.info("%s", result.stdout)
+    return result.stdout
 
 
 def get_tiff_tag_value(tiff_tag):
@@ -615,6 +632,7 @@ def build_stitching_project(
     mapping_backend: Optional[str] = None,
     max_output_dimension: Optional[int] = None,
     settings: Optional[StitchingSettings] = None,
+    control_points: Optional[Dict[str, torch.Tensor]] = None,
 ):
     """Create or update a Hugin PTO project and seam masks for two images.
 
@@ -640,6 +658,13 @@ def build_stitching_project(
         max_output_dimension=max_output_dimension,
         camera_fov={"horizontal_fov": fov} if fov is not None else None,
     )
+    if (
+        isinstance(max_control_points, bool)
+        or not isinstance(max_control_points, int)
+        or max_control_points < 4
+    ):
+        raise ValueError("max_control_points must be an integer of at least four")
+    settings = replace(settings, max_control_points=max_control_points)
     control_point_matcher = settings.control_point_matcher
     mapping_backend = settings.mapping_backend
     max_output_dimension = settings.max_output_dimension
@@ -716,7 +741,18 @@ def build_stitching_project(
                     autooptimiser_out,
                     hm_project,
                 ]
-                _run_stitching_command(cmd)
+                output = _run_stitching_command(cmd)
+                rms_values = re.findall(
+                    r"([0-9]+(?:[.][0-9]+)?(?:[eE][+-]?[0-9]+)?)\s+units", output
+                )
+                if (
+                    not rms_values
+                    or not np.isfinite(float(rms_values[-1]))
+                    or float(rms_values[-1]) > 50
+                ):
+                    raise CalibrationAlignmentError(
+                        "Hugin optimization did not produce a finite RMS below 50 pixels"
+                    )
                 _set_hugin_optimization_variables(autooptimiser_out, ("r1", "p1", "y1"))
                 apply_projection(
                     autooptimiser_out,
@@ -821,24 +857,21 @@ def build_stitching_project(
             use_hugin = True
 
         set_source_horizontal_fov(hm_project, settings.horizontal_fov)
-        control_points = configure_control_points(
-            output_directory=str(dir_name),
-            project_file_path=hm_project,
-            image0=left_image_file,
-            image1=right_image_file,
-            max_control_points=max_control_points,
-            force=True,
-            use_hugin=use_hugin,
-            matcher=control_point_matcher,
-        )
+        if control_points is None:
+            control_points = configure_control_points(
+                output_directory=str(dir_name),
+                project_file_path=hm_project,
+                image0=left_image_file,
+                image1=right_image_file,
+                max_control_points=max_control_points,
+                force=True,
+                use_hugin=use_hugin,
+                matcher=control_point_matcher,
+            )
+        else:
+            write_control_points(hm_project, control_points)
         _set_hugin_optimization_variables(hm_project, ("r1", "p1", "y1"))
-        try:
-            remap_ok = run_remap_pipeline(control_points)
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            raise RuntimeError(
-                f"{control_point_matcher} control points did not produce "
-                f"remappable {mapping_backend} outputs"
-            ) from exc
+        remap_ok = run_remap_pipeline(control_points)
         if not remap_ok:
             raise RuntimeError(
                 f"{control_point_matcher} control points produced low-quality seam masks"
@@ -947,6 +980,13 @@ def configure_video_stitching(
         mapping_backend=mapping_backend,
         max_output_dimension=max_output_dimension,
     )
+    if (
+        isinstance(max_control_points, bool)
+        or not isinstance(max_control_points, int)
+        or max_control_points < 4
+    ):
+        raise ValueError("max_control_points must be an integer of at least four")
+    settings = replace(settings, max_control_points=max_control_points)
     control_point_matcher = settings.control_point_matcher
     mapping_backend = settings.mapping_backend
     max_output_dimension = settings.max_output_dimension
@@ -1060,27 +1100,57 @@ def _configure_video_stitching_locked(
         )
         or (os.path.exists(pto_project_file) and is_older_than(pto_project_file, autooptimiser_out))
     ):
-        left_image_file, right_image_file = extract_frames(
-            video_left,
-            base_frame_offset + left_frame_offset,
-            video_right,
-            base_frame_offset + right_frame_offset,
-            force=True,
+        left_info, right_info = BasicVideoInfo(video_left), BasicVideoInfo(video_right)
+        indices = sample_frame_indices(
+            int(round(base_frame_offset + left_frame_offset)),
+            int(round(base_frame_offset + right_frame_offset)),
+            settings.calibration_frame_count,
+            left_info.frame_count,
+            right_info.frame_count,
         )
-
-        project_built = build_stitching_project(
-            project_file_path=pto_project_file,
-            image_files=[left_image_file, right_image_file],
-            max_control_points=max_control_points,
-            force=force,
-            skip_if_exists=not force,
-            control_point_matcher=control_point_matcher,
-            mapping_backend=mapping_backend,
-            max_output_dimension=max_output_dimension,
-            settings=settings,
-        )
-        if not project_built:
-            raise RuntimeError("Failed to build stitching project")
+        with tempfile.TemporaryDirectory(prefix="hm-calibration-input-", dir=dir_name) as sampled:
+            pairs = []
+            for index, (left_frame, right_frame) in enumerate(indices):
+                images = (Path(sampled) / f"left-{index}.png", Path(sampled) / f"right-{index}.png")
+                extract_frame_image(video_left, frame_number=left_frame, dest_image=str(images[0]))
+                extract_frame_image(
+                    video_right, frame_number=right_frame, dest_image=str(images[1])
+                )
+                pairs.append(images)
+            last_alignment_error = None
+            for candidate in calibration_candidates(
+                pairs,
+                max_control_points,
+                calculate_control_points,
+                settings.control_point_matcher,
+            ):
+                logger.info("Trying stitching calibration using %s", candidate.label)
+                reference_images = [
+                    str(Path(dir_name) / name) for name in ("left.png", "right.png")
+                ]
+                for source, target in zip(candidate.images, reference_images):
+                    shutil.copyfile(source, target)
+                try:
+                    project_built = build_stitching_project(
+                        project_file_path=pto_project_file,
+                        image_files=reference_images,
+                        max_control_points=max_control_points,
+                        force=True,
+                        skip_if_exists=False,
+                        settings=settings,
+                        control_points=dict(candidate.points),
+                    )
+                except CalibrationAlignmentError as exc:
+                    last_alignment_error = exc
+                    logger.warning("Skipping %s: %s", candidate.label, exc)
+                    continue
+                if not project_built:
+                    raise RuntimeError("Failed to build stitching project")
+                break
+            else:
+                raise CalibrationAlignmentError(
+                    "No calibration candidate produced usable geometry"
+                ) from last_alignment_error
 
     _save_stitched_reference_frame(dir_name)
 

@@ -54,3 +54,19 @@ cropping may produce a smaller width. Native OpenCV applies caps during map
 construction. Width-cap support requires rebuilding the HockeyMON native
 extension. Both calibration and cache reuse record the complete resolved settings;
 changing FOV, projection, framing, optimizer choice or caps invalidates old maps.
+
+## Multiple calibration frames
+
+`stitching.calibration_frame_count` selects 1–64 synchronized pairs (default 4).
+Sampling starts at the configured calibration time and takes consecutive pairs;
+short clips use the remaining available pairs with a warning. Source dimensions
+must remain stable. Pooled correspondences are tried first, followed by the
+individual pairs with the most matches. Duplicate static correspondences are
+removed before pooling is sampled to the requested control-point limit.
+
+Only rejected geometric alignment can trigger another candidate. Model, disk,
+seam, resource-limit and publication errors remain terminal with their original
+cause. NONA alignment requires a reported optimization RMS at most 50 pixels;
+OpenCV distinguishes geometric rejection in the rebuilt native extension.
+Older native extensions retain terminal behavior for untyped mapping errors.
+Frame count and the control-point limit are recorded in calibration provenance.
