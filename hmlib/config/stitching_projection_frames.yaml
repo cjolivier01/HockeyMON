@@ -1,0 +1,145 @@
+# Projection review matrix for scripts/capture_stitching_projection_frames.py.
+# Paths are relative to this file. Set source_game_dir here or pass
+# --source-game-dir=/path/to/game on the command line.
+# Completed captures are validated and content-checked before reuse.
+# Pass --force to rerun selected cases. Video mode requires one input per side;
+# combine split recordings first. Image mode can reuse saved PTO correspondences.
+version: 1
+source_game_dir: null
+output_dir: ../../projection-review
+
+source_mode: videos  # Or images to use existing left.png/right.png.
+reuse_control_points: false  # Image mode only; requires hm_project.pto.
+pipeline:
+  timeout_seconds: 360
+
+defaults:
+  control_point_matcher: superpoint-lightglue
+  mapping_backend: nona
+  auto_fov: true
+  horizontal_fov: 180  # Retained in metadata but ignored while auto_fov is true.
+  auto_canvas: true
+  auto_crop: false
+  control_points: 900
+  frame_count: 4
+  stitch_frame_time: "00:00:00"
+  max_output_width: 4096
+
+# The 18 projections without tunable Hugin projection parameters get one
+# representative AUTO-FOV case. The four parameterized projections get ten
+# cases apiece, including AUTO FOV and fixed 170/180/190-degree views.
+projections:
+  - name: rectilinear
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: cylindrical
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: equirectangular
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: full-frame-fisheye
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: stereographic
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: mercator
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: transverse-mercator
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: sinusoidal
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: lambert-cylindrical-equal-area
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: lambert-azimuthal-equal-area
+    variants:
+      - {label: auto-fov, parameters: []}
+
+  # Parameters: first and second standard parallels (phi1, phi2), each -90..90.
+  - name: albers-equal-area-conic
+    variants:
+      - {label: default-auto, parameters: [0, 60]}
+      - {label: default-fov170, parameters: [0, 60], auto_fov: false, horizontal_fov: 170}
+      - {label: default-fov180, parameters: [0, 60], auto_fov: false, horizontal_fov: 180}
+      - {label: default-fov190, parameters: [0, 60], auto_fov: false, horizontal_fov: 190}
+      - {label: symmetric-wide-auto, parameters: [-45, 45]}
+      - {label: northern-auto, parameters: [30, 60]}
+      - {label: southern-auto, parameters: [-60, -30]}
+      - {label: close-parallels-auto, parameters: [30, 40]}
+      - {label: asymmetric-fov180, parameters: [-30, 60], auto_fov: false, horizontal_fov: 180}
+      - {label: cropped-fov190, parameters: [15, 75], auto_fov: false, horizontal_fov: 190, auto_crop: true}
+
+  - name: miller-cylindrical
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: panini
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: architectural
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: orthographic
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: equisolid
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: equirectangular-panini
+    variants:
+      - {label: auto-fov, parameters: []}
+
+  # Parameters: plane angle alpha (1..179), rounded-corner switch (0 or 1).
+  - name: biplane
+    variants:
+      - {label: default-auto, parameters: [45, 0]}
+      - {label: default-fov170, parameters: [45, 0], auto_fov: false, horizontal_fov: 170}
+      - {label: default-fov180, parameters: [45, 0], auto_fov: false, horizontal_fov: 180}
+      - {label: default-fov190, parameters: [45, 0], auto_fov: false, horizontal_fov: 190}
+      - {label: rounded-auto, parameters: [45, 1]}
+      - {label: narrow-angle-auto, parameters: [15, 0]}
+      - {label: wide-angle-auto, parameters: [90, 0]}
+      - {label: wide-rounded-auto, parameters: [90, 1]}
+      - {label: narrow-rounded-fov180, parameters: [15, 1], auto_fov: false, horizontal_fov: 180}
+      - {label: retained-canvas-fov190, parameters: [60, 1], auto_fov: false, horizontal_fov: 190, auto_canvas: false}
+
+  # Parameter: side-plane angle alpha (1..120).
+  - name: triplane
+    variants:
+      - {label: default-auto, parameters: [60]}
+      - {label: default-fov170, parameters: [60], auto_fov: false, horizontal_fov: 170}
+      - {label: default-fov180, parameters: [60], auto_fov: false, horizontal_fov: 180}
+      - {label: default-fov190, parameters: [60], auto_fov: false, horizontal_fov: 190}
+      - {label: narrow-auto, parameters: [20]}
+      - {label: medium-auto, parameters: [45]}
+      - {label: wide-auto, parameters: [90]}
+      - {label: maximum-auto, parameters: [120]}
+      - {label: cropped-fov180, parameters: [45], auto_fov: false, horizontal_fov: 180, auto_crop: true}
+      - {label: retained-canvas-fov190, parameters: [90], auto_fov: false, horizontal_fov: 190, auto_canvas: false}
+
+  # Parameters: compression Cmpr (0..150), top squeeze and bottom squeeze
+  # (-100..100). Fixed wide-FOV cases use Cmpr=100, whose Hugin FOV limit
+  # comfortably includes 170/180/190 degrees.
+  - name: general-panini
+    variants:
+      - {label: default-auto, parameters: [100, 0, 0]}
+      - {label: default-fov170, parameters: [100, 0, 0], auto_fov: false, horizontal_fov: 170}
+      - {label: default-fov180, parameters: [100, 0, 0], auto_fov: false, horizontal_fov: 180}
+      - {label: default-fov190, parameters: [100, 0, 0], auto_fov: false, horizontal_fov: 190}
+      - {label: rectilinear-like-auto, parameters: [0, 0, 0]}
+      - {label: mid-compression-auto, parameters: [50, 0, 0]}
+      - {label: cylindrical-like-auto, parameters: [150, 0, 0]}
+      - {label: hard-squeeze-auto, parameters: [100, 50, 50]}
+      - {label: soft-squeeze-fov180, parameters: [100, -50, -50], auto_fov: false, horizontal_fov: 180}
+      - {label: asymmetric-cropped-fov190, parameters: [100, 40, -40], auto_fov: false, horizontal_fov: 190, auto_crop: true}
+
+  - name: thoby
+    variants:
+      - {label: auto-fov, parameters: []}
+  - name: hammer-aitoff
+    variants:
+      - {label: auto-fov, parameters: []}

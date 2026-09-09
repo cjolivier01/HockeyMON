@@ -620,3 +620,11 @@ sh_test(
     data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_stitching_artifacts.py", "stitching_fixtures.py"],
     env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
+
+sh_test(
+    name = "test_capture_stitching_projection_frames",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_capture_stitching_projection_frames.py", "cv2", "numpy", "pytest", "tifffile", "torch", "yaml"],
+    data = ["//:pyproject.toml", "//:scripts/capture_stitching_projection_frames.py", "//hmlib:config_data_files", "//hmlib:hmlib.lib", "python_runtime.sh", "test_capture_stitching_projection_frames.py", "stitching_fixtures.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)

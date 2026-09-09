@@ -5,6 +5,7 @@ exports_files(
         "Pipfile.lock",
         "pyproject.toml",
         "scripts/hm_cuda_container.py",
+        "scripts/capture_stitching_projection_frames.py",
     ]
 )
 
