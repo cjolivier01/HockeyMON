@@ -1,5 +1,6 @@
 """Load enblend seam masks at their PNG-declared canvas position."""
 
+import math
 import struct
 import zlib
 from dataclasses import dataclass
@@ -9,6 +10,13 @@ from typing import Sequence, Union
 import cv2
 import numpy as np
 import tifffile
+
+from hmlib.stitching.artifact_validation import (
+    MAX_SEAM_BYTES,
+    bounded_file,
+    validate_canvas,
+    validate_mapping_tiff,
+)
 
 PathLike = Union[str, Path]
 
@@ -34,6 +42,7 @@ def read_png_layout(path: PathLike) -> PngLayout:
     """Read and validate PNG dimensions plus an optional pixel-unit ``oFFs`` chunk."""
 
     path = Path(path)
+    bounded_file(path, MAX_SEAM_BYTES)
     with path.open("rb") as png_file:
         if _read_exact(png_file, 8, "signature") != b"\x89PNG\r\n\x1a\n":
             raise ValueError(f"Invalid PNG signature: {path}")
@@ -56,6 +65,11 @@ def read_png_layout(path: PathLike) -> PngLayout:
                 raise ValueError(f"PNG IHDR is not the first chunk: {path}")
             first_chunk = False
 
+            expected_lengths = {b"IHDR": 13, b"oFFs": 9, b"IEND": 0}
+            if chunk_type in expected_lengths and length != expected_lengths[chunk_type]:
+                raise ValueError(f"Invalid PNG {chunk_type!r} chunk length: {path}")
+            if length > MAX_SEAM_BYTES:
+                raise ValueError(f"Oversized PNG chunk: {path}")
             crc = zlib.crc32(chunk_type)
             retained_data = bytearray()
             remaining = length
@@ -77,6 +91,7 @@ def read_png_layout(path: PathLike) -> PngLayout:
                 width, height = struct.unpack(">II", retained_data[:8])
                 if width == 0 or height == 0:
                     raise ValueError(f"Invalid PNG dimensions: {path}")
+                validate_canvas(width, height)
                 layout = PngLayout(width=width, height=height)
             elif chunk_type == b"oFFs":
                 if layout is None or have_offset or have_image_data or length != 9:
@@ -100,6 +115,8 @@ def read_png_layout(path: PathLike) -> PngLayout:
 
         if layout is None:
             raise ValueError(f"PNG is missing its IHDR chunk: {path}")
+        if not have_image_data:
+            raise ValueError(f"PNG is missing its IDAT chunk: {path}")
         if not have_end:
             raise ValueError(f"PNG is missing its IEND chunk: {path}")
         return layout
@@ -108,8 +125,7 @@ def read_png_layout(path: PathLike) -> PngLayout:
 def load_canvas_seam_mask(path: PathLike, canvas_width: int, canvas_height: int) -> np.ndarray:
     """Decode a seam and replicate its edges around the PNG crop on the full canvas."""
 
-    if canvas_width <= 0 or canvas_height <= 0:
-        raise ValueError("Seam canvas dimensions must be positive")
+    validate_canvas(canvas_width, canvas_height)
 
     path = Path(path)
     layout = read_png_layout(path)
@@ -153,6 +169,7 @@ def read_mapping_canvas_size(mapping_files: Sequence[PathLike]) -> tuple[int, in
 
     placements = []
     for mapping_file in mapping_files:
+        validate_mapping_tiff(mapping_file)
         with tifffile.TiffFile(mapping_file) as tif:
             page = tif.pages[0]
             tags = page.tags
@@ -160,6 +177,13 @@ def read_mapping_canvas_size(mapping_files: Sequence[PathLike]) -> tuple[int, in
             y_resolution = _tiff_tag_number(tags.get("YResolution"), 1.0)
             x_position = _tiff_tag_number(tags.get("XPosition"), 0.0)
             y_position = _tiff_tag_number(tags.get("YPosition"), 0.0)
+            if not all(
+                math.isfinite(value)
+                for value in (x_resolution, y_resolution, x_position, y_position)
+            ):
+                raise ValueError(f"Non-finite TIFF placement metadata: {mapping_file}")
+            if x_resolution <= 0 or y_resolution <= 0:
+                raise ValueError(f"Invalid TIFF placement resolution: {mapping_file}")
             # Playback's get_image_geo_position() quantizes each absolute
             # position before get_canvas_info() normalizes their common origin.
             # Match that ordering so the seam and runtime canvases cannot differ
@@ -174,6 +198,5 @@ def read_mapping_canvas_size(mapping_files: Sequence[PathLike]) -> tuple[int, in
     min_y = min(y for _, y, _, _ in placements)
     width = max(x - min_x + width for x, _, width, _ in placements)
     height = max(y - min_y + height for _, y, _, height in placements)
-    if width <= 0 or height <= 0:
-        raise ValueError("Hugin mapping TIFFs describe an invalid canvas")
+    validate_canvas(width, height)
     return width, height
