@@ -210,6 +210,11 @@ class ResizingBox(BasicBox):
                 img = vis.draw_centered_lines(img, bbox=shrink_box, thickness=4, color=(0, 0, 255))
         return img
 
+    def set_resizing_shrink_thresholds(self, width_ratio: float, height_ratio: float) -> None:
+        """Tune sticky shrink thresholds while retaining motion/braking state."""
+        self._size_ratio_thresh_shrink_dw = float(width_ratio)
+        self._size_ratio_thresh_shrink_dh = float(height_ratio)
+
     def _get_grow_wh_and_shrink_wh(self, bbox: torch.Tensor):
         my_width = width(bbox)
         my_height = height(bbox)
@@ -905,14 +910,15 @@ class MovingBox(ResizingBox):
         delay_x: Optional[int] = None,
         delay_y: Optional[int] = None,
     ):
-        if delay_x is not None and int(delay_x) > 0:
+        # Repeated overshoot requests must retain the original braking deadline.
+        if delay_x is not None and int(delay_x) > 0 and self._stop_delay_x == self._zero_int:
             self._stop_delay_x = torch.tensor(int(delay_x), dtype=torch.int64, device=self.device)
             self._stop_delay_x_counter = self._zero_int.clone()
             self._stop_decel_x = -self._current_speed_x / self._stop_delay_x.to(
                 self._current_speed_x.dtype
             )
             self._stop_trigger_dir_x = torch.sign(self._current_speed_x)
-        if delay_y is not None and int(delay_y) > 0:
+        if delay_y is not None and int(delay_y) > 0 and self._stop_delay_y == self._zero_int:
             self._stop_delay_y = torch.tensor(int(delay_y), dtype=torch.int64, device=self.device)
             self._stop_delay_y_counter = self._zero_int.clone()
             self._stop_decel_y = -self._current_speed_y / self._stop_delay_y.to(

@@ -159,6 +159,38 @@ def should_propagate_camera_ui_initialization_failure(monkeypatch):
     assert tracker._hm_ui_process is None
 
 
+@pytest.mark.parametrize("native_tracker", [False, True])
+def should_tune_only_follower_zoom_and_preserve_config_reset(monkeypatch, native_tracker):
+    PlayTracker = _load_play_tracker(monkeypatch)
+    tracker = PlayTracker.__new__(PlayTracker)
+    follower = SimpleNamespace(thresholds=None, velocity=12.0, braking_frames=3)
+    follower.set_resizing_shrink_thresholds = lambda *thresholds: setattr(
+        follower, "thresholds", thresholds
+    )
+    tracker._current_roi_aspect = None if native_tracker else follower
+    accessed = []
+
+    def get_live_box(index):
+        accessed.append(index)
+        return follower
+
+    tracker._playtracker = SimpleNamespace(get_live_box=get_live_box) if native_tracker else None
+    tracker._apply_zoom_in_aggressiveness(100)
+    assert follower.thresholds == pytest.approx((0.008, 0.01))
+    assert follower.velocity == 12.0
+    assert follower.braking_frames == 3
+    assert accessed == ([1] if native_tracker else [])
+    tracker._apply_zoom_in_aggressiveness(25)
+    assert follower.thresholds == pytest.approx((0.08, 0.1))
+
+    tracker._ui_inited = True
+    tracker._stitch_slider_enabled = False
+    tracker._ui_color_inited = False
+    tracker._ui_color_left_inited = False
+    tracker._ui_color_right_inited = False
+    assert ("rink", "camera", "zoom_in_aggressiveness") in tracker._ui_managed_config_paths()
+
+
 def should_round_trip_linked_and_independent_fixed_edge_rotation_controls(monkeypatch):
     PlayTracker = _load_play_tracker(monkeypatch)
 
