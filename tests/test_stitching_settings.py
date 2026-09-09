@@ -285,3 +285,64 @@ def should_allow_explicit_zero_rotation_to_disable_native_rink_default():
         }
     )
     assert settings.mapping_backend == "opencv-magsac"
+
+
+@pytest.mark.skipif(
+    not shutil.which("pano_modify") or not shutil.which("pto_gen"),
+    reason="Hugin binaries unavailable",
+)
+@pytest.mark.parametrize("auto_canvas", [False, True])
+def should_preserve_relative_scale_after_real_hugin_projection(tmp_path, auto_canvas):
+    images = [tmp_path / "left.png", tmp_path / "right.png"]
+    for image in images:
+        assert cv2.imwrite(str(image), np.zeros((240, 320, 3), dtype=np.uint8))
+    original = tmp_path / "original.pto"
+    subprocess.run(
+        ["pto_gen", "-p", "0", "-f", "108", "-o", str(original), *map(str, images)],
+        check=True,
+        capture_output=True,
+    )
+    settings = _nona(projection_framing={"auto_canvas": auto_canvas, "crop": [0.1, 0.9, 0.2, 0.8]})
+    sizes = {}
+    for scale in (1.0, 0.5, 2.0):
+        project = tmp_path / f"scaled-{scale}.pto"
+        project.write_bytes(original.read_bytes())
+        sizes[scale] = apply_projection(
+            project,
+            settings,
+            lambda cmd: subprocess.run(cmd, check=True, capture_output=True),
+            scale=scale,
+        )
+    for scale in (0.5, 2.0):
+        actual, baseline = sizes[scale], sizes[1.0]
+        assert actual.width == max(2, int(baseline.width * scale) // 2 * 2)
+        assert actual.height == max(2, int(baseline.height * scale) // 2 * 2)
+        assert actual.horizontal_fov == baseline.horizontal_fov
+        assert actual.projection == baseline.projection
+        for index, edge in enumerate(actual.crop):
+            ratio = actual.width / baseline.width if index < 2 else actual.height / baseline.height
+            assert abs(edge - baseline.crop[index] * ratio) <= 1.01
+    capped = tmp_path / "capped.pto"
+    capped.write_bytes(original.read_bytes())
+    constrained = _nona(
+        max_output_width=sizes[1.0].width, projection_framing={"auto_canvas": auto_canvas}
+    )
+    result = apply_projection(
+        capped,
+        constrained,
+        lambda cmd: subprocess.run(cmd, check=True, capture_output=True),
+        scale=2,
+    )
+    assert result.width <= sizes[1.0].width
+
+
+@pytest.mark.parametrize("scale", [0, -1, float("nan"), float("inf"), True])
+def should_reject_invalid_scale_before_hugin_mutation(tmp_path, scale):
+    project = tmp_path / "original.pto"
+    project.write_text(_pto())
+    before = project.read_bytes()
+    calls = []
+    with pytest.raises(ValueError, match="scale"):
+        apply_projection(project, _nona(), lambda cmd: calls.append(cmd), scale=scale)
+    assert not calls
+    assert project.read_bytes() == before

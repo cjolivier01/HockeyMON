@@ -41,11 +41,12 @@ from hmlib.stitching.homography_maps import (
 from hmlib.stitching.projections import apply_projection, set_source_horizontal_fov
 from hmlib.stitching.settings import (
     MAPPING_BACKENDS as MAPPING_BACKENDS,
-    OPENCV_MAPPING_BACKENDS,
+    OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS,
     StitchingSettings,
     normalize_mapping_backend as normalize_mapping_backend,
     normalize_max_output_dimension,
     read_stitching_settings,
+    validate_output_scale,
 )
 from hmlib.video.video_stream import extract_frame_image
 
@@ -642,11 +643,7 @@ def build_stitching_project(
     control_point_matcher = settings.control_point_matcher
     mapping_backend = settings.mapping_backend
     max_output_dimension = settings.max_output_dimension
-    if mapping_backend in OPENCV_MAPPING_BACKENDS and scale not in (None, 1.0):
-        raise ValueError(
-            f"The {mapping_backend} backend does not accept Hugin's relative scale; "
-            "use max_output_dimension instead"
-        )
+    validate_output_scale(scale, mapping_backend)
     max_output_dimension = normalize_max_output_dimension(max_output_dimension)
     dir_name = pto_path.parent
     previous_manifest = _read_stitch_artifact_manifest(dir_name)
@@ -719,11 +716,6 @@ def build_stitching_project(
                     autooptimiser_out,
                     hm_project,
                 ]
-                if scale and scale != 1.0:
-                    cmd += [
-                        "-x",
-                        str(scale),
-                    ]
                 _run_stitching_command(cmd)
                 _set_hugin_optimization_variables(autooptimiser_out, ("r1", "p1", "y1"))
                 apply_projection(
@@ -731,6 +723,7 @@ def build_stitching_project(
                     settings,
                     _run_stitching_command,
                     _resolve_local_binary("pano_modify") or "pano_modify",
+                    scale=scale,
                 )
 
                 cmd = [

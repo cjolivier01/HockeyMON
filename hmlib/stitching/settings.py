@@ -55,6 +55,23 @@ OPENCV_MAPPING_BACKENDS = ("opencv-magsac", "opencv-affine-ransac")
 MAPPING_BACKENDS = ("nona", *OPENCV_MAPPING_BACKENDS)
 
 
+def validate_output_scale(scale: float | None, mapping_backend: str) -> None:
+    """Validate an optional Hugin output scale before any artifact mutation."""
+    if scale is None:
+        return
+    if (
+        isinstance(scale, bool)
+        or not isinstance(scale, (int, float))
+        or not math.isfinite(scale)
+        or scale <= 0
+    ):
+        raise ValueError("scale must be a finite positive number")
+    if mapping_backend in OPENCV_MAPPING_BACKENDS and scale != 1:
+        raise ValueError(
+            f"The {mapping_backend} backend does not accept Hugin's relative scale; use max_output_dimension instead"
+        )
+
+
 def normalize_mapping_backend(value: str) -> str:
     name = str(value).strip().lower().replace("_", "-")
     name = {

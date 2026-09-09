@@ -14,6 +14,7 @@ from hmlib.stitching.settings import (
     MAX_CANVAS_PIXELS,
     PROJECTIONS,
     StitchingSettings,
+    validate_output_scale,
 )
 
 
@@ -105,6 +106,7 @@ def _cap_panorama(
     settings: StitchingSettings,
     run: Callable[[Sequence[str]], None],
     binary: str,
+    scale: float | None,
 ) -> None:
     """Scale the canvas and its crop together, validating Hugin's even rounding."""
     geometry = read_panorama_geometry(project)
@@ -112,14 +114,14 @@ def _cap_panorama(
     # working buffers for the full projection before producing cropped images.
     maximum = settings.max_output_dimension or MAX_CANVAS_DIMENSION
     ratio = min(
-        1.0,
+        1.0 if scale is None else scale,
         maximum / geometry.width,
         maximum / geometry.height,
         math.sqrt(MAX_CANVAS_PIXELS / (geometry.width * geometry.height)),
     )
     if settings.max_output_width is not None:
         ratio = min(ratio, settings.max_output_width / geometry.width)
-    if ratio < 1:
+    if ratio != 1:
         # Hugin rounds odd dimensions upwards; request even values inside caps.
         width = max(2, int(geometry.width * ratio) // 2 * 2)
         height = max(2, int(geometry.height * ratio) // 2 * 2)
@@ -147,8 +149,10 @@ def apply_projection(
     settings: StitchingSettings,
     run: Callable[[Sequence[str]], None],
     binary: str = "pano_modify",
+    scale: float | None = None,
 ) -> PanoramaGeometry:
     """Replace a PTO only after its converted projection and caps validate."""
+    validate_output_scale(scale, settings.mapping_backend)
     project = Path(project)
     read_panorama_geometry(project)
     temporary = project.with_name(f".{project.stem}.projection.pto")
@@ -179,7 +183,7 @@ def apply_projection(
         # Work on the validated temporary output until the cap also succeeds.
         capped = project.with_name(f".{project.stem}.capped.pto")
         try:
-            _cap_panorama(temporary, capped, settings, run, binary)
+            _cap_panorama(temporary, capped, settings, run, binary, scale)
         finally:
             capped.unlink(missing_ok=True)
         temporary.replace(project)
