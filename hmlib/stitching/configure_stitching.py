@@ -990,6 +990,8 @@ def configure_video_stitching(
     mapping_backend: Optional[str] = None,
     max_output_dimension: Optional[int] = None,
     settings: Optional[StitchingSettings] = None,
+    scale: Optional[float] = None,
+    device: Optional[torch.device] = None,
 ):
     """Configure stitching while serializing shared artifacts per game."""
     settings = settings or read_stitching_settings(
@@ -1005,6 +1007,7 @@ def configure_video_stitching(
     ):
         raise ValueError("max_control_points must be an integer of at least four")
     settings = replace(settings, max_control_points=max_control_points)
+    validate_output_scale(scale, settings.mapping_backend)
     control_point_matcher = settings.control_point_matcher
     mapping_backend = settings.mapping_backend
     max_output_dimension = settings.max_output_dimension
@@ -1040,6 +1043,8 @@ def configure_video_stitching(
             max_output_dimension=max_output_dimension,
             settings=settings,
             lens_calibration=lens_calibration,
+            scale=scale,
+            device=device,
         )
 
 
@@ -1063,6 +1068,8 @@ def _configure_video_stitching_locked(
     max_output_dimension: Optional[int] = None,
     settings: Optional[StitchingSettings] = None,
     lens_calibration: Optional[LensCalibrationPair] = None,
+    scale: Optional[float] = None,
+    device: Optional[torch.device] = None,
 ):
     """Configure a two-camera stitching project from game videos.
 
@@ -1171,7 +1178,7 @@ def _configure_video_stitching_locked(
             for candidate in calibration_candidates(
                 pairs,
                 max_control_points,
-                partial(calculate_control_points, lens_calibration=lens_calibration),
+                partial(calculate_control_points, lens_calibration=lens_calibration, device=device),
                 settings.control_point_matcher,
             ):
                 logger.info("Trying stitching calibration using %s", candidate.label)
@@ -1188,6 +1195,7 @@ def _configure_video_stitching_locked(
                         force=True,
                         skip_if_exists=False,
                         settings=settings,
+                        scale=scale,
                         lens_calibration=lens_calibration,
                         lens_calibration_resolved=True,
                         control_points=dict(candidate.points),

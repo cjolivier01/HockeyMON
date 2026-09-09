@@ -345,6 +345,8 @@ def read_stitching_settings(
     point_count = _number(_defaulted(stitch, "max_control_points", 1500), "max_control_points")
     if not point_count.is_integer() or point_count < 4:
         raise ValueError("max_control_points must be an integer of at least four")
+    if matcher == "akaze-hamming" and point_count < 6:
+        raise ValueError("AKAZE max_control_points must be at least six")
     return StitchingSettings(
         matcher,
         backend,
