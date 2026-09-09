@@ -115,6 +115,17 @@ stitching:
       horizontal_fov: 108
       vertical_fov: 90
   camera_config: "gopro-mission-1"
+  # Venue defaults rotate the registered camera pair together, before output
+  # projection. A game's projection_framing.rotation_degrees overrides these.
+  rink_configs:
+    vallco:
+      display_name: "Vallco"
+      rotation_degrees: [0, -35, 0]
+    sharks-ice:
+      display_name: "Sharks Ice"
+      rotation_degrees: [0, -25, 0]
+  # Unselected keeps legacy zero rotation; select a venue in the game config.
+  rink_config: null
   pto_project_file: null
   stitch_frame_time: "00:00:00"
   calibration_frame_count: 4
