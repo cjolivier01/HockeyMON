@@ -11,5 +11,5 @@ ffmpeg \
   -map 1:v:0 \
   -map 0:a:0 \
   -shortest \
-  "${@:4}" \
+  "$@" \
   "${OUTPUT_VIDEO_WITH_AUDIO}"
