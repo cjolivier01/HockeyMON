@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -147,3 +150,45 @@ def should_keep_frame_count_in_cache_provenance():
     first = read_stitching_settings({"stitching": {"calibration_frame_count": 1}})
     multiple = read_stitching_settings({"stitching": {"calibration_frame_count": 4}})
     assert first.manifest() != multiple.manifest()
+
+
+def should_rebuild_user_edited_pto_without_replacing_points(monkeypatch, tmp_path):
+    settings = replace(read_stitching_settings(), max_control_points=100)
+    # Use the production manifest filename to keep this fixture tied to its schema.
+    (tmp_path / configure_stitching._STITCH_ARTIFACT_MANIFEST).write_text(
+        json.dumps(settings.manifest())
+    )
+    for name in ("left.png", "right.png", "autooptimiser_out.pto", "hm_project.pto"):
+        (tmp_path / name).write_text("user-edited")
+    os.utime(tmp_path / "autooptimiser_out.pto", (1, 1))
+    os.utime(tmp_path / "hm_project.pto", (2, 2))
+    calls = []
+    monkeypatch.setattr(configure_stitching, "sync_stitch_frame_time_state", lambda **kwargs: False)
+    monkeypatch.setattr(
+        configure_stitching, "_save_stitched_reference_frame", lambda directory: None
+    )
+
+    def build(**kwargs):
+        calls.append(kwargs)
+        return True
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("Edited PTO must not trigger fresh frame matching")
+
+    monkeypatch.setattr(configure_stitching, "build_stitching_project", build)
+    monkeypatch.setattr(configure_stitching, "BasicVideoInfo", unexpected)
+    monkeypatch.setattr(configure_stitching, "calibration_candidates", unexpected)
+    configure_stitching.configure_video_stitching(
+        str(tmp_path),
+        "left.mp4",
+        "right.mp4",
+        100,
+        left_frame_offset=2,
+        right_frame_offset=1,
+        settings=settings,
+    )
+    assert len(calls) == 1
+    assert calls[0]["force"] is False
+    assert calls[0]["skip_if_exists"] is False
+    assert "control_points" not in calls[0]
+    assert calls[0]["image_files"] == [str(tmp_path / "left.png"), str(tmp_path / "right.png")]

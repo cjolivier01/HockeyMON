@@ -1088,7 +1088,24 @@ def _configure_video_stitching_locked(
     # PTO Project File
     pto_project_file: str = os.path.join(dir_name, project_file_name)
     autooptimiser_out: str = os.path.join(dir_name, "autooptimiser_out.pto")
-    if (
+    reference_images = [str(Path(dir_name) / name) for name in ("left.png", "right.png")]
+    retain_edited_project = (
+        not force
+        and bool(is_older_than(pto_project_file, autooptimiser_out))
+        and all(Path(image).is_file() for image in reference_images)
+        and _read_stitch_artifact_manifest(dir_name) == settings.manifest()
+    )
+    if retain_edited_project:
+        if not build_stitching_project(
+            project_file_path=pto_project_file,
+            image_files=reference_images,
+            max_control_points=max_control_points,
+            force=False,
+            skip_if_exists=False,
+            settings=settings,
+        ):
+            raise RuntimeError("Failed to rebuild edited stitching project")
+    elif (
         force
         or not _stitch_project_is_complete(
             pto_project_file,
