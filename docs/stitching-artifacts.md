@@ -22,9 +22,14 @@ state during Hugin commands. A nonblocking lock is available to interactive
 calibration editors so an active rebuild can be reported immediately.
 
 The manifest records effective settings plus source video identity, frame offsets
-and the selected timestamp. Changing a source, offset or framing invalidates the
-cache. Source references in published PTOs point to stable game-local `left.png`
-and `right.png`, and repeated calls using those images can reuse the cache.
+the selected timestamp, effective output scale and pinned lens-profile fingerprint.
+Changing a source, offset, scale, lens profile or framing invalidates the cache. Source references in published PTOs point to stable game-local `left.png`
+and `right.png`. Image inputs are identified by contents, so repeated frame-array
+calls reuse the generation despite fresh temporary filenames and skip matching
+on a cache hit. Content checks also detect edits to published reference images.
+A manually edited PTO retains its control points on a nonforced rebuild only
+when its effective settings, source identity and reference images still match.
+All entry points propagate the game identity when invalidating geometry caches.
 Derived rink masks and panorama-space config caches are invalidated only after
 the replacement has passed validation; timestamps/audio offsets remain intact.
 

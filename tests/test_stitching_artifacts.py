@@ -443,3 +443,265 @@ def should_reject_uniform_staged_owner_seam_before_replacement(tmp_path, monkeyp
     with pytest.raises(ValueError, match="uniform"):
         blender2.make_seam_and_xor_masks(str(tmp_path), "mapping_", force=True)
     assert (tmp_path / "seam_file.png").read_bytes() == old
+
+
+def _source_images(directory):
+    paths = [directory / "left.png", directory / "right.png"]
+    for image in paths:
+        assert cv2.imwrite(str(image), np.zeros((3, 4, 3), np.uint8))
+    return [str(path) for path in paths]
+
+
+def _build_fake_generation(**kwargs):
+    stage = Path(kwargs["project_file_path"]).parent
+    retained = stage / "hm_project.pto"
+    lines = retained.read_text().splitlines() if retained.exists() else []
+    manual_points = [line for line in lines if line.startswith("c ")]
+    write_generation(stage)
+    for name in ("hm_project.pto", "autooptimiser_out.pto"):
+        (stage / name).write_text(
+            "p f2 w4 h3 v180\n"
+            + "\n".join("i w4 h3 n" + json.dumps(image) for image in kwargs["image_files"])
+            + "\n"
+            + "\n".join(manual_points)
+            + "\n"
+        )
+    return True
+
+
+def should_reuse_frame_content_before_running_matcher_or_invalidating_again(tmp_path, monkeypatch):
+    import torch
+    from hmlib.cli import create_control_points
+
+    frame = np.zeros((3, 4, 3), np.uint8)
+    matches, builds, invalidations = [], [], []
+    points = {"m_kpts0": torch.zeros((4, 2)), "m_kpts1": torch.zeros((4, 2))}
+
+    def match(left, right, **kwargs):
+        matches.append((left, right))
+        assert Path(left).is_file() and Path(right).is_file()
+        return points
+
+    def build(**kwargs):
+        builds.append(kwargs)
+        assert kwargs["control_points"] is points
+        return _build_fake_generation(**kwargs)
+
+    monkeypatch.setattr(create_control_points, "calculate_control_points", match)
+    monkeypatch.setattr(configure_stitching, "_build_stitching_project_in_place", build)
+    monkeypatch.setattr(
+        configure_stitching,
+        "invalidate_stitching_geometry",
+        lambda directory, **kwargs: invalidations.append(kwargs),
+    )
+    config = {"rink": {"ice_contours_mask_count": 2}}
+    for _ in range(3):
+        assert create_control_points.configure_stitching(
+            frame,
+            frame,
+            str(tmp_path),
+            skip_if_exists=True,
+            force=False,
+            game_id="demo",
+            game_config=config,
+        )
+    assert len(matches) == len(builds) == len(invalidations) == 1
+    assert invalidations[0]["game_id"] == "demo"
+    assert invalidations[0]["game_config"] is config
+    assert not list(tmp_path.glob("hm-calibration-input-*"))
+    # A real content change must rebuild even though temporary names are ignored.
+    create_control_points.configure_stitching(
+        frame + 1, frame, str(tmp_path), skip_if_exists=True, force=False
+    )
+    assert len(matches) == len(builds) == 2
+
+
+def should_pin_original_game_lenses_across_staging_and_invalidate_profile_changes(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    images = _source_images(source)
+    game = tmp_path / "game"
+    game.mkdir()
+    camera = {"width": 4, "height": 3, "fx": 2, "fy": 2, "cx": 2, "cy": 1, "d": [0, 0, 0, 0]}
+    profile = {"left_uniforms": camera.copy(), "right_uniforms": camera.copy()}
+    profile_path = game / "left_calibration.json"
+    profile_path.write_text(json.dumps(profile))
+    pairs = []
+
+    def build(**kwargs):
+        pair = kwargs["lens_calibration"]
+        pairs.append(pair)
+        assert kwargs["lens_calibration_resolved"] is True
+        assert pair.fingerprint == kwargs["settings"].lens_profile_fingerprint
+        assert not (Path(kwargs["project_file_path"]).parent / "left_calibration.json").exists()
+        return _build_fake_generation(**kwargs)
+
+    monkeypatch.setattr(configure_stitching, "_build_stitching_project_in_place", build)
+    for _ in range(2):
+        configure_stitching.build_stitching_project(
+            str(game / "hm_project.pto"), images, 20, control_point_matcher="akaze"
+        )
+    assert len(pairs) == 1
+    profile["right_uniforms"]["fx"] = 3
+    profile_path.write_text(json.dumps(profile))
+    configure_stitching.build_stitching_project(
+        str(game / "hm_project.pto"), images, 20, control_point_matcher="akaze"
+    )
+    assert len(pairs) == 2 and pairs[0].fingerprint != pairs[1].fingerprint
+    assert pairs[0].right.fx == 2 and pairs[1].right.fx == 3
+
+
+def should_freeze_missing_lens_profile_before_entering_private_builder(tmp_path, monkeypatch):
+    images = _source_images(tmp_path)
+
+    def build(**kwargs):
+        assert kwargs["lens_calibration"] is None
+        assert kwargs["lens_calibration_resolved"] is True
+        (tmp_path / "left_calibration.json").write_text("malformed late profile")
+        return _build_fake_generation(**kwargs)
+
+    monkeypatch.setattr(configure_stitching, "_build_stitching_project_in_place", build)
+    configure_stitching.build_stitching_project(
+        str(tmp_path / "hm_project.pto"), images, 20, control_point_matcher="akaze"
+    )
+
+
+def should_invalidate_direct_cache_when_effective_scale_changes(tmp_path, monkeypatch):
+    images = _source_images(tmp_path)
+    calls = []
+
+    def build(**kwargs):
+        calls.append(kwargs["scale"])
+        return _build_fake_generation(**kwargs)
+
+    monkeypatch.setattr(configure_stitching, "_build_stitching_project_in_place", build)
+    settings = configure_stitching.read_stitching_settings(
+        {"stitching": {"mapping_backend": "nona", "run_autooptimizer": True}}
+    )
+    for scale in (None, 1, 0.5, 0.5, 2):
+        configure_stitching.build_stitching_project(
+            str(tmp_path / "hm_project.pto"), images, 20, settings=settings, scale=scale
+        )
+    assert calls == [None, 0.5, 2]
+    assert json.loads((tmp_path / ".stitching_artifacts.json").read_text())["output_scale"] == "2"
+
+
+@pytest.mark.parametrize("change", [None, "scale", "source", "settings", "force", "reference"])
+def should_retain_edited_pto_only_for_current_video_generation(tmp_path, monkeypatch, change):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    import torch
+
+    images = _source_images(tmp_path)
+    videos = [tmp_path / "left.mp4", tmp_path / "right.mp4"]
+    for path in videos:
+        path.write_bytes(b"video")
+    settings = replace(
+        configure_stitching.read_stitching_settings(
+            {
+                "stitching": {
+                    "mapping_backend": "nona",
+                    "run_autooptimizer": True,
+                    "calibration_frame_count": 1,
+                }
+            }
+        ),
+        max_control_points=20,
+    )
+    provenance = {
+        "source_videos": configure_stitching._file_provenance(videos),
+        "source_frame_offsets": "[2, 1]",
+        "stitch_frame_time": "",
+    }
+    calls, matches = [], []
+
+    def build(**kwargs):
+        calls.append(kwargs)
+        return _build_fake_generation(**kwargs)
+
+    monkeypatch.setattr(configure_stitching, "_build_stitching_project_in_place", build)
+    configure_stitching.build_stitching_project(
+        str(tmp_path / "hm_project.pto"),
+        images,
+        20,
+        settings=settings,
+        scale=0.5,
+        provenance=provenance,
+    )
+    project = tmp_path / "hm_project.pto"
+    project.write_text(project.read_text() + "c n0 N1 x1 y1 X1 Y1 t0\n")
+    optimized_time = (tmp_path / "autooptimiser_out.pto").stat().st_mtime_ns
+    os.utime(project, ns=(optimized_time + 1000000, optimized_time + 1000000))
+    calls.clear()
+    if change == "source":
+        videos[0].write_bytes(b"new video")
+    elif change == "settings":
+        settings = replace(settings, max_output_dimension=400)
+    elif change == "reference":
+        assert cv2.imwrite(images[0], np.ones((3, 4, 3), np.uint8))
+    monkeypatch.setattr(
+        configure_stitching, "BasicVideoInfo", lambda video: SimpleNamespace(frame_count=20)
+    )
+    monkeypatch.setattr(
+        configure_stitching,
+        "extract_frame_image",
+        lambda video, frame_number, dest_image: cv2.imwrite(
+            dest_image, np.zeros((3, 4, 3), np.uint8)
+        ),
+    )
+
+    def match(*args, **kwargs):
+        matches.append(True)
+        points = torch.tensor([[0, 0], [3, 0], [3, 2], [0, 2]], dtype=torch.float32)
+        return {"m_kpts0": points, "m_kpts1": points}
+
+    monkeypatch.setattr(configure_stitching, "calculate_control_points", match)
+    configure_stitching.configure_video_stitching(
+        str(tmp_path),
+        str(videos[0]),
+        str(videos[1]),
+        20,
+        left_frame_offset=2,
+        right_frame_offset=1,
+        settings=settings,
+        scale=0.25 if change == "scale" else 0.5,
+        force=change == "force",
+        ignore_private_config=True,
+    )
+    assert len(calls) == 1
+    if change is None:
+        assert not matches
+        assert calls[0]["force"] is False and calls[0]["control_points"] is None
+        assert "c n0 N1 x1 y1 X1 Y1 t0" in project.read_text()
+    else:
+        assert matches and calls[0]["force"] is True and calls[0]["control_points"] is not None
+        assert "c n0 N1 x1 y1 X1 Y1 t0" not in project.read_text()
+
+
+def should_reject_changed_images_during_staging_without_replacing_generation(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    images = _source_images(source)
+    game = tmp_path / "game"
+    game.mkdir()
+    write_generation(game)
+    previous = (game / "hm_project.pto").read_bytes()
+    copy = configure_stitching.shutil.copy2
+
+    def changed(path, destination):
+        Path(path).write_bytes(Path(path).read_bytes() + b"changed")
+        return copy(path, destination)
+
+    monkeypatch.setattr(configure_stitching.shutil, "copy2", changed)
+    with pytest.raises(OSError, match="changed while staging"):
+        configure_stitching.build_stitching_project(str(game / "hm_project.pto"), images, 20)
+    assert (game / "hm_project.pto").read_bytes() == previous
+
+
+def should_reject_nonregular_images_without_blocking(tmp_path):
+    image = tmp_path / "left.png"
+    os.mkfifo(image)
+    with pytest.raises(ValueError, match="calibration image"):
+        configure_stitching._image_content_provenance([image])

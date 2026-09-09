@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -279,8 +281,22 @@ def should_reuse_points_only_when_matcher_is_unchanged(
     assert cv2.imwrite(str(right_file), np.zeros((3, 4, 3), np.uint8))
     project_file = tmp_path / "hm_project.pto"
     project_file.write_text("# hugin project\n# control points\n", encoding="utf-8")
+    previous_settings = replace(
+        configure_stitching.read_stitching_settings(
+            control_point_matcher="dedode-lightglue", mapping_backend="opencv-magsac"
+        ),
+        max_control_points=20,
+    )
     (tmp_path / ".stitching_artifacts.json").write_text(
-        '{"control_point_matcher": "dedode-lightglue", "mapping_backend": "nona"}\n',
+        json.dumps(
+            {
+                **previous_settings.manifest(),
+                "input_images": configure_stitching._image_content_provenance(
+                    [left_file, right_file]
+                ),
+                "output_scale": "1",
+            }
+        ),
         encoding="utf-8",
     )
     points = torch.tensor([[0, 0], [3, 0], [3, 2], [0, 2]], dtype=torch.float32)
