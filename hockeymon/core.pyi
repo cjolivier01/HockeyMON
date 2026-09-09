@@ -165,6 +165,7 @@ def create_homography_maps(
     confidence: float = ...,
     max_iterations: int = ...,
     max_output_dimension: int = ...,
+    max_output_width: int = ...,
 ) -> dict[str, Any]: ...
 def create_affine_ransac_maps(
     left_points: Sequence[Tuple[float, float]],
@@ -178,6 +179,7 @@ def create_affine_ransac_maps(
     max_iterations: int = ...,
     refine_iterations: int = ...,
     max_output_dimension: int = ...,
+    max_output_width: int = ...,
 ) -> dict[str, Any]: ...
 def show_cuda_tensor(
     label: str, img_cuda: torch.Tensor, wait: bool = ..., stream: Optional[int] = ...

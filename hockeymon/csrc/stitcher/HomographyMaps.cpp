@@ -14,7 +14,7 @@ namespace {
 
 constexpr uint16_t kInvalidCoordinate = std::numeric_limits<uint16_t>::max();
 constexpr int kMaximumCoordinate = static_cast<int>(kInvalidCoordinate) - 1;
-constexpr int64_t kMaximumCanvasPixels = 100000000;
+constexpr int64_t kMaximumCanvasPixels = 256LL * 1024LL * 1024LL;
 constexpr double kIntegerBoundsTolerance = 1e-5;
 
 void validate_image_size(int width, int height, const char* label) {
@@ -260,6 +260,7 @@ HomographyMapResult build_map_result(
     int right_width,
     int right_height,
     int max_output_dimension,
+    int max_output_width,
     size_t minimum_inliers,
     const char* estimator_name) {
   HomographyMapResult result;
@@ -298,6 +299,10 @@ HomographyMapResult build_map_result(
         1.0,
         static_cast<double>(max_output_dimension) /
             std::max(unscaled_width, unscaled_height));
+  }
+  if (max_output_width > 0) {
+    output_scale = std::min(
+        output_scale, static_cast<double>(max_output_width) / unscaled_width);
   }
   const double canvas_width_value =
       std::ceil(unscaled_width * output_scale - kIntegerBoundsTolerance);
@@ -352,8 +357,10 @@ HomographyMapResult create_homography_maps(
     double reprojection_threshold,
     double confidence,
     int max_iterations,
-    int max_output_dimension) {
+    int max_output_dimension,
+    int max_output_width) {
   validate_max_output_dimension(max_output_dimension);
+  validate_max_output_dimension(max_output_width);
   validate_estimation_inputs(
       left_points,
       right_points,
@@ -396,6 +403,7 @@ HomographyMapResult create_homography_maps(
       right_width,
       right_height,
       max_output_dimension,
+      max_output_width,
       4,
       "MAGSAC++ homography");
 }
@@ -411,8 +419,10 @@ HomographyMapResult create_affine_ransac_maps(
     double confidence,
     int max_iterations,
     int refine_iterations,
-    int max_output_dimension) {
+    int max_output_dimension,
+    int max_output_width) {
   validate_max_output_dimension(max_output_dimension);
+  validate_max_output_dimension(max_output_width);
   validate_estimation_inputs(
       left_points,
       right_points,
@@ -462,6 +472,7 @@ HomographyMapResult create_affine_ransac_maps(
       right_width,
       right_height,
       max_output_dimension,
+      max_output_width,
       3,
       "affine RANSAC");
 }

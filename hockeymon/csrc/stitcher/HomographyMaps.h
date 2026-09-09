@@ -40,7 +40,8 @@ HomographyMapResult create_homography_maps(
     double reprojection_threshold = 3.0,
     double confidence = 0.999,
     int max_iterations = 10000,
-    int max_output_dimension = 0);
+    int max_output_dimension = 0,
+    int max_output_width = 0);
 
 /**
  * Estimate a right-to-left affine transform with OpenCV RANSAC and build
@@ -57,6 +58,7 @@ HomographyMapResult create_affine_ransac_maps(
     double confidence = 0.999,
     int max_iterations = 10000,
     int refine_iterations = 10,
-    int max_output_dimension = 0);
+    int max_output_dimension = 0,
+    int max_output_width = 0);
 
 } // namespace hm::stitcher

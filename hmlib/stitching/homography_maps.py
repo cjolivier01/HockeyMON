@@ -23,6 +23,7 @@ def _native_create_homography_maps(
     right_width: int,
     right_height: int,
     max_output_dimension: int,
+    max_output_width: int = 0,
 ) -> Mapping[str, Any]:
     try:
         from hockeymon.core import create_homography_maps
@@ -43,6 +44,7 @@ def _native_create_homography_maps(
         confidence=0.999,
         max_iterations=10000,
         max_output_dimension=max_output_dimension,
+        max_output_width=max_output_width,
     )
 
 
@@ -54,6 +56,7 @@ def _native_create_affine_ransac_maps(
     right_width: int,
     right_height: int,
     max_output_dimension: int,
+    max_output_width: int = 0,
 ) -> Mapping[str, Any]:
     try:
         from hockeymon.core import create_affine_ransac_maps
@@ -75,6 +78,7 @@ def _native_create_affine_ransac_maps(
         max_iterations=10000,
         refine_iterations=10,
         max_output_dimension=max_output_dimension,
+        max_output_width=max_output_width,
     )
 
 
@@ -162,6 +166,7 @@ def _create_opencv_mapping_files(
     native_builder: Callable[..., Mapping[str, Any]],
     minimum_points: int,
     estimator_name: str,
+    max_output_width: int | None = None,
 ) -> list[str]:
     if len(image_files) != 2:
         raise ValueError("Exactly two input images are required")
@@ -171,6 +176,12 @@ def _create_opencv_mapping_files(
             raise ValueError(
                 "max_output_dimension must be between 1 and " f"{MAXIMUM_MAP_DIMENSION}"
             )
+    if max_output_width is not None and (
+        isinstance(max_output_width, bool)
+        or not isinstance(max_output_width, int)
+        or not 0 < max_output_width <= MAXIMUM_MAP_DIMENSION
+    ):
+        raise ValueError(f"max_output_width must be between 1 and {MAXIMUM_MAP_DIMENSION}")
     points0 = control_points["m_kpts0"].detach().cpu().to(torch.float64).tolist()
     points1 = control_points["m_kpts1"].detach().cpu().to(torch.float64).tolist()
     if len(points0) != len(points1):
@@ -197,6 +208,7 @@ def _create_opencv_mapping_files(
         right_width,
         right_height,
         int(max_output_dimension or 0),
+        int(max_output_width or 0),
     )
     image_maps = result["image_maps"]
     if len(image_maps) != 2:
@@ -234,6 +246,7 @@ def create_opencv_magsac_mapping_files(
     control_points: Mapping[str, torch.Tensor],
     output_directory: str | Path,
     max_output_dimension: int | None = None,
+    max_output_width: int | None = None,
 ) -> list[str]:
     """Create nona-compatible TIFF maps from a native MAGSAC++ homography."""
     return _create_opencv_mapping_files(
@@ -244,6 +257,7 @@ def create_opencv_magsac_mapping_files(
         _native_create_homography_maps,
         minimum_points=4,
         estimator_name="a homography",
+        max_output_width=max_output_width,
     )
 
 
@@ -252,6 +266,7 @@ def create_opencv_affine_ransac_mapping_files(
     control_points: Mapping[str, torch.Tensor],
     output_directory: str | Path,
     max_output_dimension: int | None = None,
+    max_output_width: int | None = None,
 ) -> list[str]:
     """Create nona-compatible TIFF maps from a native affine RANSAC fit."""
     return _create_opencv_mapping_files(
@@ -262,4 +277,5 @@ def create_opencv_affine_ransac_mapping_files(
         _native_create_affine_ransac_maps,
         minimum_points=3,
         estimator_name="an affine transform",
+        max_output_width=max_output_width,
     )

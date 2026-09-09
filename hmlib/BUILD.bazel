@@ -65,6 +65,7 @@ python_library(
     srcs = _SOURCES,
     data = [
         "py.typed",
+        ":config_data_files",
         "images/scoreboard_selector_thank_you.svg",
         ":embed_enblend",
     ] + _MULTIBLEND_DATA,
