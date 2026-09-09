@@ -20,7 +20,11 @@ else
   autooptimiser -a -l -s -o autooptimiser_out.pto "${PROJECT_FILE}"
 fi
 
-ln -sf autooptimiser_out.pto "${PROJECT_FILE}"
+# Keep the project independent of intermediate outputs removed by calibration.
+PROJECT_COPY="$(mktemp "${PROJECT_FILE}.XXXXXX")"
+trap 'rm -f "${PROJECT_COPY}"' EXIT
+cp autooptimiser_out.pto "${PROJECT_COPY}"
+mv -f "${PROJECT_COPY}" "${PROJECT_FILE}"
 
 echo "Making mapping files..."
 nona --bigtiff -m TIFF_m -z NONE -c -o mapping_ autooptimiser_out.pto
