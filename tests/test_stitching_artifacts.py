@@ -294,6 +294,7 @@ def should_invalidate_only_derived_geometry_after_validating_replacement(tmp_pat
         images.append(str(path))
     mask = tmp_path / "rink_mask_1.png"
     mask.write_bytes(b"old mask")
+    assert cv2.imwrite(str(tmp_path / "xor_file.png"), np.zeros((6, 8), np.uint8))
     config = {
         "stitching": {"stitch_frame_time": "5", "frame_offsets": {"left": 2}},
         "rink": {"scoreboard": {"perspective_polygon": [1, 2, 3]}, "ice_contours_mask_count": 1},
@@ -319,6 +320,7 @@ def should_invalidate_only_derived_geometry_after_validating_replacement(tmp_pat
         str(tmp_path / "hm_project.pto"), images, 20, game_config=config
     )
     assert not mask.exists()
+    assert not (tmp_path / "xor_file.png").exists()
     assert "rink" not in config
     assert config["stitching"] == {"stitch_frame_time": "5", "frame_offsets": {"left": 2}}
 
@@ -346,3 +348,98 @@ def should_never_replace_the_game_lock_during_publication(tmp_path):
         (stage / ".stitching.lock").write_bytes(b"not the held lock")
         with pytest.raises(ValueError, match="Invalid stitching artifact name"):
             artifacts.publish_artifacts(tmp_path, stage, [".stitching.lock"])
+
+
+@pytest.mark.parametrize("byteorder", ["<", ">"])
+def should_accept_bigtiff_coordinate_maps_without_native_struct_padding(tmp_path, byteorder):
+    path = tmp_path / "coordinate.tif"
+    tifffile.imwrite(path, np.zeros((3, 4), np.uint16), bigtiff=True, byteorder=byteorder)
+    assert validate_mapping_tiff(path, coordinates=True) == (4, 3)
+
+
+def should_accept_multiblend_palette_seams(tmp_path):
+    from PIL import Image
+
+    path = tmp_path / "seam.png"
+    seam = Image.fromarray(np.array([[0, 1], [1, 0]], np.uint8)).convert("P")
+    seam.putpalette([0, 0, 0, 255, 255, 255] + [0] * 762)
+    seam.save(path)
+    assert load_canvas_seam_mask(path, 2, 2).tolist() == [[0, 255], [255, 0]]
+
+
+def should_rebind_quoted_and_backslash_pto_sources(tmp_path):
+    import shlex
+
+    game = tmp_path / 'quoted"game\\name'
+    game.mkdir()
+    stage = game / ".stitching-stage-example"
+    stage.mkdir()
+    path = stage / "project.pto"
+    path.write_text("p f2 w4 h3 v180\ni w4 h3 n" + json.dumps(str(stage / "left.png")) + "\n")
+    configure_stitching._rewrite_pto_sources(path, source_directory=stage, target_directory=game)
+    token = next(
+        value for value in shlex.split(path.read_text().splitlines()[1]) if value.startswith("n")
+    )
+    assert token[1:] == str(game / "left.png")
+
+
+def should_reject_corrupt_staged_xor_before_publishing_a_new_seam(tmp_path, monkeypatch):
+    from hmlib.stitching import blender2
+
+    write_generation(tmp_path)
+    old = (tmp_path / "seam_file.png").read_bytes()
+
+    class BrokenBlender:
+        def __init__(self, args):
+            self.seam, self.xor = Path(args[1]), Path(args[3])
+
+        def blend_images(self, **kwargs):
+            self.seam.write_bytes(old)
+            self.xor.write_bytes(b"not a PNG")
+
+    from types import SimpleNamespace
+
+    image = SimpleNamespace(image=np.zeros((3, 4, 4), np.uint8), xpos=0, ypos=0)
+    monkeypatch.setattr(blender2, "EnBlender", BrokenBlender)
+    monkeypatch.setattr(blender2, "make_cv_compatible_tensor", lambda array: array)
+    with pytest.raises(ValueError):
+        blender2.make_seam_and_xor_masks(
+            str(tmp_path), "mapping_", [image, image], force=True, use_enblend_tool=False
+        )
+    assert (tmp_path / "seam_file.png").read_bytes() == old
+    assert not (tmp_path / "xor_file.png").exists()
+
+
+def should_reject_uniform_owner_seams_before_runtime_initialization(tmp_path):
+    write_generation(tmp_path)
+    assert cv2.imwrite(str(tmp_path / "seam_file.png"), np.zeros((3, 4), np.uint8))
+    with pytest.raises(ValueError, match="uniform"):
+        validate_artifact_generation(tmp_path)
+
+
+def should_decode_lzw_panorama_without_optional_imagecodecs(tmp_path):
+    from PIL import Image
+
+    Image.new("RGB", (4, 3), (19, 83, 151)).save(tmp_path / "panorama.tif", compression="tiff_lzw")
+    configure_stitching._save_stitched_reference_frame(tmp_path)
+    with Image.open(tmp_path / "s.png") as image:
+        assert image.size == (4, 3)
+        assert image.getpixel((1, 1)) == (19, 83, 151)
+
+
+def should_reject_uniform_staged_owner_seam_before_replacement(tmp_path, monkeypatch):
+    from hmlib.stitching import blender2
+
+    write_generation(tmp_path)
+    old = (tmp_path / "seam_file.png").read_bytes()
+
+    def uniform(command, **kwargs):
+        path = next(
+            value.split("=", 1)[1] for value in command if value.startswith("--save-masks=")
+        )
+        assert cv2.imwrite(path, np.zeros((3, 4), np.uint8))
+
+    monkeypatch.setattr(blender2.subprocess, "run", uniform)
+    with pytest.raises(ValueError, match="uniform"):
+        blender2.make_seam_and_xor_masks(str(tmp_path), "mapping_", force=True)
+    assert (tmp_path / "seam_file.png").read_bytes() == old

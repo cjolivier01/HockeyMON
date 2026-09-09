@@ -92,8 +92,10 @@ def read_png_layout(path: PathLike) -> PngLayout:
                     ">IIBBBBB", retained_data
                 )
                 if (
-                    color != 0
+                    color not in (0, 2, 3, 4, 6)
                     or depth not in (1, 2, 4, 8, 16)
+                    or (color == 3 and depth == 16)
+                    or (color in (2, 4, 6) and depth not in (8, 16))
                     or compression != 0
                     or filtering != 0
                     or interlace not in (0, 1)

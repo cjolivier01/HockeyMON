@@ -83,7 +83,7 @@ def _bounded_tiff_ifd(path: Path, size: int) -> None:
         seen_tags = set()
         for _ in range(count):
             tag, kind, length, value = struct.unpack(
-                order + entry_format, read(struct.calcsize(entry_format))
+                order + entry_format, read(struct.calcsize(order + entry_format))
             )
             if tag in seen_tags:
                 raise ValueError(f"Duplicate stitching TIFF tag {tag}: {path}")
@@ -160,6 +160,7 @@ def validate_artifact_generation(
         or seam.offset_y + seam.height > height
     ):
         raise ValueError(f"Stitching seam lies outside the {width}x{height} canvas")
+    load_owner_seam_mask(directory / "seam_file.png", width, height)
     return width, height
 
 
@@ -185,3 +186,13 @@ def read_mapping_arrays(directory: str | Path, basename: str):
             maps.append(array)
         xpos, ypos = get_image_geo_position(str(placement))
         return xpos, ypos, maps[0], maps[1]
+
+
+def load_owner_seam_mask(path: str | Path, width: int, height: int) -> np.ndarray:
+    """Decode the bounded seam and require distinguishable camera owners."""
+    from hmlib.stitching.seam import load_canvas_seam_mask
+
+    mask = load_canvas_seam_mask(path, width, height)
+    if mask.min() == mask.max():
+        raise ValueError("Stitching seam is uniform and cannot distinguish camera ownership")
+    return mask

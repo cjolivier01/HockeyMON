@@ -17,10 +17,14 @@ import cv2
 import numpy as np
 import torch
 
-from hmlib.stitching.artifacts import artifact_stage, publish_artifacts, stitching_lock
-from hmlib.stitching.artifact_validation import read_mapping_arrays, validate_artifact_generation
 from hmlib.hm_opts import copy_opts, hm_opts, preferred_arg
 from hmlib.orientation import configure_game_videos
+from hmlib.stitching.artifact_validation import (
+    load_owner_seam_mask,
+    read_mapping_arrays,
+    validate_artifact_generation,
+)
+from hmlib.stitching.artifacts import artifact_stage, publish_artifacts, stitching_lock
 from hmlib.stitching.image_remapper import ImageRemapper, RemapImageInfoEx
 from hmlib.stitching.laplacian_blend import LaplacianBlend, simple_make_full
 from hmlib.stitching.seam import load_canvas_seam_mask, read_mapping_canvas_size
@@ -397,16 +401,18 @@ def make_seam_and_xor_masks(
                         check=True,
                         cwd=stage,
                     )
-                load_canvas_seam_mask(stage / "seam_file.png", canvas_width, canvas_height)
+                load_owner_seam_mask(stage / "seam_file.png", canvas_width, canvas_height)
+                if (stage / "xor_file.png").is_file():
+                    load_canvas_seam_mask(stage / "xor_file.png", canvas_width, canvas_height)
                 _save_stitched_reference_frame(stage)
                 names = ["seam_file.png"]
                 for name in ("xor_file.png", "panorama.tif", "s.png"):
                     if (stage / name).is_file():
                         names.append(name)
+                if "xor_file.png" not in names:
+                    (directory / "xor_file.png").unlink(missing_ok=True)
                 publish_artifacts(directory, stage, names)
-        seam_tensor = torch.from_numpy(
-            load_canvas_seam_mask(seam_file, canvas_width, canvas_height)
-        )
+        seam_tensor = torch.from_numpy(load_owner_seam_mask(seam_file, canvas_width, canvas_height))
         xor_file = directory / "xor_file.png"
         xor_tensor = (
             torch.from_numpy(load_canvas_seam_mask(xor_file, canvas_width, canvas_height))

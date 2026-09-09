@@ -11,9 +11,10 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
-import tempfile
 import subprocess
+import tempfile
 from contextvars import ContextVar
 from dataclasses import replace
 from functools import partial
@@ -33,27 +34,25 @@ from hmlib.config import (
     save_private_config,
     set_nested_value,
 )
-from hmlib.stitching.artifacts import artifact_stage, publish_artifacts, stitching_lock
 from hmlib.stitching.artifact_validation import (
     bounded_file,
     read_mapping_arrays,
     validate_artifact_generation,
     validate_mapping_tiff,
 )
-from hmlib.stitching.control_points import (
-    calculate_control_points,
-)
-from hmlib.stitching.hugin import configure_control_points, write_control_points
 from hmlib.stitching.akaze import LensCalibrationPair, load_lens_calibration
+from hmlib.stitching.artifacts import artifact_stage, publish_artifacts, stitching_lock
 from hmlib.stitching.calibration import (
     CalibrationAlignmentError,
     calibration_candidates,
     sample_frame_indices,
 )
+from hmlib.stitching.control_points import calculate_control_points
 from hmlib.stitching.homography_maps import (
     create_opencv_affine_ransac_mapping_files,
     create_opencv_magsac_mapping_files,
 )
+from hmlib.stitching.hugin import configure_control_points, write_control_points
 from hmlib.stitching.projections import apply_projection, set_source_horizontal_fov
 from hmlib.stitching.settings import (
     MAPPING_BACKENDS as MAPPING_BACKENDS,
@@ -64,8 +63,8 @@ from hmlib.stitching.settings import (
     read_stitching_settings,
     validate_output_scale,
 )
-from hmlib.video.video_stream import extract_frame_image
 from hmlib.video.ffmpeg import BasicVideoInfo
+from hmlib.video.video_stream import extract_frame_image
 
 from .synchronize import configure_synchronization
 
@@ -110,13 +109,11 @@ def _save_stitched_reference_frame(dir_name: Union[str, Path]) -> None:
     validate_mapping_tiff(panorama_file)
     frame_file = panorama_file.with_name("s.png")
     try:
-        panorama = np.asarray(tifffile.imread(str(panorama_file)))
-        if panorama.ndim == 4:
-            panorama = panorama[0]
-        if panorama.ndim == 3 and panorama.shape[0] in (3, 4) and panorama.shape[-1] not in (3, 4):
-            panorama = np.moveaxis(panorama, 0, -1)
-        if panorama.ndim == 3 and panorama.shape[-1] > 3:
-            panorama = panorama[:, :, :3]
+        panorama = cv2.imread(str(panorama_file), cv2.IMREAD_UNCHANGED)
+        if panorama is None:
+            raise ValueError(f"Could not decode stitched panorama: {panorama_file}")
+        if panorama.ndim == 3:
+            panorama = cv2.cvtColor(panorama[:, :, :3], cv2.COLOR_BGR2RGB)
         if panorama.dtype != np.uint8:
             panorama = np.clip(panorama, 0, 255).astype(np.uint8)
         image = Image.fromarray(panorama)
@@ -667,8 +664,46 @@ def invalidate_stitching_geometry(
         if game_config is not None:
             for path in paths:
                 _delete_nested_key(game_config, path)
-        for path in Path(game_dir).glob("rink_mask_*.png"):
+        for path in [*Path(game_dir).glob("rink_mask_*.png"), Path(game_dir) / "xor_file.png"]:
             path.unlink(missing_ok=True)
+
+
+def _rewrite_pto_sources(
+    project: Path,
+    *,
+    images: Optional[Sequence[str]] = None,
+    source_directory: Optional[Path] = None,
+    target_directory: Optional[Path] = None,
+) -> None:
+    """Rebind quoted image tokens without matching their escaped text as paths."""
+    lines = project.read_text(encoding="utf-8").splitlines()
+    image_index = 0
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith(("i ", "i\t")):
+            continue
+        tokens = list(re.finditer(r'(?<!\S)n"(?:\\.|[^"\\])*"', line))
+        if len(tokens) != 1:
+            raise ValueError("Cached PTO does not contain one filename per input image")
+        token = tokens[0]
+        if images is not None:
+            if image_index >= len(images):
+                raise ValueError("Cached PTO contains more than two input images")
+            filename = images[image_index]
+        else:
+            filename = shlex.split(token.group())[0][1:]
+            path = Path(filename)
+            if not path.is_absolute():
+                path = project.parent / path
+            if path.is_relative_to(source_directory):
+                filename = str(target_directory / path.relative_to(source_directory))
+        lines[index] = (
+            line[: token.start()]
+            + "n"
+            + json.dumps(filename, ensure_ascii=False)
+            + line[token.end() :]
+        )
+        image_index += 1
+    project.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _file_provenance(paths: Sequence[Union[str, Path]]) -> str:
@@ -740,20 +775,8 @@ def build_stitching_project(
             and previous is not None
             and previous.get("control_point_matcher") == settings.control_point_matcher
         ):
-            lines = project.read_text(encoding="utf-8").splitlines()
-            image_index = 0
-            for index, line in enumerate(lines):
-                if line.startswith("i "):
-                    if image_index >= len(staged_images):
-                        raise ValueError("Cached PTO contains more than two input images")
-                    filename = staged_images[image_index].replace("\\", "\\\\").replace('"', '\\"')
-                    lines[index], replaced = re.subn(
-                        r'(?<!\S)n"(?:\\.|[^"\\])*"', lambda match: f'n"{filename}"', line
-                    )
-                    if replaced != 1:
-                        raise ValueError("Cached PTO does not contain one filename per input image")
-                    image_index += 1
-            (stage / project.name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            shutil.copyfile(project, stage / project.name)
+            _rewrite_pto_sources(stage / project.name, images=staged_images)
             (stage / _STITCH_ARTIFACT_MANIFEST).write_text(json.dumps(previous), encoding="utf-8")
         result = _build_stitching_project_in_place(
             project_file_path=str(stage / project.name),
@@ -775,10 +798,7 @@ def build_stitching_project(
         validate_mapping_tiff(stage / "panorama.tif")
         _save_stitched_reference_frame(stage)
         for pto in stage.glob("*.pto"):
-            pto.write_text(
-                pto.read_text(encoding="utf-8").replace(str(stage), str(project.parent)),
-                encoding="utf-8",
-            )
+            _rewrite_pto_sources(pto, source_directory=stage, target_directory=project.parent)
         (stage / _STITCH_ARTIFACT_MANIFEST).write_text(
             json.dumps({**settings.manifest(), **provenance}, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
