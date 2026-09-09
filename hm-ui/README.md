@@ -11,6 +11,10 @@ affects the follower, independently of the motion-limit box selection, and keeps
 the current camera velocity and braking state. Save/reset uses
 `rink.camera.zoom_in_aggressiveness` in the game configuration.
 
+Preview labels show each stream's current source resolution, before the bridge
+reduces frames for display. The Stitched and Final views update independently
+when the output dimensions change.
+
 ## Build
 
 ```bash
