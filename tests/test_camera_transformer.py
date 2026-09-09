@@ -44,16 +44,16 @@ def _make_synth_csvs(tmpdir: str, n_frames: int = 50):
     return tracking_csv, camera_csv
 
 
-def test_dataset_and_model_train_smoke():
+def should_train_dataset_and_model_smoke():
     with tempfile.TemporaryDirectory() as td:
         t_csv, c_csv = _make_synth_csvs(td, n_frames=80)
         ds = CameraPanZoomDataset(tracking_csv=t_csv, camera_csv=c_csv, window=8)
         assert len(ds) > 0
         sample = ds[0]
-        model = CameraPanZoomTransformer(d_in=sample.x.shape[-1])
+        model = CameraPanZoomTransformer(d_in=sample["x"].shape[-1])
         opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        x = sample.x.unsqueeze(0)
-        y = sample.y.unsqueeze(0)
+        x = sample["x"].unsqueeze(0)
+        y = sample["y"].unsqueeze(0)
         pred = model(x)
         loss = torch.nn.functional.l1_loss(pred, y)
         opt.zero_grad()

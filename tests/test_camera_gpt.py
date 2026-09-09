@@ -283,6 +283,17 @@ def should_ignore_pending_hstream_generation_after_tracking_commit_failure():
         assert Path(paths.camera_fast_csv).name == "camera_fast-1.csv"
 
 
+@pytest.mark.parametrize("manifest", ["[]", "null", '"invalid"', "42"])
+def should_ignore_non_object_hstream_manifest(tmp_path, manifest):
+    from hmlib.camera.camera_gpt_dataset import resolve_csv_paths
+
+    for stem in ("tracking", "camera", "camera_fast"):
+        (tmp_path / f"{stem}.csv").write_text("1\n")
+    (tmp_path / "hstream_telemetry.json").write_text(manifest)
+
+    assert resolve_csv_paths("malformed-manifest", str(tmp_path)) is None
+
+
 def should_free_run_legacy_prev_slow_by_feeding_predictions():
     torch = _torch()
 

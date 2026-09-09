@@ -645,6 +645,9 @@ def _hstream_manifest_allows_generation(
     except (OSError, UnicodeError, json.JSONDecodeError):
         return False
 
+    if not isinstance(manifest, dict):
+        return False
+
     compatibility = manifest.get("hm_compatibility")
     if not isinstance(compatibility, dict):
         return False
