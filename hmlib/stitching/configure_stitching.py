@@ -16,6 +16,7 @@ import tempfile
 import subprocess
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 import fcntl
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
@@ -37,6 +38,7 @@ from hmlib.stitching.control_points import (
     calculate_control_points,
 )
 from hmlib.stitching.hugin import configure_control_points, write_control_points
+from hmlib.stitching.akaze import LensCalibrationPair, load_lens_calibration
 from hmlib.stitching.calibration import (
     CalibrationAlignmentError,
     calibration_candidates,
@@ -632,6 +634,8 @@ def build_stitching_project(
     mapping_backend: Optional[str] = None,
     max_output_dimension: Optional[int] = None,
     settings: Optional[StitchingSettings] = None,
+    lens_calibration: Optional[LensCalibrationPair] = None,
+    lens_calibration_resolved: bool = False,
     control_points: Optional[Dict[str, torch.Tensor]] = None,
 ):
     """Create or update a Hugin PTO project and seam masks for two images.
@@ -668,6 +672,17 @@ def build_stitching_project(
     control_point_matcher = settings.control_point_matcher
     mapping_backend = settings.mapping_backend
     max_output_dimension = settings.max_output_dimension
+    if control_point_matcher == "akaze-hamming":
+        if lens_calibration is None and not lens_calibration_resolved:
+            lens_calibration = load_lens_calibration(pto_path.parent)
+        if lens_calibration is not None and mapping_backend == "nona":
+            raise ValueError(
+                "Calibrated AKAZE points require an OpenCV mapping backend; NONA does not consume KB4 lenses"
+            )
+        settings = replace(
+            settings,
+            lens_profile_fingerprint=lens_calibration.fingerprint if lens_calibration else None,
+        )
     validate_output_scale(scale, mapping_backend)
     max_output_dimension = normalize_max_output_dimension(max_output_dimension)
     dir_name = pto_path.parent
@@ -788,6 +803,7 @@ def build_stitching_project(
                     dir_name,
                     max_output_dimension=max_output_dimension,
                     max_output_width=settings.max_output_width,
+                    lens_calibration=lens_calibration,
                 )
             else:
                 shutil.copyfile(hm_project, autooptimiser_out)
@@ -797,6 +813,7 @@ def build_stitching_project(
                     dir_name,
                     max_output_dimension=max_output_dimension,
                     max_output_width=settings.max_output_width,
+                    lens_calibration=lens_calibration,
                 )
 
             seam_file: str = os.path.join(dir_name, "seam_file.png")
@@ -867,6 +884,7 @@ def build_stitching_project(
                 force=True,
                 use_hugin=use_hugin,
                 matcher=control_point_matcher,
+                lens_calibration=lens_calibration,
             )
         else:
             write_control_points(hm_project, control_points)
@@ -990,6 +1008,17 @@ def configure_video_stitching(
     control_point_matcher = settings.control_point_matcher
     mapping_backend = settings.mapping_backend
     max_output_dimension = settings.max_output_dimension
+    lens_calibration = (
+        load_lens_calibration(dir_name) if control_point_matcher == "akaze-hamming" else None
+    )
+    if lens_calibration is not None and mapping_backend == "nona":
+        raise ValueError(
+            "Calibrated AKAZE points require an OpenCV mapping backend; NONA does not consume KB4 lenses"
+        )
+    settings = replace(
+        settings,
+        lens_profile_fingerprint=lens_calibration.fingerprint if lens_calibration else None,
+    )
     with _stitch_game_lock(dir_name):
         return _configure_video_stitching_locked(
             dir_name=dir_name,
@@ -1010,6 +1039,7 @@ def configure_video_stitching(
             mapping_backend=mapping_backend,
             max_output_dimension=max_output_dimension,
             settings=settings,
+            lens_calibration=lens_calibration,
         )
 
 
@@ -1032,6 +1062,7 @@ def _configure_video_stitching_locked(
     mapping_backend: str = "nona",
     max_output_dimension: Optional[int] = None,
     settings: Optional[StitchingSettings] = None,
+    lens_calibration: Optional[LensCalibrationPair] = None,
 ):
     """Configure a two-camera stitching project from game videos.
 
@@ -1138,7 +1169,7 @@ def _configure_video_stitching_locked(
             for candidate in calibration_candidates(
                 pairs,
                 max_control_points,
-                calculate_control_points,
+                partial(calculate_control_points, lens_calibration=lens_calibration),
                 settings.control_point_matcher,
             ):
                 logger.info("Trying stitching calibration using %s", candidate.label)
@@ -1155,6 +1186,8 @@ def _configure_video_stitching_locked(
                         force=True,
                         skip_if_exists=False,
                         settings=settings,
+                        lens_calibration=lens_calibration,
+                        lens_calibration_resolved=True,
                         control_points=dict(candidate.points),
                     )
                 except CalibrationAlignmentError as exc:

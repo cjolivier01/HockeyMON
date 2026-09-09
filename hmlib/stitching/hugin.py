@@ -19,6 +19,7 @@ import torch
 
 from hmlib.log import get_logger
 from hmlib.stitching.control_points import calculate_control_points
+from hmlib.stitching.akaze import LensCalibrationPair
 
 _CONTROL_POINTS_LINE = "# control points"
 
@@ -136,6 +137,7 @@ def configure_control_points(
     output_directory: Optional[str] = None,
     use_hugin: bool = False,
     matcher: str = "superpoint-lightglue",
+    lens_calibration: Optional[LensCalibrationPair] = None,
 ) -> Dict[str, torch.Tensor]:
     """Populate or update control points in a Hugin PTO project.
 
@@ -179,6 +181,7 @@ def configure_control_points(
             image1=image1,
             max_control_points=max_control_points,
             matcher=matcher,
+            lens_calibration=lens_calibration,
         )
         print(f"Calculated control points in {time.time() - start} seconds")
 
