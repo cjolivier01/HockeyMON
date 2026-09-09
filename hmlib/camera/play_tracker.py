@@ -2048,6 +2048,7 @@ class PlayTracker(torch.nn.Module):
                 Post_Nonstop_Stop_Delay_Frames=postns,
                 Overshoot_Speed_Ratio_x100=ov_scale,
                 Time_To_Dest_Speed_Limit_Frames=ttg,
+                Zoom_In_Aggressiveness=int(camera_cfg["zoom_in_aggressiveness"]),
                 Apply_To_Fast_Box=0,
                 Apply_To_Follower_Box=1,
                 Link_Fixed_Edge_Rotation_Left_Right=fixed_linked,

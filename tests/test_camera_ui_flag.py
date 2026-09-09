@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import sys
 from types import ModuleType
 from types import SimpleNamespace
@@ -189,6 +190,83 @@ def should_tune_only_follower_zoom_and_preserve_config_reset(monkeypatch, native
     tracker._ui_color_left_inited = False
     tracker._ui_color_right_inited = False
     assert ("rink", "camera", "zoom_in_aggressiveness") in tracker._ui_managed_config_paths()
+
+
+def should_restore_distinct_system_and_open_time_zoom_defaults(monkeypatch, tmp_path):
+    from hmlib.camera.hm_ui_bridge import HmUiProcess
+    from hmlib.camera.zoom import zoom_in_shrink_thresholds
+
+    PlayTracker = _load_play_tracker(monkeypatch)
+    tracker = PlayTracker.__new__(PlayTracker)
+    tracker._game_config = {
+        "rink": {
+            "camera": {
+                "zoom_in_aggressiveness": 80,
+                "stop_on_dir_change_delay": 4,
+                "cancel_stop_on_opposite_dir": False,
+                "stop_cancel_hysteresis_frames": 0,
+                "stop_delay_cooldown_frames": 0,
+                "time_to_dest_speed_limit_frames": 10,
+                "max_speed_ratio_x": 1.0,
+                "max_speed_ratio_y": 1.0,
+                "max_accel_ratio_x": 1.0,
+                "max_accel_ratio_y": 1.0,
+                "fixed_edge_rotation_angle": 0,
+                "breakaway_detection": {
+                    "overshoot_stop_delay_count": 4,
+                    "post_nonstop_stop_delay_count": 0,
+                    "overshoot_scale_speed_ratio": 0.7,
+                },
+            }
+        }
+    }
+    tracker._system_game_config = copy.deepcopy(tracker._game_config)
+    tracker._system_game_config["rink"]["camera"]["zoom_in_aggressiveness"] = 25
+    tracker._ui_defaults = {}
+    tracker._ui_dialogs = {}
+    tracker._ui_dirty_paths = set()
+    tracker._ui_window_name = "Tracker Controls"
+    tracker._ui_color_window_name = "Final Color"
+    tracker._ui_color_left_window_name = "Left Color"
+    tracker._ui_color_right_window_name = "Right Color"
+    tracker._ui_color_left_inited = False
+    tracker._ui_color_right_inited = False
+    tracker._camera_base_speed_x = tracker._camera_base_speed_y = 20.0
+    tracker._camera_base_accel_x = tracker._camera_base_accel_y = 5.0
+    tracker._stitch_rotation_controller = None
+    tracker._force_stitching = False
+    tracker._hockey_mon = SimpleNamespace(fps_speed_scale=1.0)
+    follower = SimpleNamespace(thresholds=None)
+    follower.set_resizing_shrink_thresholds = lambda *values: setattr(
+        follower, "thresholds", values
+    )
+    tracker._current_roi_aspect = follower
+    tracker._current_roi = None
+    tracker._playtracker = None
+    process = HmUiProcess(title="test", tmpdir=tmp_path)
+    process.ensure_started = lambda: None
+    tracker._hm_ui_process = process
+    try:
+        tracker._init_ui_controls()
+        zoom = process._find_control("Tracker Controls", "Zoom_In_Aggressiveness")
+        assert zoom.default_value == 80
+        assert zoom.system_default_value == 25
+        for default_kind, expected in [("system_default_value", 25), ("default_value", 80)]:
+            # Use exactly the defaults the Rust sidecar receives for its reset action.
+            reset = {
+                window: {control.name: getattr(control, default_kind) for control in controls}
+                for window, controls in process._windows.items()
+            }
+            process.apply_control_values(reset)
+            assert tracker._apply_current_ui_control_values()
+            assert (
+                process.get_value("Tracker Controls", "Zoom_In_Aggressiveness", poll=False)
+                == expected
+            )
+            assert tracker._game_config["rink"]["camera"]["zoom_in_aggressiveness"] == expected
+            assert follower.thresholds == pytest.approx(zoom_in_shrink_thresholds(expected))
+    finally:
+        process.close()
 
 
 def should_round_trip_linked_and_independent_fixed_edge_rotation_controls(monkeypatch):
