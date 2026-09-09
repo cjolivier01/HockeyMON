@@ -61,3 +61,22 @@ def test_dataset_and_model_train_smoke():
         opt.step()
         ckpt = pack_checkpoint(model, ds.norm, 8)
         assert "state_dict" in ckpt and "norm" in ckpt
+
+
+def should_keep_legacy_dataset_windows_inside_contiguous_frame_runs():
+    with tempfile.TemporaryDirectory() as td:
+        tracking_csv, camera_csv = _make_synth_csvs(td, n_frames=9)
+        keep = {1, 2, 3, 4, 6, 7, 8, 9}
+        tracking = pd.read_csv(tracking_csv, header=None)
+        camera = pd.read_csv(camera_csv, header=None)
+        tracking[tracking[0].isin(keep)].to_csv(tracking_csv, header=False, index=False)
+        camera[camera[0].isin(keep)].to_csv(camera_csv, header=False, index=False)
+
+        dataset = CameraPanZoomDataset(tracking_csv=tracking_csv, camera_csv=camera_csv, window=2)
+        assert [dataset.frames[index] for index in dataset.valid_indices] == [3, 4, 8, 9]
+        for index in dataset.valid_indices:
+            sequence = dataset.frames[index - dataset.window : index + 1]
+            assert all(right == left + 1 for left, right in zip(sequence, sequence[1:]))
+
+        first_after_gap = dataset[2]
+        assert torch.equal(first_after_gap["x"][0, -3:], torch.zeros(3))

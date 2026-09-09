@@ -155,6 +155,134 @@ def should_sample_gpt_dataset_and_run_model_forward(monkeypatch):
             main()
 
 
+def should_keep_drivegpt_windows_inside_contiguous_frame_runs():
+    torch = _torch()
+
+    from hmlib.camera.camera_gpt_dataset import CameraPanZoomGPTIterableDataset, GameCsvPaths
+    from hmlib.camera.camera_transformer import CameraNorm
+
+    with tempfile.TemporaryDirectory(prefix="hm_camgpt_gaps_") as td:
+        td_path = Path(td)
+        tracking_csv = td_path / "tracking.csv"
+        camera_csv = td_path / "camera.csv"
+        frames = [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14]
+        tracking_csv.write_text("".join(f"{frame},1,10,5,10,20,0.9,0,1,\n" for frame in frames))
+        camera_csv.write_text("".join(f"{frame},{frame},0,10,5\n" for frame in frames))
+
+        dataset = CameraPanZoomGPTIterableDataset(
+            games=[
+                GameCsvPaths(
+                    game_id="gapped",
+                    tracking_csv=str(tracking_csv),
+                    camera_csv=str(camera_csv),
+                )
+            ],
+            norm=CameraNorm(scale_x=100.0, scale_y=50.0, max_players=22),
+            seq_len=2,
+            target_mode="slow_tlwh",
+            feature_mode="base_prev_y",
+            include_pose=False,
+            seed=7,
+        )
+        iterator = iter(dataset)
+        saw_run_start = False
+        saw_mid_run = False
+        for _ in range(100):
+            sample = next(iterator)
+            frame_ids = torch.round(sample["y"][:, 0] * 100).to(dtype=torch.int64)
+            assert torch.equal(frame_ids[1:] - frame_ids[:-1], torch.ones(1, dtype=torch.int64))
+
+            first_frame = int(frame_ids[0].item())
+            previous_frame = int(round(float(sample["prev0"][0].item()) * 100))
+            if first_frame in {1, 6, 11}:
+                saw_run_start = True
+                assert torch.equal(sample["prev0"], torch.tensor([0.0, 0.0, 1.0, 1.0]))
+            else:
+                saw_mid_run = True
+                assert previous_frame == first_frame - 1
+
+        assert saw_run_start
+        assert saw_mid_run
+
+        unusable = CameraPanZoomGPTIterableDataset(
+            games=dataset._games,
+            norm=dataset.norm,
+            seq_len=5,
+            target_mode="slow_tlwh",
+            feature_mode="base_prev_y",
+            include_pose=False,
+        )
+        with pytest.raises(RuntimeError, match="longest contiguous run has 4 frames"):
+            next(iter(unusable))
+
+
+def should_resolve_only_complete_matching_csv_generations():
+    from hmlib.camera.camera_gpt_dataset import resolve_csv_paths
+
+    with tempfile.TemporaryDirectory(prefix="hm_camgpt_generation_") as td:
+        td_path = Path(td)
+        for filename in (
+            "tracking.csv",
+            "camera.csv",
+            "tracking-1.csv",
+            "camera-1.csv",
+            "camera_fast-1.csv",
+            "camera-2.csv",
+            "camera_fast-2.csv",
+            "tracking-3.csv",
+        ):
+            (td_path / filename).write_text("1\n")
+
+        paths = resolve_csv_paths("generation", td)
+        assert paths is not None
+        assert Path(paths.tracking_csv).name == "tracking-1.csv"
+        assert Path(paths.camera_csv).name == "camera-1.csv"
+        assert paths.camera_fast_csv is not None
+        assert Path(paths.camera_fast_csv).name == "camera_fast-1.csv"
+
+
+def should_ignore_pending_hstream_generation_after_tracking_commit_failure():
+    import json
+
+    from hmlib.camera.camera_gpt_dataset import resolve_csv_paths
+
+    with tempfile.TemporaryDirectory(prefix="hm_camgpt_publication_failure_") as td:
+        td_path = Path(td)
+        for suffix in ("-1", "-2"):
+            for stem in ("tracking", "camera", "camera_fast"):
+                (td_path / f"{stem}{suffix}.csv").write_text("1\n")
+
+        def write_manifest(suffix: str, *, committed: bool) -> None:
+            suffix_part = f"-{suffix}"
+            (td_path / f"hstream_telemetry{suffix_part}.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "hstream-playtracker-telemetry-v1",
+                        "publication_state": "committed" if committed else "pending",
+                        "completed": committed,
+                        "eligible_for_training": committed,
+                        "hm_compatibility": {
+                            "tracking_csv": {"file": f"tracking{suffix_part}.csv"},
+                            "camera_csv": {"file": f"camera{suffix_part}.csv"},
+                            "camera_fast_csv": {"file": f"camera_fast{suffix_part}.csv"},
+                        },
+                    }
+                )
+            )
+
+        write_manifest("1", committed=True)
+        # Mirrors hstream's injected tracking-directory-fsync failure: all CSV
+        # links may be visible, but the durable manifest remains pending.
+        write_manifest("2", committed=False)
+
+        paths = resolve_csv_paths("publication-failure", td)
+        assert paths is not None
+        assert Path(paths.tracking_csv).name == "tracking-1.csv"
+        assert Path(paths.camera_csv).name == "camera-1.csv"
+        assert paths.camera_fast_csv is not None
+        assert Path(paths.camera_fast_csv).name == "camera_fast-1.csv"
+
+
 def should_free_run_legacy_prev_slow_by_feeding_predictions():
     torch = _torch()
 
