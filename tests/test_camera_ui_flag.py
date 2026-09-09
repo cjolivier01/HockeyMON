@@ -77,7 +77,8 @@ def should_propagate_camera_ui_into_aspen_shared(monkeypatch):
     class DummyAspenNet(torch.nn.Module):
         def __init__(self, name: str, graph_cfg: Dict[str, Any], shared: Dict[str, Any] | None = None, **_: Any):  # type: ignore[override]
             super().__init__()
-            captured["shared"] = dict(shared or {})
+            self.shared = dict(shared or {})
+            captured["shared"] = self.shared
 
         def to(self, *args: Any, **kwargs: Any):  # pragma: no cover - trivial passthrough
             return self
