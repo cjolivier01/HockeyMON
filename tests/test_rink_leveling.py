@@ -278,10 +278,15 @@ def should_reject_camera_settings_changed_since_calibration(tmp_path):
     not all(shutil.which(tool) for tool in ("pano_modify", "pano_trafo", "nona")),
     reason="Hugin tools unavailable",
 )
-def should_render_and_transform_using_real_hugin_without_changing_published_project(tmp_path):
-    config = _game(tmp_path, rotation=[0, 0, 0])
-    original = (tmp_path / "autooptimiser_out.pto").read_bytes()
-    session = LevelingSession(tmp_path, lambda: config)
+@pytest.mark.parametrize("game_name", ["game", "Montréal"])
+def should_render_and_transform_using_real_hugin_without_changing_published_project(
+    tmp_path, game_name
+):
+    game_dir = tmp_path / game_name
+    game_dir.mkdir()
+    config = _game(game_dir, rotation=[0, 0, 0])
+    original = (game_dir / "autooptimiser_out.pto").read_bytes()
+    session = LevelingSession(game_dir, lambda: config)
     try:
         state = _state(session)
         state["rotation_degrees"] = [4, -8, 3]
@@ -290,6 +295,6 @@ def should_render_and_transform_using_real_hugin_without_changing_published_proj
         posts = [{"image_index": 0, "first": [x, 10], "second": [x, 90]} for x in (10, 80, 150)]
         estimate = session.estimate(posts, 7)
         assert estimate["rotation_degrees"] == pytest.approx([7, 0, 0], abs=1e-5)
-        assert (tmp_path / "autooptimiser_out.pto").read_bytes() == original
+        assert (game_dir / "autooptimiser_out.pto").read_bytes() == original
     finally:
         session.close()

@@ -48,7 +48,12 @@ def _absolute_sources(pto: str, directory: Path) -> tuple[str, tuple[Path, ...]]
             if not source.is_file():
                 raise ValueError(f"Source image is not a regular file: {source}")
             paths.append(source)
-            line = line[: token.start()] + "n" + json.dumps(str(source)) + line[token.end() :]
+            line = (
+                line[: token.start()]
+                + "n"
+                + json.dumps(str(source), ensure_ascii=False)
+                + line[token.end() :]
+            )
         lines.append(line)
     return "\n".join(lines) + "\n", tuple(paths)
 
