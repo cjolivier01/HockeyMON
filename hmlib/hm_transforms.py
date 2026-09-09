@@ -30,6 +30,7 @@ from hmlib.utils.image import (
     make_channels_first,
     make_channels_last,
 )
+from hmlib.utils.shadow_lift import lift_numpy, lift_tensor, shadow_lift_settings
 
 try:
     from PIL import Image
@@ -1005,6 +1006,8 @@ class HmImageColorAdjust:
     - exposure_ev: float, exposure compensation in stops (e.g., +1.0 doubles brightness)
     - contrast: float, contrast factor (>1 more contrast)
     - gamma: float, gamma exponent (>1 darker)
+    - shadow_lift: percentage in [0, 100], lifting Rec. 709 luma while preserving hue
+    - shadow_lift_black_point: optional neutral toe that raises exact black
     - config_ref: optional dict-like object containing runtime values; if provided,
       values are refreshed from ``config_paths`` before each call.
 
@@ -1022,6 +1025,12 @@ class HmImageColorAdjust:
             ``config_ref`` is provided.
         refresh_from_config (bool): If True, pull values from ``config_ref`` on each
             call (noop when ``config_ref`` is ``None``).
+        shadow_lift (float | None): Shadow/midtone lift percentage; zero disables it.
+        shadow_lift_black_point (bool | None): Raise the black point when lifting shadows.
+        channel_order (str): ``rgb`` for direct use, ``bgr`` for decoded video pipelines.
+        input_max_value (float | None): Explicit signal maximum, e.g. 1 for normalized
+            floats or 1023 for unpacked 10-bit samples. Defaults to 65535 for uint16
+            and 255 otherwise. Floating processing alone does not enable 10-bit codecs.
     """
 
     _NOT_PROVIDED = object()
@@ -1038,6 +1047,10 @@ class HmImageColorAdjust:
         config_ref: Optional[Dict[str, Any]] = None,
         config_paths: Optional[List[Union[List[str], Tuple[str, ...], str]]] = None,
         refresh_from_config: bool = True,
+        shadow_lift: Optional[float] = None,
+        shadow_lift_black_point: Optional[bool] = None,
+        channel_order: str = "rgb",
+        input_max_value: Optional[float] = None,
     ):
         self.keys = keys or ["img"]
         # If a Kelvin temperature is provided, convert to per-channel gains.
@@ -1049,6 +1062,18 @@ class HmImageColorAdjust:
         self.exposure_ev = exposure_ev
         self.contrast = contrast
         self.gamma = gamma
+        self.shadow_lift, self.shadow_lift_black_point = shadow_lift_settings(
+            shadow_lift, shadow_lift_black_point
+        )
+        self._initial_shadow_settings = (self.shadow_lift, self.shadow_lift_black_point)
+        if channel_order not in ("rgb", "bgr"):
+            raise ValueError("channel_order must be 'rgb' or 'bgr'")
+        self.channel_order = channel_order
+        if input_max_value is not None:
+            input_max_value = float(input_max_value)
+            if not math.isfinite(input_max_value) or input_max_value <= 0:
+                raise ValueError("input_max_value must be positive and finite")
+        self.input_max_value = input_max_value
         self._refresh_from_config_enabled = bool(refresh_from_config)
         # Default search paths if a config reference is provided.
         if config_ref is not None and config_paths is None:
@@ -1126,6 +1151,15 @@ class HmImageColorAdjust:
         exposure_ev = self._pick_first(sources, ("exposure_ev",))
         contrast = self._pick_first(sources, ("contrast", "color_contrast"))
         gamma = self._pick_first(sources, ("gamma", "color_gamma"))
+        shadow = self._pick_first(sources, ("shadow_lift", "shadow-lift"))
+        black_point = self._pick_first(
+            sources, ("shadow_lift_black_point", "shadow-lift-black-point")
+        )
+        initial_shadow, initial_black_point = self._initial_shadow_settings
+        self.shadow_lift, self.shadow_lift_black_point = shadow_lift_settings(
+            initial_shadow if shadow is self._NOT_PROVIDED else shadow,
+            initial_black_point if black_point is self._NOT_PROVIDED else black_point,
+        )
 
         if wb_temp is not self._NOT_PROVIDED:
             if wb_temp is None:
@@ -1162,6 +1196,8 @@ class HmImageColorAdjust:
 
     def _has_any_adjustment(self) -> bool:
         # Only return True if any adjustment is non-identity
+        if self.shadow_lift > 0.0:
+            return True
         if self.white_balance is not None and not self._isclose(
             self.white_balance, [1.0, 1.0, 1.0]
         ):
@@ -1272,8 +1308,19 @@ class HmImageColorAdjust:
         # Only convert once if needed
         if not icf:
             t = make_channels_first(t)
+        if t.shape[-3] not in (3, 4):
+            raise ValueError("Color adjustments require three color channels and optional alpha")
+        original = t
+        alpha = t[..., 3:4, :, :] if t.shape[-3] == 4 else None
+        t = t[..., :3, :, :]
+        maximum = self.input_max_value
+        if maximum is None:
+            maximum = float(torch.iinfo(orig_dtype).max) if orig_dtype == torch.uint16 else 255.0
+        # Retain floating precision; uint16 needs float32 to avoid FP16 overflow.
         if not torch.is_floating_point(t):
-            t = t.to(torch.float16)
+            t = t.to(torch.float32 if maximum > 255.0 else torch.float16)
+        if maximum != 255.0:
+            t = t * (255.0 / maximum)
         # Apply adjustments
         if self.white_balance is not None and not self._isclose(
             self.white_balance, [1.0, 1.0, 1.0]
@@ -1283,37 +1330,57 @@ class HmImageColorAdjust:
             t = HmImageColorAdjust._apply_exposure_ev(t, self.exposure_ev)
         if self.brightness is not None and not self._isclose(self.brightness, 1.0):
             t = HmImageColorAdjust._apply_brightness(t, self.brightness)
+        t = lift_tensor(t, self.shadow_lift, self.shadow_lift_black_point, self.channel_order)
         if self.contrast is not None and not self._isclose(self.contrast, 1.0):
             t = HmImageColorAdjust._apply_contrast(t, self.contrast)
         if self.gamma is not None and not self._isclose(self.gamma, 1.0):
             t = HmImageColorAdjust._apply_gamma(t, self.gamma)
+        if maximum != 255.0:
+            t = t * (maximum / 255.0)
+        if alpha is not None:
+            alpha_values = alpha.to(t.dtype)
+            t = torch.where(alpha_values > 0, t, original[..., :3, :, :].to(t.dtype))
+            t = torch.cat((t, alpha_values), dim=-3)
+        if t.dtype != orig_dtype:
+            t = t.to(orig_dtype)
         # Restore layout and dtype if needed
         if not icf:
             t = make_channels_last(t)
-        if t.dtype != orig_dtype:
-            t = t.to(orig_dtype)
         return t
 
     def _adjust_numpy(self, a: np.ndarray) -> np.ndarray:
+        if not self._has_any_adjustment():
+            return a
         icf = is_channels_first(a)
         if not icf:
             a = make_channels_first(a)
         # Convert to float for ops
         orig_dtype = a.dtype
+        if a.shape[-3] not in (3, 4):
+            raise ValueError("Color adjustments require three color channels and optional alpha")
+        original = a
+        alpha = a[..., 3:4, :, :] if a.shape[-3] == 4 else None
+        a = a[..., :3, :, :]
+        maximum = self.input_max_value
+        if maximum is None:
+            maximum = float(np.iinfo(orig_dtype).max) if orig_dtype == np.uint16 else 255.0
         if a.dtype != np.float32 and a.dtype != np.float64:
             a = a.astype(np.float32)
+        if maximum != 255.0:
+            a = a * (255.0 / maximum)
         if self.white_balance is not None:
             gains = np.array(self.white_balance, dtype=a.dtype).reshape(3, 1, 1)
             if a.ndim == 4:
                 gains = gains.reshape(1, 3, 1, 1)
-            a = a * gains
+            a = np.clip(a * gains, 0.0, 255.0)
         if self.exposure_ev is not None and self.exposure_ev != 0.0:
             try:
-                a = a * float(2.0 ** float(self.exposure_ev))
+                a = np.clip(a * float(2.0 ** float(self.exposure_ev)), 0.0, 255.0)
             except Exception:
                 pass
         if self.brightness is not None and self.brightness != 1.0:
-            a = a * float(self.brightness)
+            a = np.clip(a * float(self.brightness), 0.0, 255.0)
+        a = lift_numpy(a, self.shadow_lift, self.shadow_lift_black_point, self.channel_order)
         if self.contrast is not None and self.contrast != 1.0:
             if a.ndim == 3:
                 mean_val = a.mean(axis=(1, 2), keepdims=True)
@@ -1325,8 +1392,13 @@ class HmImageColorAdjust:
             a01 = np.power(a01, float(self.gamma))
             a = a01 * 255.0
         a = np.clip(a, 0.0, 255.0)
+        if maximum != 255.0:
+            a = a * (maximum / 255.0)
         if orig_dtype != a.dtype:
             a = a.astype(orig_dtype)
+        if alpha is not None:
+            a = np.where(alpha > 0, a, original[..., :3, :, :])
+            a = np.concatenate((a, alpha), axis=-3)
         if not icf:
             a = make_channels_last(a)
         return a

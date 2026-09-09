@@ -16,6 +16,7 @@ from hmlib.config import (
     save_private_config,
 )
 from hmlib.log import logger
+from hmlib.utils.shadow_lift import shadow_lift_settings
 
 from .base import Plugin
 
@@ -75,6 +76,9 @@ class StitchUiPlugin(Plugin):
         color_cfg = get_nested_value(config, path, {}) or {}
         if not isinstance(color_cfg, dict):
             color_cfg = {}
+        shadow, black_point = shadow_lift_settings(
+            color_cfg.get("shadow_lift"), color_cfg.get("shadow_lift_black_point")
+        )
         defaults = {
             "White_Balance_Kelvin_Enable": 0,
             "White_Balance_Kelvin_Temperature": 6500,
@@ -83,6 +87,8 @@ class StitchUiPlugin(Plugin):
             "White_Balance_Blue_Gain_x100": 100,
             "Brightness_Multiplier_x100": 100,
             "Exposure_EV_x10": _EXPOSURE_EV_X10_SLIDER_ZERO,
+            "Shadow_Lift_Percent": int(round(shadow)),
+            "Shadow_Lift_Black_Point": int(black_point),
             "Contrast_Multiplier_x100": 100,
             "Gamma_Multiplier_x100": 100,
         }
@@ -127,6 +133,8 @@ class StitchUiPlugin(Plugin):
             "White_Balance_Blue_Gain_x100": 300,
             "Brightness_Multiplier_x100": 300,
             "Exposure_EV_x10": _EXPOSURE_EV_X10_SLIDER_MAX,
+            "Shadow_Lift_Percent": 100,
+            "Shadow_Lift_Black_Point": 1,
             "Contrast_Multiplier_x100": 300,
             "Gamma_Multiplier_x100": 300,
         }
@@ -278,6 +286,12 @@ class StitchUiPlugin(Plugin):
             prefix + ("exposure_ev",),
             self._slider_to_exposure_ev(value("Exposure_EV_x10")),
         )
+        for key, setting in (
+            ("shadow_lift", float(value("Shadow_Lift_Percent"))),
+            ("shadow_lift_black_point", bool(value("Shadow_Lift_Black_Point"))),
+        ):
+            if setting or self._path_value(self._game_config, prefix + (key,)) is not _MISSING:
+                self._set_runtime_path(prefix + (key,), setting)
         self._set_runtime_path(
             prefix + ("contrast",),
             max(1, value("Contrast_Multiplier_x100")) / 100.0,
@@ -341,6 +355,8 @@ class StitchUiPlugin(Plugin):
             "white_balance_temp",
             "brightness",
             "exposure_ev",
+            "shadow_lift",
+            "shadow_lift_black_point",
             "contrast",
             "gamma",
         }

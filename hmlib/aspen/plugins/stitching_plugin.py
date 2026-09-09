@@ -167,6 +167,7 @@ class StitchingPlugin(Plugin):
                     for tf in getattr(pipeline, "transforms", []):
                         if tf.__class__.__name__ == "HmImageColorAdjust":
                             setattr(tf, "config_ref", self._config_ref)
+                            tf.channel_order = "bgr"
                 return pipeline
             except Exception:
                 logger.debug("StitchingPlugin failed to build color pipeline", exc_info=True)

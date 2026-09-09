@@ -291,6 +291,7 @@ class StitchDataset(PersistCacheMixin, torch.utils.data.IterableDataset):
                         # Bind live config so HmImageColorAdjust picks up runtime changes.
                         if tf.__class__.__name__ == "HmImageColorAdjust":
                             setattr(tf, "config_ref", self._config_ref)
+                            tf.channel_order = "bgr"
                 return pipeline
             except Exception:
                 return None
