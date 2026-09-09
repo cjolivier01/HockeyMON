@@ -1134,6 +1134,8 @@ def _configure_video_stitching_locked(
             force=False,
             skip_if_exists=False,
             settings=settings,
+            lens_calibration=lens_calibration,
+            lens_calibration_resolved=True,
         ):
             raise RuntimeError("Failed to rebuild edited stitching project")
     elif (

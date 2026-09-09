@@ -2,6 +2,7 @@
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <algorithm>
 #include "hockeymon/csrc/stitcher/HomographyMaps.h"
 
 namespace hm::stitcher {
