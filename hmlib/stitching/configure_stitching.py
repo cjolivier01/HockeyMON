@@ -36,6 +36,7 @@ from hmlib.config import (
     save_private_config,
     set_nested_value,
 )
+from hmlib.stitching.akaze import LensCalibrationPair, load_lens_calibration
 from hmlib.stitching.artifact_validation import (
     MAX_PLACEMENT_BYTES,
     bounded_file,
@@ -43,7 +44,6 @@ from hmlib.stitching.artifact_validation import (
     validate_artifact_generation,
     validate_mapping_tiff,
 )
-from hmlib.stitching.akaze import LensCalibrationPair, load_lens_calibration
 from hmlib.stitching.artifacts import artifact_stage, publish_artifacts, stitching_lock
 from hmlib.stitching.calibration import (
     CalibrationAlignmentError,
@@ -57,11 +57,11 @@ from hmlib.stitching.homography_maps import (
 )
 from hmlib.stitching.hugin import configure_control_points, write_control_points
 from hmlib.stitching.projections import apply_projection, set_source_horizontal_fov
+from hmlib.stitching.settings import MAPPING_BACKENDS as MAPPING_BACKENDS
+from hmlib.stitching.settings import OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS
+from hmlib.stitching.settings import StitchingSettings
+from hmlib.stitching.settings import normalize_mapping_backend as normalize_mapping_backend
 from hmlib.stitching.settings import (
-    MAPPING_BACKENDS as MAPPING_BACKENDS,
-    OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS,
-    StitchingSettings,
-    normalize_mapping_backend as normalize_mapping_backend,
     normalize_max_output_dimension,
     read_stitching_settings,
     validate_output_scale,

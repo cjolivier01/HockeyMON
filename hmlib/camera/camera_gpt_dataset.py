@@ -442,9 +442,8 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
             raise RuntimeError(f"Failed to load camera GPT CSVs for game {game_id!r}") from ex
         longest_run = max((len(run) for run in loaded.frame_runs), default=0)
         if longest_run < self._seq_len:
-            self._unusable_reasons[game_id] = (
-                f"longest contiguous run has {longest_run} frames for seq_len={self._seq_len}"
-            )
+            reason = f"longest contiguous run has {longest_run} frames for seq_len={self._seq_len}"
+            self._unusable_reasons[game_id] = reason
             return None
         self._unusable_reasons.pop(game_id, None)
         self._cache[game_id] = loaded

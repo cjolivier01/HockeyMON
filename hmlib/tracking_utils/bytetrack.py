@@ -471,10 +471,15 @@ class HmByteTrackerCuda:
         projected_mean, projected_cov = self._kalman_project(mean, covariance)
 
         B = covariance @ self._update_mat_T
-        BT = B.transpose(1, 2)
-        chol, _ = torch.linalg.cholesky_ex(projected_cov, check_errors=False)
-        sol = torch.cholesky_solve(BT, chol)
-        kalman_gain = sol.transpose(1, 2)
+        if covariance.device.type == "cpu":
+            # Each position couples only to its own velocity, so the projected
+            # covariance stays diagonal. This solve needs no CPU LAPACK support.
+            kalman_gain = B / projected_cov.diagonal(dim1=1, dim2=2).unsqueeze(1)
+        else:
+            BT = B.transpose(1, 2)
+            chol, _ = torch.linalg.cholesky_ex(projected_cov, check_errors=False)
+            sol = torch.cholesky_solve(BT, chol)
+            kalman_gain = sol.transpose(1, 2)
 
         innovation = measurement_cxcyah - projected_mean
         delta = (innovation.unsqueeze(1) @ kalman_gain.transpose(1, 2)).squeeze(1)
@@ -1152,10 +1157,15 @@ class HmByteTrackerCudaStatic:
         projected_mean, projected_cov = self._kalman_project(mean, covariance)
 
         B = covariance @ self._update_mat_T
-        BT = B.transpose(1, 2)
-        chol, _ = torch.linalg.cholesky_ex(projected_cov, check_errors=False)
-        sol = torch.cholesky_solve(BT, chol)
-        kalman_gain = sol.transpose(1, 2)
+        if covariance.device.type == "cpu":
+            # Each position couples only to its own velocity, so the projected
+            # covariance stays diagonal. This solve needs no CPU LAPACK support.
+            kalman_gain = B / projected_cov.diagonal(dim1=1, dim2=2).unsqueeze(1)
+        else:
+            BT = B.transpose(1, 2)
+            chol, _ = torch.linalg.cholesky_ex(projected_cov, check_errors=False)
+            sol = torch.cholesky_solve(BT, chol)
+            kalman_gain = sol.transpose(1, 2)
 
         innovation = measurement_cxcyah - projected_mean
         delta = (innovation.unsqueeze(1) @ kalman_gain.transpose(1, 2)).squeeze(1)

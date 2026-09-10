@@ -2,7 +2,8 @@
 """
 Prepare VIP-HARPET skeleton annotations for MMACTION2 PoseDataset.
 
-Reads HDF5 annotations and image folders from /mnt/data/datasets/VIP-HARPET,
+Reads HDF5 annotations and image folders from --data-root (defaulting to
+/mnt/data/datasets/VIP-HARPET),
 groups frames into short sequences per action and sequence id, and writes
 per-split pickle files at openmm/mmaction2/data/skeleton/:
   - vipharpet_train.pkl
@@ -19,6 +20,7 @@ Each annotation item contains:
 
 Requires: h5py, pillow, mmengine.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,16 +35,7 @@ from PIL import Image
 import mmengine
 
 ROOT = "/mnt/data/datasets/VIP-HARPET"
-IMG_DIRS = {
-    "train": osp.join(ROOT, "images_train"),
-    "val": osp.join(ROOT, "images_valid"),
-    "test": osp.join(ROOT, "images_test"),
-}
-H5_FILES = {
-    "train": osp.join(ROOT, "annot_train.h5"),
-    "val": osp.join(ROOT, "annot_valid.h5"),
-    "test": osp.join(ROOT, "annot_test.h5"),
-}
+SPLIT_NAMES = {"train": "train", "val": "valid", "test": "test"}
 
 # Map action strings to integer labels
 CLASS_MAP = {"Backward": 0, "Forward": 1, "Passing": 2, "Shooting": 3}
@@ -58,15 +51,16 @@ def _decode_imgname(arr: np.ndarray) -> str:
     return "".join(chr(int(x)) for x in arr if 0 < x < 128).strip()
 
 
-def load_split(split: str) -> Dict[str, Dict]:
+def load_split(split: str, data_root: str = ROOT) -> Dict[str, Dict]:
     """Load a split and group by action+sequence.
 
     Returns a dict keyed by sequence id (e.g., Backward_3) with fields:
       - label
       - frames: list of (frame_idx, filename, (18,2) keypoints)
     """
-    h5_path = H5_FILES[split]
-    img_dir = IMG_DIRS[split]
+    suffix = SPLIT_NAMES[split]
+    h5_path = osp.join(data_root, f"annot_{suffix}.h5")
+    img_dir = osp.join(data_root, f"images_{suffix}")
     assert osp.isfile(h5_path), f"Missing {h5_path}"
     assert osp.isdir(img_dir), f"Missing {img_dir}"
 
@@ -136,6 +130,11 @@ def build_annotations(groups: Dict[str, Dict], img_dir: str) -> List[Dict]:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--data-root",
+        default=ROOT,
+        help="VIP-HARPET directory containing annot_*.h5 and images_* directories",
+    )
+    parser.add_argument(
         "--out-dir",
         default="openmm/mmaction2/data/skeleton",
         help="Output directory for annotation PKLs",
@@ -146,8 +145,9 @@ def main():
 
     for split in ["train", "val", "test"]:
         print(f"Preparing split: {split}")
-        groups = load_split(split)
-        annos = build_annotations(groups, IMG_DIRS[split])
+        groups = load_split(split, args.data_root)
+        img_dir = osp.join(args.data_root, f"images_{SPLIT_NAMES[split]}")
+        annos = build_annotations(groups, img_dir)
         out_path = osp.join(args.out_dir, f"vipharpet_{split}.pkl")
         mmengine.dump(annos, out_path)
         print(f"  wrote {len(annos)} sequences to {out_path}")

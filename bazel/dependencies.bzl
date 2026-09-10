@@ -195,7 +195,9 @@ def _render_libtorch_build_file(ctx, conda_root):
 
     backend_srcs = []
     backend_exact = {
-        "cuda": ["libcaffe2_nvrtc.so", "libc10_cuda.so"],
+        # Newer CUDA builds split NVSHMEM support into a torch_cuda dependency.
+        # Include it when present so Bazel supplies it in native test runfiles.
+        "cuda": ["libcaffe2_nvrtc.so", "libc10_cuda.so", "libtorch_nvshmem.so"],
         "rocm": ["libcaffe2_nvrtc.so", "libc10_hip.so"],
         "cpu": [],
     }

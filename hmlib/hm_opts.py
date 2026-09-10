@@ -1915,9 +1915,7 @@ class hm_opts(object):
     IMPLIED_ARG_TO_CONFIG_MAP: Mapping[str, Sequence[tuple[str, Callable[[Any], Any]]]] = {
         "show_scaled": [("video_out.show_image", lambda _: True)],
     }
-    PRIVATE_CONFIG_ARG_TO_CONFIG_MAP: Mapping[str, Union[str, Sequence[str]]] = (
-        ALL_YAML_ARG_TO_CONFIG_MAP
-    )
+    PRIVATE_CONFIG_ARG_TO_CONFIG_MAP: Mapping[str, str | Sequence[str]] = ALL_YAML_ARG_TO_CONFIG_MAP
     PRIVATE_CONFIG_VALUE_MAP: Mapping[str, Union[Mapping[Any, Any], Callable[[Any], Any]]] = {
         **ARG_VALUE_MAP,
         **INIT_ARG_VALUE_MAP,

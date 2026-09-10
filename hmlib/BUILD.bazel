@@ -56,7 +56,7 @@ _SOURCES = glob(
 )
 
 exports_files(
-    ["cli/create_control_points.py"],
+    ["cli/create_control_points.py", "config.py"],
     visibility = ["//tests:__pkg__"],
 )
 

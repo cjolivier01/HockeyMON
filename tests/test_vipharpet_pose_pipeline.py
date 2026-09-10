@@ -1,116 +1,171 @@
 import os
-import os.path as osp
+from pathlib import Path
 import subprocess
 import sys
 
+import h5py
 import numpy as np
+from PIL import Image
+import pytest
 
 import mmengine
 
-REPO_ROOT = osp.abspath(osp.join(osp.dirname(__file__), ".."))
-MMACTION_ROOT = osp.join(REPO_ROOT, "openmm", "mmaction2")
-DATA_ROOT = osp.join(MMACTION_ROOT, "data", "skeleton")
-CONFIG = osp.join(
-    MMACTION_ROOT,
-    "configs",
-    "skeleton",
-    "stgcn",
-    "vipharpet_stgcn_openpose_3f.py",
-)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MMACTION_ROOT = REPO_ROOT / "openmm" / "mmaction2"
+CONFIG = MMACTION_ROOT / "configs" / "skeleton" / "stgcn" / "vipharpet_stgcn_openpose_3f.py"
+ACTIONS = ("Backward", "Forward", "Passing", "Shooting")
+FRAME_INDICES = (20, 3, 11)
+IMAGE_SHAPE = (64, 96)
 
 
-def should_prepare_vipharpet_pose_generates_pkls():
-    # Ensure conversion can run and pkls exist
-    script = osp.join(REPO_ROOT, "scripts", "prepare_vip_harpet_pose.py")
-    assert osp.isfile(script)
+def _subprocess_env():
     env = os.environ.copy()
-    env["PYTHONPATH"] = f"{MMACTION_ROOT}:{env.get('PYTHONPATH','')}"
-    subprocess.check_call([sys.executable, script, "--out-dir", DATA_ROOT], env=env)
+    env["PYTHONPATH"] = os.pathsep.join((str(MMACTION_ROOT), env.get("PYTHONPATH", "")))
+    # The smoke test covers the CPU training path and needs no accelerator.
+    env["CUDA_VISIBLE_DEVICES"] = ""
+    env["HIP_VISIBLE_DEVICES"] = ""
+    env["OMP_NUM_THREADS"] = "1"
+    env["MKL_NUM_THREADS"] = "1"
+    return env
 
-    for split in ["train", "val", "test"]:
-        out = osp.join(DATA_ROOT, f"vipharpet_{split}.pkl")
-        assert osp.isfile(out), f"Missing {out}"
-        ann = mmengine.load(out)
-        assert isinstance(ann, list) and len(ann) > 0
-        # Validate required keys in first sample
-        sample = ann[0]
-        for k in ["frame_dir", "label", "keypoint", "keypoint_score", "total_frames", "img_shape"]:
-            assert k in sample
-        kp = sample["keypoint"]
-        assert isinstance(kp, np.ndarray) and kp.ndim == 4  # (M,T,V,2)
+
+@pytest.fixture(scope="module")
+def pose_annotations(tmp_path_factory):
+    root = tmp_path_factory.mktemp("vipharpet")
+    data_root = root / "input"
+    data_root.mkdir()
+    out_dir = root / "annotations"
+
+    for split in ("train", "valid", "test"):
+        image_dir = data_root / f"images_{split}"
+        image_dir.mkdir()
+        names = []
+        poses = []
+        for label, action in enumerate(ACTIONS):
+            for frame_idx in FRAME_INDICES:
+                name = f"ImageSequences{action}_{label + 1}_{frame_idx}.jpg"
+                names.append(name)
+                pose = np.full((18, 2), frame_idx, dtype=np.float64)
+                pose[0] = (-10, 100)
+                poses.append(pose)
+                Image.new("RGB", IMAGE_SHAPE[::-1]).save(image_dir / name)
+
+        # VIP-HARPET stores zero-padded ASCII image names as float arrays.
+        encoded_names = np.zeros((len(names), max(map(len, names)) + 1), dtype=np.float64)
+        for row, name in zip(encoded_names, names):
+            row[: len(name)] = list(name.encode("ascii"))
+        with h5py.File(data_root / f"annot_{split}.h5", "w") as annotations:
+            annotations["imgname"] = encoded_names
+            annotations["part"] = np.stack(poses)
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "prepare_vip_harpet_pose.py"),
+            "--data-root",
+            str(data_root),
+            "--out-dir",
+            str(out_dir),
+        ],
+        env=_subprocess_env(),
+        check=True,
+    )
+    return out_dir
+
+
+def should_prepare_vipharpet_pose_generates_pkls(pose_annotations):
+    for split in ("train", "val", "test"):
+        annotations = mmengine.load(pose_annotations / f"vipharpet_{split}.pkl")
+        assert len(annotations) == len(ACTIONS)
+        for label, sample in enumerate(annotations):
+            assert sample["frame_dir"] == f"{ACTIONS[label]}_{label + 1}"
+            assert sample["label"] == label
+            assert sample["total_frames"] == len(FRAME_INDICES)
+            assert sample["img_shape"] == IMAGE_SHAPE
+            assert sample["keypoint"].shape == (1, 3, 18, 2)
+            assert sample["keypoint"].dtype == np.float32
+            assert sample["keypoint_score"].shape == (1, 3, 18)
+            assert sample["keypoint_score"].dtype == np.float32
+            np.testing.assert_array_equal(sample["keypoint_score"], 1)
+            # Frames must be numerically sorted and coordinates clamped.
+            np.testing.assert_array_equal(sample["keypoint"][0, :, 1, 0], (3, 11, 20))
+            np.testing.assert_array_equal(sample["keypoint"][0, :, 0, 0], 0)
+            np.testing.assert_array_equal(sample["keypoint"][0, :, 0, 1], IMAGE_SHAPE[0] - 1)
 
 
 def should_load_training_config():
     from mmengine.config import Config
 
     cfg = Config.fromfile(CONFIG)
-    # sanity checks
     assert cfg.model.type == "RecognizerGCN"
     assert cfg.train_dataloader["dataset"]["type"] == "PoseDataset"
     assert "UniformSampleFrames" in [t["type"] for t in cfg.train_pipeline]
 
 
-def should_build_and_forward_minimal_model():
-    # Load one sample and run a minimal model forward to catch shape issues
-    pkls = [osp.join(DATA_ROOT, "vipharpet_train.pkl")]
-    data = mmengine.load(pkls[0])
-    assert len(data) > 0
-    sample = data[0]
+def should_build_and_forward_minimal_model(pose_annotations, monkeypatch):
     import torch
 
-    # ensure local mmaction2 is importable
-    if MMACTION_ROOT not in sys.path:
-        sys.path.insert(0, MMACTION_ROOT)
+    monkeypatch.syspath_prepend(str(MMACTION_ROOT))
     from mmaction.models import STGCN
 
-    # STGCN expects (N, M, T, V, C)
-    x = torch.from_numpy(sample["keypoint"]).unsqueeze(0)  # (1,M,T,V,2)
-    # pack with score to in_channels=3
-    score = torch.from_numpy(sample["keypoint_score"]).unsqueeze(0).unsqueeze(-1)  # (1,M,T,V,1)
-    x = torch.cat([x, score], dim=-1)  # (1,M,T,V,3)
-    model = STGCN(graph_cfg=dict(layout="openpose", mode="stgcn_spatial"), in_channels=3)
+    sample = mmengine.load(pose_annotations / "vipharpet_train.pkl")[0]
+    # STGCN consumes (N, M, T, V, C), including confidence as channel 3.
+    x = torch.from_numpy(sample["keypoint"]).unsqueeze(0)
+    score = torch.from_numpy(sample["keypoint_score"]).unsqueeze(0).unsqueeze(-1)
+    x = torch.cat([x, score], dim=-1)
+    model = STGCN(
+        graph_cfg=dict(layout="openpose", mode="stgcn_spatial"), in_channels=3, num_person=1
+    ).eval()
     with torch.no_grad():
         y = model(x)
-    assert y.shape[0] == 1
+    assert y.shape == (1, 1, 256, 1, 18)
+    assert torch.isfinite(y).all()
 
 
-def should_train_and_test_entrypoints_smoke():
-    # Run 1 epoch training on a tiny dataset via cfg override
-    env = os.environ.copy()
-    env["PYTHONPATH"] = f"{MMACTION_ROOT}:{env.get('PYTHONPATH','')}"
-    work = osp.join(REPO_ROOT, "work_dirs", "vipharpet_stgcn_openpose_3f_ci")
-    # Train for 1 epoch, small batch, using AMP to match runtime
-    subprocess.check_call(
+def should_train_and_test_entrypoints_smoke(pose_annotations, tmp_path):
+    env = _subprocess_env()
+    work = tmp_path / "train"
+    loader_options = []
+    for split in ("train", "val", "test"):
+        loader_options.extend(
+            [
+                f"{split}_dataloader.dataset.ann_file={pose_annotations / f'vipharpet_{split}.pkl'}",
+                f"{split}_dataloader.batch_size=4",
+                f"{split}_dataloader.num_workers=0",
+                f"{split}_dataloader.persistent_workers=False",
+            ]
+        )
+
+    subprocess.run(
         [
             sys.executable,
-            osp.join(MMACTION_ROOT, "tools", "train.py"),
-            CONFIG,
+            str(MMACTION_ROOT / "tools" / "train.py"),
+            str(CONFIG),
             "--work-dir",
-            work,
-            "--amp",
+            str(work),
+            "--seed",
+            "0",
             "--cfg-options",
             "train_cfg.max_epochs=1",
-            "train_dataloader.batch_size=8",
-            "val_dataloader.batch_size=8",
-            "test_dataloader.batch_size=8",
+            *loader_options,
         ],
         env=env,
+        check=True,
     )
 
-    # Evaluate with the latest checkpoint
-    ckpt = None
-    for f in sorted(os.listdir(work)):
-        if f.endswith(".pth"):
-            ckpt = osp.join(work, f)
-    assert ckpt and osp.isfile(ckpt)
-    subprocess.check_call(
+    ckpt = work / "epoch_1.pth"
+    assert ckpt.is_file()
+    subprocess.run(
         [
             sys.executable,
-            osp.join(MMACTION_ROOT, "tools", "test.py"),
-            CONFIG,
-            ckpt,
+            str(MMACTION_ROOT / "tools" / "test.py"),
+            str(CONFIG),
+            str(ckpt),
             "--work-dir",
-            osp.join(work, "test_results_ci"),
+            str(tmp_path / "test"),
+            "--cfg-options",
+            *loader_options,
         ],
         env=env,
+        check=True,
     )

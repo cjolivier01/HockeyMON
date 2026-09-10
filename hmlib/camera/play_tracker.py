@@ -46,6 +46,7 @@ from hmlib.tracking_utils.utils import get_track_mask
 from hmlib.utils.gpu import unwrap_tensor, wrap_tensor
 from hmlib.utils.image import image_height, image_width, make_channels_last
 from hmlib.utils.progress_bar import ProgressBar
+from hmlib.utils.shadow_lift import shadow_lift_settings
 from hockeymon.core import AllLivingBoxConfig, BBox, HmLogLevel
 from hockeymon.core import PlayTracker as CppPlayTracker
 from hockeymon.core import PlayTrackerConfig
@@ -58,7 +59,6 @@ from .camera_transformer import (
 )
 from .hm_ui_bridge import HmUiDialog, HmUiProcess
 from .living_box import PyLivingBox, from_bbox, to_bbox
-from hmlib.utils.shadow_lift import shadow_lift_settings
 
 _CPP_BOXES: bool = True
 # _CPP_BOXES: bool = False
@@ -2054,9 +2054,8 @@ class PlayTracker(torch.nn.Module):
                 except Exception as ex:
                     logger.warning("Failed to initialize stitch rotation camera UI control: %s", ex)
                     self._stitch_slider_enabled = False
-            fixed_linked, fixed_left_x10, fixed_right_x10 = (
-                self._fixed_edge_rotation_slider_defaults()
-            )
+            fixed_defaults = self._fixed_edge_rotation_slider_defaults()
+            fixed_linked, fixed_left_x10, fixed_right_x10 = fixed_defaults
             tb("Link_Fixed_Edge_Rotation_Left_Right", 1, fixed_linked)
             tb(
                 "Left_Fixed_Edge_Rotation_Angle_x10",
@@ -2102,9 +2101,11 @@ class PlayTracker(torch.nn.Module):
             )
             if self._stitch_slider_enabled:
                 try:
-                    self._ui_defaults[self._ui_window_name]["Stitch_Rotate_Degrees"] = (
-                        self._ui_slider_value(self._ui_window_name, "Stitch_Rotate_Degrees")
+                    stitch_rotation = self._ui_slider_value(
+                        self._ui_window_name, "Stitch_Rotate_Degrees"
                     )
+                    window_defaults = self._ui_defaults[self._ui_window_name]
+                    window_defaults["Stitch_Rotate_Degrees"] = stitch_rotation
                 except KeyError as ex:
                     logger.warning("Failed to store stitch camera UI default: %s", ex)
             self._ui_inited = True

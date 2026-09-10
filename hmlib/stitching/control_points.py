@@ -14,8 +14,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from hmlib.stitching.calibration import CalibrationAlignmentError
 from hmlib.stitching.akaze import LensCalibrationPair, match_akaze
+from hmlib.stitching.calibration import CalibrationAlignmentError
 from hmlib.utils.image import image_height, image_width
 
 CONTROL_POINT_MATCHERS = (

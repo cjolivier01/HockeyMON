@@ -83,3 +83,5 @@ Rebuild the HockeyMON native extension before using the new AKAZE detector or
 native output-cap support. In the Python 3.14 validation environment, native
 tests used a local Bazel override pointing at newer pybind headers already
 installed with Torch; repository dependency pins were not changed.
+The subsequent build fix pins pybind11 3.0.1, so `make perf develop` supports
+Python 3.14 without that override, including the standalone AKAZE binding.

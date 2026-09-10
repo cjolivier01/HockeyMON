@@ -1,57 +1,40 @@
 import importlib.util
 import json
+import logging
 import os
 import sys
 import tempfile
 from types import ModuleType
+from unittest.mock import patch
 
 
 def _load_hmlib_config_light():
-    """Load hmlib/config.py without importing the full hmlib package.
-
-    Creates stub modules in sys.modules for 'hmlib' and 'hmlib.bbox.box_functions'
-    so that config.py can import without triggering heavy dependencies.
-    """
-    # Prepare stub hmlib module and its submodules
-    hm_mod = ModuleType("hmlib")
-    # Point __file__ to the real package path so ROOT_DIR resolves correctly
+    """Load an isolated config module without leaking dependency stubs."""
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    hm_path = os.path.join(repo_root, "hmlib", "__init__.py")
-    hm_mod.__file__ = hm_path
-
-    bbox_mod = ModuleType("hmlib.bbox")
-    box_funcs_mod = ModuleType("hmlib.bbox.box_functions")
-
-    def _scale_bbox_with_constraints(**kwargs):  # pragma: no cover - not used in tests
-        return [0, 0, 0, 0]
-
-    box_funcs_mod.scale_bbox_with_constraints = _scale_bbox_with_constraints
-
-    sys.modules.setdefault("hmlib", hm_mod)
-    sys.modules.setdefault("hmlib.bbox", bbox_mod)
-    sys.modules.setdefault("hmlib.bbox.box_functions", box_funcs_mod)
-
-    # Provide a very small YAML stub using JSON for the tests
+    hm_mod = ModuleType("hmlib")
+    hm_mod.__file__ = os.path.join(repo_root, "hmlib", "__init__.py")
+    log_mod = ModuleType("hmlib.log")
+    log_mod.get_logger = logging.getLogger
     yaml_stub = ModuleType("yaml")
-
-    def _safe_load(stream):
-        return json.loads(stream.read())
+    yaml_stub.safe_load = json.load
+    yaml_stub.YAMLError = ValueError
 
     def _dump(data, stream=None, sort_keys=False):
-        s = json.dumps(data)
+        text = json.dumps(data, sort_keys=sort_keys)
         if stream is None:
-            return s
-        stream.write(s)
+            return text
+        stream.write(text)
 
-    yaml_stub.safe_load = _safe_load  # type: ignore[attr-defined]
-    yaml_stub.dump = _dump  # type: ignore[attr-defined]
-    sys.modules.setdefault("yaml", yaml_stub)
-
+    yaml_stub.dump = _dump
     config_path = os.path.join(repo_root, "hmlib", "config.py")
-    spec = importlib.util.spec_from_file_location("hmlib.config", config_path)
-    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec = importlib.util.spec_from_file_location("_hm_config_test", config_path)
     assert spec and spec.loader, "Failed to create import spec for hmlib.config"
-    spec.loader.exec_module(mod)  # type: ignore[assignment]
+    mod = importlib.util.module_from_spec(spec)
+    with patch.dict(
+        sys.modules,
+        {"hmlib": hm_mod, "hmlib.log": log_mod, "yaml": yaml_stub, spec.name: mod},
+    ):
+        spec.loader.exec_module(mod)
     return mod
 
 
@@ -87,7 +70,8 @@ def should_merge_yaml_files_ordered():
     assert merged["game"]["name"] == "G1"
     assert merged["game"]["phase"] == "regular"
     assert merged["aspen"]["inference_pipeline"][0]["type"] == "LoadImageFromFile"
-    assert merged["aspen"]["video_out_pipeline"][0]["type"] == "HmImageOverlays"
+    assert merged["video_out_pipeline"][0]["type"] == "HmImageOverlays"
+    assert "video_out_pipeline" not in merged["aspen"]
 
 
 def should_merge_aspen_namespace_mock():
