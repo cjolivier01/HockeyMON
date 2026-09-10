@@ -92,3 +92,22 @@ rejects calibrated points. MAGSAC validates spatial consensus and can search up
 to twelve projective hypotheses without lowering consensus requirements when
 removing a rejected hypothesis. Profile contents are pinned and fingerprinted
 for the generation so profile edits invalidate cached maps.
+
+## Standalone control-point command
+
+`python -m hmlib.cli.create_control_points --game-id GAME` reads the same game
+calibration settings as the tracker, including when `--left` and `--right`
+override the input files. Video inputs use synchronized multi-frame calibration;
+two PNG inputs use a single pair through the same project builder.
+
+Unspecified matcher, mapping backend and control-point limits defer to the
+effective settings. For example, `--mapping-backend nona --run-autooptimizer`
+explicitly enables the Hugin optimizer. `--no-run-autooptimizer` can disable it
+when using an OpenCV backend. `--device`, `--calibration-frame-count`,
+`--stitch-frame-time`, and paired integer `--lfo`/`--rfo` overrides are supported.
+`--scale` is a positive Hugin-only relative scale; native backends use
+`--max-output-dimension`.
+
+Frame-array callers of `configure_stitching` use temporary input PNGs and the
+public shared builder. A failed matcher or image write preserves existing
+reference images and removes the temporary inputs.

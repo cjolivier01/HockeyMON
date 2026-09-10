@@ -1,338 +1,243 @@
-import importlib.util
-import subprocess
+"""Public standalone calibration contracts shared with the tracker pipeline."""
+
+from __future__ import annotations
+
+import copy
 import sys
-import tempfile
-import types
-import unittest
 from pathlib import Path
-from unittest import mock
+from types import SimpleNamespace
+
+import cv2
+import numpy as np
+import pytest
+import torch
+
+from hmlib.cli import create_control_points as cli
+from hmlib.stitching import configure_stitching as shared
 
 
-def _install_import_stubs() -> None:
-    hmlib = types.ModuleType("hmlib")
-    hmlib.__path__ = []
-    hmlib_config = types.ModuleType("hmlib.config")
-    hmlib_config.get_game_dir = lambda game_id, assert_exists=True: None
-    hmlib_stitching = types.ModuleType("hmlib.stitching")
-    hmlib_stitching.__path__ = []
-    hmlib_stitching_configure = types.ModuleType("hmlib.stitching.configure_stitching")
-    hmlib_stitching_configure.MAPPING_BACKENDS = (
-        "nona",
-        "opencv-magsac",
-        "opencv-affine-ransac",
+def _frame():
+    return np.full((32, 48, 3), 37, np.uint8)
+
+
+def _points():
+    return {"m_kpts0": torch.ones((8, 2)), "m_kpts1": torch.ones((8, 2))}
+
+
+@pytest.mark.parametrize("stitch_config", [None, {"camera_fov": None}])
+def should_apply_explicit_fov_over_null_inherited_settings(monkeypatch, tmp_path, stitch_config):
+    monkeypatch.setattr(cli, "calculate_control_points", lambda *args, **kwargs: _points())
+    calls = []
+    monkeypatch.setattr(
+        cli, "build_stitching_project", lambda **kwargs: calls.append(kwargs) or True
     )
-    hmlib_stitching_configure.OPENCV_MAPPING_BACKENDS = (
-        "opencv-magsac",
-        "opencv-affine-ransac",
+    cli.configure_stitching(
+        _frame(), _frame(), str(tmp_path), game_config={"stitching": stitch_config}, fov=100
     )
+    assert calls[0]["settings"].horizontal_fov == 100
 
-    def normalize_mapping_backend(value):
-        normalized = str(value).strip().lower().replace("_", "-")
-        if normalized not in hmlib_stitching_configure.MAPPING_BACKENDS:
-            raise ValueError(f"Unsupported mapping backend: {normalized}")
-        return normalized
 
-    def normalize_max_output_dimension(value):
-        if value is None:
-            return None
-        normalized = int(value)
-        if not 0 < normalized <= 65534:
-            raise ValueError("max_output_dimension must be between 1 and 65534")
-        return normalized
+def should_delegate_frame_calibration_with_settings_device_and_temporary_inputs(
+    monkeypatch, tmp_path
+):
+    config = {
+        "stitching": {
+            "mapping_backend": "nona",
+            "run_autooptimizer": True,
+            "control_point_matcher": "loftr",
+            "max_output_dimension": 2048,
+            "camera_fov": {"horizontal_fov": 95, "vertical_fov": 70},
+        }
+    }
+    original = copy.deepcopy(config)
+    (tmp_path / "left.png").write_bytes(b"previous left")
+    (tmp_path / "right.png").write_bytes(b"previous right")
+    points = _points()
+    matches, builds = [], []
 
-    hmlib_stitching_configure.get_enblend_bin = lambda: "enblend"
-    hmlib_stitching_configure.normalize_mapping_backend = normalize_mapping_backend
-    hmlib_stitching_configure.normalize_max_output_dimension = normalize_max_output_dimension
-    hmlib_stitching_control_points = types.ModuleType("hmlib.stitching.control_points")
-    hmlib_stitching_control_points.CONTROL_POINT_MATCHERS = (
-        "superpoint-lightglue",
-        "dedode-lightglue",
-        "loftr",
+    def match(*args, **kwargs):
+        matches.append(kwargs)
+        return points
+
+    def build(**kwargs):
+        builds.append(kwargs)
+        assert kwargs["control_points"] is points
+        for image in kwargs["image_files"]:
+            assert Path(image).parent != tmp_path
+            np.testing.assert_array_equal(cv2.imread(image), _frame())
+        assert (tmp_path / "left.png").read_bytes() == b"previous left"
+        assert (tmp_path / "right.png").read_bytes() == b"previous right"
+        return True
+
+    monkeypatch.setattr(cli, "calculate_control_points", match)
+    monkeypatch.setattr(cli, "build_stitching_project", build)
+    assert (
+        cli.configure_stitching(
+            _frame(),
+            _frame(),
+            str(tmp_path),
+            game_config=config,
+            device=torch.device("cpu"),
+            scale=0.5,
+            fov=100,
+            control_point_matcher="dedode-lightglue",
+        )
+        is True
     )
-    hmlib_stitching_control_points.calculate_control_points = lambda *_args, **_kwargs: {}
-    hmlib_stitching_homography_maps = types.ModuleType("hmlib.stitching.homography_maps")
-    hmlib_stitching_homography_maps.create_opencv_affine_ransac_mapping_files = (
-        lambda *_args, **_kwargs: []
+    assert len(builds) == 1
+    assert builds[0]["settings"].control_point_matcher == "dedode-lightglue"
+    assert builds[0]["settings"].horizontal_fov == 100
+    assert builds[0]["settings"].vertical_fov == 70
+    assert builds[0]["settings"].max_output_dimension == 2048
+    assert builds[0]["scale"] == 0.5
+    assert matches[0]["device"] == torch.device("cpu")
+    assert builds[0]["lens_calibration_resolved"] is True
+    assert config == original
+    assert not list(tmp_path.glob("hm-calibration-input-*"))
+
+
+@pytest.mark.parametrize(
+    "options,match",
+    [
+        ({"mapping_backend": "opencv-magsac", "scale": 0.5}, "opencv-magsac"),
+        ({"mapping_backend": "opencv-affine-ransac", "scale": 0.5}, "opencv-affine-ransac"),
+        ({"mapping_backend": "nona"}, "run_autooptimizer"),
+        ({"max_output_dimension": 0}, "max_output_dimension"),
+        ({"max_output_dimension": 65535}, "max_output_dimension"),
+        ({"scale": 0}, "scale"),
+        ({"scale": float("nan")}, "scale"),
+        ({"scale": float("inf")}, "scale"),
+        ({"max_control_points": 2}, "max_control_points"),
+        ({"control_point_matcher": "akaze", "max_control_points": 4}, "at least six"),
+    ],
+)
+def should_reject_invalid_calibration_before_writing_frames(tmp_path, options, match):
+    directory = tmp_path / "new-game"
+    with pytest.raises(ValueError, match=match):
+        cli.configure_stitching(_frame(), _frame(), str(directory), **options)
+    assert not directory.exists()
+
+
+def should_preserve_references_and_cleanup_temporary_frames_on_builder_failure(
+    monkeypatch, tmp_path
+):
+    (tmp_path / "left.png").write_bytes(b"old left")
+    (tmp_path / "right.png").write_bytes(b"old right")
+    failure = OSError("mapping write failed")
+    monkeypatch.setattr(cli, "calculate_control_points", lambda *args, **kwargs: _points())
+
+    def fail(**kwargs):
+        raise failure
+
+    monkeypatch.setattr(cli, "build_stitching_project", fail)
+    with pytest.raises(OSError) as caught:
+        cli.configure_stitching(_frame(), _frame(), str(tmp_path))
+    assert caught.value is failure
+    assert (tmp_path / "left.png").read_bytes() == b"old left"
+    assert (tmp_path / "right.png").read_bytes() == b"old right"
+    assert not list(tmp_path.glob("hm-calibration-input-*"))
+
+
+def should_surface_failed_input_image_writes(monkeypatch, tmp_path):
+    monkeypatch.setattr(cv2, "imwrite", lambda *args: False)
+    with pytest.raises(OSError, match="save calibration frame"):
+        cli.configure_stitching(_frame(), _frame(), str(tmp_path))
+    assert not list(tmp_path.glob("hm-calibration-input-*"))
+
+
+def should_apply_game_settings_even_with_explicit_image_inputs(monkeypatch, tmp_path):
+    config = {
+        "stitching": {
+            "control_point_matcher": "loftr",
+            "mapping_backend": "nona",
+            "run_autooptimizer": False,
+        }
+    }
+    monkeypatch.setattr(cli, "get_game_config", lambda game_id: config)
+    monkeypatch.setattr(cli, "_game_dir_for_id", lambda game_id: str(tmp_path))
+    monkeypatch.setattr(cli, "extract_frame", lambda *args: _frame())
+    calls = []
+    monkeypatch.setattr(
+        cli, "configure_stitching", lambda *args, **kwargs: calls.append(kwargs) or True
     )
-    hmlib_stitching_homography_maps.create_opencv_magsac_mapping_files = (
-        lambda *_args, **_kwargs: []
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "create_control_points",
+            "--game-id",
+            "demo",
+            "--left",
+            "a.png",
+            "--right",
+            "b.png",
+            "--run-autooptimizer",
+            "--scale",
+            ".5",
+            "--device",
+            "cpu",
+        ],
     )
-
-    lightglue = types.ModuleType("lightglue")
-    lightglue.LightGlue = object
-    lightglue.SuperPoint = object
-    lightglue.viz2d = types.SimpleNamespace()
-    lightglue_utils = types.ModuleType("lightglue.utils")
-    lightglue_utils.rbd = lambda value: value
-
-    scipy = types.ModuleType("scipy")
-    scipy.__path__ = []
-    scipy_signal = types.ModuleType("scipy.signal")
-    scipy.signal = scipy_signal
-
-    torch = types.ModuleType("torch")
-    torch.Tensor = object
-    torch.device = object
-
-    numpy = types.ModuleType("numpy")
-    numpy.ndarray = object
-
-    tifffile = types.ModuleType("tifffile")
-    tifffile.TiffFile = object
-
-    cv2 = types.ModuleType("cv2")
-    cv2.imwrite = lambda *_args, **_kwargs: True
-
-    for name, module in {
-        "cv2": cv2,
-        "ffmpegio": types.ModuleType("ffmpegio"),
-        "hmlib": hmlib,
-        "hmlib.config": hmlib_config,
-        "hmlib.stitching": hmlib_stitching,
-        "hmlib.stitching.configure_stitching": hmlib_stitching_configure,
-        "hmlib.stitching.control_points": hmlib_stitching_control_points,
-        "hmlib.stitching.homography_maps": hmlib_stitching_homography_maps,
-        "kornia": types.ModuleType("kornia"),
-        "lightglue": lightglue,
-        "lightglue.utils": lightglue_utils,
-        "numpy": numpy,
-        "scipy": scipy,
-        "scipy.signal": scipy_signal,
-        "tifffile": tifffile,
-        "torch": torch,
-        "yaml": types.ModuleType("yaml"),
-    }.items():
-        sys.modules.setdefault(name, module)
+    cli.main()
+    assert calls[0]["directory"] == str(tmp_path)
+    assert calls[0]["settings"].control_point_matcher == "loftr"
+    assert calls[0]["settings"].run_autooptimizer is True
+    assert calls[0]["scale"] == 0.5
+    assert calls[0]["device"] == torch.device("cpu")
+    assert calls[0]["game_config"] is config
 
 
-def _load_create_control_points():
-    _install_import_stubs()
-    module_path = Path(__file__).resolve().parents[1] / "hmlib" / "cli" / "create_control_points.py"
-    spec = importlib.util.spec_from_file_location("create_control_points_under_test", module_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
+def should_route_videos_to_multiframe_pipeline_with_configured_time(monkeypatch, tmp_path):
+    config = {
+        "game": {"videos": {"left": ["left/clip.mp4"], "right": ["right/clip.mp4"]}},
+        "stitching": {
+            "control_point_matcher": "loftr",
+            "calibration_frame_count": 3,
+            "stitch_frame_time": "00:00:02",
+        },
+    }
+    monkeypatch.setattr(cli, "get_game_config", lambda game_id: config)
+    monkeypatch.setattr(cli, "_game_dir_for_id", lambda game_id: str(tmp_path))
+    monkeypatch.setattr(cli, "BasicVideoInfo", lambda video: SimpleNamespace(fps=30))
+    calls = []
+    monkeypatch.setattr(cli, "configure_video_stitching", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(
+        sys, "argv", ["create_control_points", "--game-id", "demo", "--lfo", "3", "--rfo", "1"]
+    )
+    cli.main()
+    assert calls[0]["video_left"] == str(tmp_path / "left/clip.mp4")
+    assert calls[0]["video_right"] == str(tmp_path / "right/clip.mp4")
+    assert calls[0]["left_frame_offset"] == 3
+    assert calls[0]["right_frame_offset"] == 1
+    assert calls[0]["base_frame_offset"] == 60
+    assert calls[0]["settings"].calibration_frame_count == 3
+    assert calls[0]["game_config"] is config
+    assert calls[0]["game_id"] == "demo"
 
 
-class CreateControlPointsScaleTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.create_control_points = _load_create_control_points()
-
-    def test_read_pto_canvas_size(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pto_file = Path(tmpdir) / "project.pto"
-            pto_file.write_text("# hugin project\np f1 w12092 h9267 v360\n", encoding="utf-8")
-
-            self.assertEqual(
-                self.create_control_points._read_pto_canvas_size(str(pto_file)), (12092, 9267)
-            )
-
-    def test_opencv_mapping_backends_reject_hugin_scale(self) -> None:
-        for backend in ("opencv-magsac", "opencv-affine-ransac"):
-            with self.subTest(backend=backend):
-                with self.assertRaisesRegex(ValueError, backend):
-                    self.create_control_points.configure_stitching(
-                        object(),
-                        object(),
-                        "/tmp/unused-stitch-test",
-                        scale=0.5,
-                        mapping_backend=backend,
-                    )
-
-    def test_configure_stitching_rejects_invalid_maximum_dimension(self) -> None:
-        for maximum_dimension in (-1, 0, 65535):
-            with self.subTest(maximum_dimension=maximum_dimension):
-                with self.assertRaisesRegex(ValueError, "max_output_dimension"):
-                    self.create_control_points.configure_stitching(
-                        object(),
-                        object(),
-                        "/tmp/unused-stitch-test",
-                        max_output_dimension=maximum_dimension,
-                    )
-
-    def test_configure_stitching_scales_pto_before_nona_and_retries_final_mapping(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            calls = []
-            mapping_sizes = [(8195, 1000), (8180, 1000)]
-
-            def fake_run_stitching_command(cmd):
-                calls.append(list(cmd))
-                if cmd[0] == "pto_gen":
-                    Path(cmd[cmd.index("-o") + 1]).write_text(
-                        "p f1 w12092 h9267\n", encoding="utf-8"
-                    )
-                elif cmd[0] == "autooptimiser":
-                    Path(cmd[cmd.index("-o") + 1]).write_text(
-                        "p f1 w12092 h9267\n", encoding="utf-8"
-                    )
-                elif cmd[0] == "nona":
-                    (tmp_path / "mapping_0000.tif").write_text("mapping0", encoding="utf-8")
-                    (tmp_path / "mapping_0001.tif").write_text("mapping1", encoding="utf-8")
-                elif cmd[0] == "enblend":
-                    return
-                else:
-                    raise AssertionError(f"unexpected command: {cmd}")
-
-            with (
-                mock.patch.object(
-                    self.create_control_points.cv2, "imwrite", lambda *_args, **_kwargs: True
-                ),
-                mock.patch.object(
-                    self.create_control_points,
-                    "calculate_control_points",
-                    lambda *_args, **_kwargs: {},
-                ),
-                mock.patch.object(
-                    self.create_control_points, "update_pto_file", lambda *_args, **_kwargs: None
-                ),
-                mock.patch.object(self.create_control_points, "get_enblend_bin", lambda: "enblend"),
-                mock.patch.object(
-                    self.create_control_points, "_run_stitching_command", fake_run_stitching_command
-                ),
-                mock.patch.object(
-                    self.create_control_points,
-                    "_read_mapping_canvas_size",
-                    lambda _files: mapping_sizes.pop(0),
-                ),
-            ):
-                self.assertTrue(
-                    self.create_control_points.configure_stitching(
-                        object(),
-                        object(),
-                        str(tmp_path),
-                        force=True,
-                        max_output_dimension=8192,
-                    )
-                )
-
-            self.assertEqual(
-                [cmd[0] for cmd in calls],
-                [
-                    "pto_gen",
-                    "autooptimiser",
-                    "autooptimiser",
-                    "nona",
-                    "autooptimiser",
-                    "nona",
-                    "enblend",
-                ],
-            )
-
-            autooptimiser_commands = [cmd for cmd in calls if cmd[0] == "autooptimiser"]
-            self.assertNotIn("-x", autooptimiser_commands[0])
-
-            first_scale = float(
-                autooptimiser_commands[1][autooptimiser_commands[1].index("-x") + 1]
-            )
-            retry_scale = float(
-                autooptimiser_commands[2][autooptimiser_commands[2].index("-x") + 1]
-            )
-            self.assertAlmostEqual(first_scale, 8192 / 12092)
-            self.assertLess(retry_scale, first_scale)
-
-    def test_native_mapping_backend_does_not_run_autooptimiser(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-            calls = []
-
-            def fake_run_stitching_command(cmd):
-                calls.append(list(cmd))
-                if cmd[0] == "pto_gen":
-                    Path(cmd[cmd.index("-o") + 1]).write_text("p f1 w100 h50\n", encoding="utf-8")
-                elif cmd[0] != "enblend":
-                    raise AssertionError(f"unexpected command: {cmd}")
-
-            def fake_native_mapping(*_args, **_kwargs):
-                outputs = [tmp_path / "mapping_0000.tif", tmp_path / "mapping_0001.tif"]
-                for output in outputs:
-                    output.write_text("mapping", encoding="utf-8")
-                return [str(output) for output in outputs]
-
-            with (
-                mock.patch.object(
-                    self.create_control_points.cv2, "imwrite", lambda *_args, **_kwargs: True
-                ),
-                mock.patch.object(
-                    self.create_control_points,
-                    "calculate_control_points",
-                    lambda *_args, **_kwargs: {},
-                ),
-                mock.patch.object(
-                    self.create_control_points, "update_pto_file", lambda *_args, **_kwargs: None
-                ),
-                mock.patch.object(self.create_control_points, "get_enblend_bin", lambda: "enblend"),
-                mock.patch.object(
-                    self.create_control_points, "_run_stitching_command", fake_run_stitching_command
-                ),
-                mock.patch.object(
-                    self.create_control_points,
-                    "create_opencv_affine_ransac_mapping_files",
-                    fake_native_mapping,
-                ),
-            ):
-                self.assertTrue(
-                    self.create_control_points.configure_stitching(
-                        object(),
-                        object(),
-                        str(tmp_path),
-                        force=True,
-                        mapping_backend="opencv-affine-ransac",
-                        max_output_dimension=2048,
-                    )
-                )
-
-            self.assertEqual([cmd[0] for cmd in calls], ["pto_gen", "enblend"])
-            self.assertEqual(
-                (tmp_path / "autooptimiser_out.pto").read_text(encoding="utf-8"),
-                (tmp_path / "hm_project.pto").read_text(encoding="utf-8"),
-            )
-
-    def test_enblend_failure_removes_partial_seam(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp_path = Path(tmpdir)
-
-            def fake_run_stitching_command(cmd):
-                if cmd[0] == "pto_gen":
-                    Path(cmd[cmd.index("-o") + 1]).write_text("p f1 w100 h50\n", encoding="utf-8")
-                elif cmd[0] == "autooptimiser":
-                    Path(cmd[cmd.index("-o") + 1]).write_text("p f1 w100 h50\n", encoding="utf-8")
-                elif cmd[0] == "nona":
-                    (tmp_path / "mapping_0000.tif").write_text("mapping0", encoding="utf-8")
-                    (tmp_path / "mapping_0001.tif").write_text("mapping1", encoding="utf-8")
-                elif cmd[0] == "enblend":
-                    (tmp_path / "seam_file.png").write_text("partial", encoding="utf-8")
-                    raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
-                else:
-                    raise AssertionError(f"unexpected command: {cmd}")
-
-            with (
-                mock.patch.object(
-                    self.create_control_points.cv2, "imwrite", lambda *_args, **_kwargs: True
-                ),
-                mock.patch.object(
-                    self.create_control_points,
-                    "calculate_control_points",
-                    lambda *_args, **_kwargs: {},
-                ),
-                mock.patch.object(
-                    self.create_control_points, "update_pto_file", lambda *_args, **_kwargs: None
-                ),
-                mock.patch.object(self.create_control_points, "get_enblend_bin", lambda: "enblend"),
-                mock.patch.object(
-                    self.create_control_points, "_run_stitching_command", fake_run_stitching_command
-                ),
-            ):
-                self.assertTrue(
-                    self.create_control_points.configure_stitching(
-                        object(), object(), str(tmp_path), force=True
-                    )
-                )
-
-            self.assertFalse((tmp_path / "seam_file.png").exists())
+@pytest.mark.parametrize("extra", [["--lfo", "2"], ["--lfo", "-1", "--rfo", "0"]])
+def should_reject_partial_or_negative_offsets(monkeypatch, extra):
+    monkeypatch.setattr(
+        sys, "argv", ["create_control_points", "--left", "a.mp4", "--right", "b.mp4", *extra]
+    )
+    with pytest.raises(SystemExit) as caught:
+        cli.main()
+    assert caught.value.code == 2
 
 
-if __name__ == "__main__":
-    unittest.main()
+def should_forward_scale_and_device_to_the_shared_video_worker(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        shared, "_configure_video_stitching_locked", lambda **kwargs: calls.append(kwargs)
+    )
+    shared.configure_video_stitching(
+        str(tmp_path),
+        "a.mp4",
+        "b.mp4",
+        100,
+        device=torch.device("cpu"),
+        scale=0.5,
+        game_config={"stitching": {"mapping_backend": "nona", "run_autooptimizer": True}},
+    )
+    assert calls[0]["scale"] == 0.5
+    assert calls[0]["device"] == torch.device("cpu")
