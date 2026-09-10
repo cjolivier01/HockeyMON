@@ -163,9 +163,10 @@ class StitchingPlugin(Plugin):
                 return None
             try:
                 pipeline = Compose(copy.deepcopy(spec))
-                if self._config_ref is not None:
-                    for tf in getattr(pipeline, "transforms", []):
-                        if tf.__class__.__name__ == "HmImageColorAdjust":
+                for tf in pipeline:
+                    if tf.__class__.__name__ == "HmImageColorAdjust":
+                        tf.channel_order = "bgr"
+                        if self._config_ref is not None:
                             setattr(tf, "config_ref", self._config_ref)
                 return pipeline
             except Exception:
