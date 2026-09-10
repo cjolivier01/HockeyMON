@@ -426,7 +426,7 @@ def capture(
                         raise ValueError("Captured artifacts changed since completion")
                     print(f"SKIP {name}", flush=True)
                     continue
-                except (OSError, ValueError) as error:
+                except (OSError, ValueError, yaml.YAMLError) as error:
                     print(f"RETRY {name}: invalid saved capture: {error}", flush=True)
             rows[name] = {"outcome": "in_progress", "signature": signature}
             atomic_json(manifest_path, rows)

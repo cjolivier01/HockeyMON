@@ -141,11 +141,14 @@ def should_reuse_only_unchanged_complete_captures(matrix, source, tmp_path, succ
     (first / "effective-config.yaml").write_text("changed: true\n")
     assert launch(matrix, source, output, runner) == 0
     assert len(calls) == 5
-    (first / "plan.json").write_text("{}")
+    (first / "effective-config.yaml").write_text("stitching: [broken\n")
     assert launch(matrix, source, output, runner) == 0
     assert len(calls) == 6
-    assert launch(matrix, source, output, runner, force=True, start_at=2, limit=1) == 0
+    (first / "plan.json").write_text("{}")
+    assert launch(matrix, source, output, runner) == 0
     assert len(calls) == 7
+    assert launch(matrix, source, output, runner, force=True, start_at=2, limit=1) == 0
+    assert len(calls) == 8
     assert {p.name: p.read_bytes() for p in source.iterdir()} == before
     # Content changes survive unchanged file size and mtime.
     image = source / "left.png"
@@ -155,7 +158,7 @@ def should_reuse_only_unchanged_complete_captures(matrix, source, tmp_path, succ
     image.write_bytes(data)
     os.utime(image, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
     assert launch(matrix, source, output, runner) == 0
-    assert len(calls) == 9
+    assert len(calls) == 10
 
 
 def should_record_failures_continue_and_retry_failed_force(
