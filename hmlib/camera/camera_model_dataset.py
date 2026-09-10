@@ -16,6 +16,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from hmlib.camera.camera_policy import read_camera_policy_boundaries
 from hmlib.camera.camera_transformer import CameraNorm, build_frame_features
 
 
@@ -89,10 +90,15 @@ class CameraPanZoomDataset(Dataset):
         )
         self.frames: List[int] = [int(f) for f in frames]
         self.frame_set = set(self.frames)
+        self.policy_boundaries = read_camera_policy_boundaries(camera_csv, self.cams["Frame"])
         self.valid_indices: List[int] = [
             i
             for i in range(self.window, len(self.frames))
-            if all(self.frames[j + 1] == self.frames[j] + 1 for j in range(i - self.window, i))
+            if all(
+                self.frames[j + 1] == self.frames[j] + 1
+                and self.frames[j + 1] not in self.policy_boundaries
+                for j in range(i - self.window, i)
+            )
         ]
 
     def __len__(self) -> int:
@@ -124,7 +130,7 @@ class CameraPanZoomDataset(Dataset):
             if prev_cx is None:
                 # Never bridge a missing numeric frame with stale camera state.
                 previous_frame = f - 1
-                if previous_frame in self.frame_set:
+                if previous_frame in self.frame_set and f not in self.policy_boundaries:
                     pcx, pcy, ph = self._get_cam(previous_frame)
                     prev_cx, prev_cy, prev_h = pcx, pcy, ph
             tlwh = self._get_tlwh(f)

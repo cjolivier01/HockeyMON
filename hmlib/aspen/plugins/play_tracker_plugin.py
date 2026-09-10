@@ -278,6 +278,8 @@ class PlayTrackerPlugin(Plugin):
             "data_samples": track_data_sample,
             "original_images": original_images,
         }
+        if "camera_input_geometry" in context:
+            results["camera_input_geometry"] = context["camera_input_geometry"]
         # Optional rink_profile for play-box seeding and boundary overlays
         rp = context.get("rink_profile")
         if rp is not None:
@@ -312,6 +314,7 @@ class PlayTrackerPlugin(Plugin):
         return {
             "data_samples",
             "original_images",
+            "camera_input_geometry",
             "jersey_results",
             "action_results",
             "camera_boxes",
@@ -329,6 +332,7 @@ class PlayTrackerPlugin(Plugin):
                 "img",
                 "current_box",
                 "current_fast_box_list",
+                "camera_policy_events",
                 "frame_ids",
                 "player_bottom_points",
                 "player_ids",

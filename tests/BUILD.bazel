@@ -515,6 +515,30 @@ sh_test(
     ],
 )
 
+sh_test(
+    name = "test_camera_policy",
+    srcs = ["runtime_pytest.sh"],
+    args = [
+        "tests/test_camera_policy.py",
+        "cv2",
+        "mmengine",
+        "numpy",
+        "pandas",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_camera_policy.py",
+        "//hockeymon:hockeymon",
+        "test_play_tracker_parity.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
 pytest_test(
     name="test_hm_cuda_container",
     srcs=["test_hm_cuda_container.py"],

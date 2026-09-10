@@ -3,6 +3,7 @@
 Used by camera training and analysis tools to persist camera TLWH boxes.
 """
 
+import json
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -10,6 +11,32 @@ import pandas as pd
 
 from hmlib.datasets.dataframe import HmDataFrameBase
 from hmlib.tracking_utils.tracking_dataframe import convert_tlbr_to_tlwh
+
+
+class CameraPolicyDataFrame(HmDataFrameBase):
+    """Durable, headerless Frame/PolicyJSON companion for camera training data."""
+
+    def __init__(self, output_file: str):
+        super().__init__(fields=["Frame", "PolicyJSON"], output_file=output_file)
+
+    def add_events(self, events: List[Dict[str, Any]]) -> None:
+        if not events:
+            return
+        rows = [
+            {
+                "Frame": event["frame"],
+                "PolicyJSON": json.dumps(
+                    {key: value for key, value in event.items() if key != "frame"},
+                    allow_nan=False,
+                    sort_keys=True,
+                ),
+            }
+            for event in events
+        ]
+        self._dataframe_list.append(pd.DataFrame(rows))
+        # Policy changes are infrequent. Persist before the associated camera
+        # rows can be flushed, and propagate uncertain-write failures normally.
+        self.write_data()
 
 
 class CameraTrackingDataFrame(HmDataFrameBase):
