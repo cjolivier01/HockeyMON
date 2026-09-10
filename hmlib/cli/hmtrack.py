@@ -804,6 +804,8 @@ def _enable_load_tracking_plugin(
     camera_controller = plugins.get("camera_controller")
     if isinstance(camera_controller, dict):
         camera_controller["depends"] = ["load_tracking"]
+        if isinstance(plugins.get("ice_config"), dict):
+            camera_controller["depends"].append("ice_config")
         plugins["camera_controller"] = camera_controller
 
     aspen["plugins"] = plugins

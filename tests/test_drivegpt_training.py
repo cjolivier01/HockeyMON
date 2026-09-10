@@ -1,4 +1,7 @@
 import argparse
+
+import cv2
+import numpy as np
 import json
 import os
 import subprocess
@@ -13,6 +16,7 @@ from hmlib.camera.camera_gpt import CameraPanZoomGPT, unpack_gpt_checkpoint
 from hmlib.camera.camera_gpt_dataset import CameraPanZoomGPTIterableDataset, GameCsvPaths
 from hmlib.camera.camera_training_config import catalog_split, expand_training_config
 from hmlib.camera.camera_transformer import CameraNorm
+from hmlib.camera.rink_context import RINK_CONTEXT_SCHEMA, file_sha256, rink_context_path
 from hmlib.cli.camgpt_train import TrainingRollout, _maybe_resume, _target_met
 from hmlib.cli.drivegpt_dataset import choose_generation, publish_dataset
 
@@ -28,6 +32,30 @@ def _game(directory: Path, suffix: str = "", frames: int = 12, offset: int = 0) 
     )
     (directory / f"camera_fast{part}.csv").write_text(
         "".join(f"{i},4,2,50,30\n" for i in range(1, frames + 1))
+    )
+
+    mask_path = directory / "rink_mask_0.png"
+    mask = np.zeros((36, 64), dtype=np.uint8)
+    mask[4:34, 3:61] = 255
+    assert cv2.imwrite(str(mask_path), mask)
+    tracking = directory / f"tracking{part}.csv"
+    rink_context_path(str(tracking)).write_text(
+        json.dumps(
+            {
+                "schema": RINK_CONTEXT_SCHEMA,
+                "coordinate_space": "original_stitched_pixels",
+                "frame_size": [64, 36],
+                "tracking": {"file": tracking.name, "sha256": file_sha256(tracking)},
+                "masks": [
+                    {
+                        "file": mask_path.name,
+                        "sha256": file_sha256(mask_path),
+                        "mask_to_tracking": [[1, 0, 0], [0, 1, 0]],
+                    }
+                ],
+                "evidence": "Synthetic fixture generated in the same64x36 tracking canvas.",
+            }
+        )
     )
 
 
@@ -219,7 +247,10 @@ def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path, target_mode, outpu
         "--dataset-config",
         str(dataset / "dataset.yaml"),
         "--no-pose",
-        "--no-include-rink",
+        "--include-rink" if target_mode == "slow_tlwh" else "--no-include-rink",
+        "--rink-input=grid",
+        "--rink-grid-height=8",
+        "--rink-grid-width=16",
         "--d-model=16",
         "--nhead=4",
         "--nlayers=1",
@@ -310,3 +341,72 @@ def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path, target_mode, outpu
     assert run["evaluation"] == state["evaluation"]
     final_line = resumed_lines[-1]
     assert final_line["kind"] == "finished" and not final_line["target_met"]
+
+
+def should_abort_all_ranks_when_one_host_cannot_build_rink_grid(tmp_path):
+    source, dataset = tmp_path / "source", tmp_path / "dataset"
+    for i in range(3):
+        _game(source / f"game-{i}", offset=i)
+    publish_dataset(source, dataset, min_frames=4)
+    config_path = dataset / "dataset.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    config["split"] = {"validation_games": ["game-2"]}
+    config_path.write_text(yaml.safe_dump(config))
+    runner = tmp_path / "rank_failure.py"
+    runner.write_text("""import os
+from hmlib.cli import camgpt_train
+original = camgpt_train.load_rink_grid
+def load(*args, **kwargs):
+    if os.environ['RANK'] == '1':
+        raise ValueError('rank-local invalid mask')
+    return original(*args, **kwargs)
+camgpt_train.load_rink_grid = load
+camgpt_train.main()
+""")
+    output = tmp_path / "model.pt"
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nproc-per-node=2",
+        str(runner),
+        "--dataset-config",
+        str(config_path),
+        "--model-kind=drivegpt",
+        "--drivegpt-init=none",
+        "--no-pose",
+        "--include-rink",
+        "--rink-input=grid",
+        "--target-mode=slow_tlwh",
+        "--seq-len=4",
+        "--rollout-len=8",
+        "--val-seq-len=8",
+        "--steps=1",
+        "--device=cpu",
+        "--ddp-backend=gloo",
+        "--cpu-threads=1",
+        "--out",
+        str(output),
+    ]
+    environment = dict(os.environ)
+    for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
+        environment.pop(key, None)
+    result = subprocess.run(
+        command,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode != 0
+    assert (
+        "[rank0]: RuntimeError: Dataset geometry preflight failed: rank 1: ValueError: rank-local invalid mask"
+        in result.stdout
+    )
+    assert (
+        "[rank1]: RuntimeError: Dataset geometry preflight failed: rank 1: ValueError: rank-local invalid mask"
+        in result.stdout
+    )
+    assert not output.exists()

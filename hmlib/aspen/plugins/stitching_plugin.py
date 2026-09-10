@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import math
 import os
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -131,6 +133,8 @@ class StitchingPlugin(Plugin):
         self._config_ref: Optional[Dict[str, Any]] = None
         self._initialized: bool = False
         self._stitcher = None
+        self._geometry_stitcher = None
+        self._geometry_session = None
         self._rotate_cache: Dict[Tuple[Any, ...], Dict[str, torch.Tensor]] = {}
         self._rotate_grid_cache: Dict[Tuple[Any, ...], torch.Tensor] = {}
         self._width_t: Optional[torch.Tensor] = None
@@ -657,9 +661,28 @@ class StitchingPlugin(Plugin):
             print(f"Saving first stitched frame to {frame_path}")
             cv2.imwrite(frame_path, make_visible_image(stitched_frame[0], force_numpy=True))
 
+        # Stitchers own immutable calibration maps. A replacement gets a new
+        # session identity; rotation and canvas/input shape belong to the identity
+        # of the frame actually rendered, not a later UI request.
+        if self._geometry_stitcher is not self._stitcher:
+            self._geometry_stitcher = self._stitcher
+            self._geometry_session = uuid.uuid4().hex
+        geometry_revision = hashlib.sha256(
+            repr(
+                (
+                    self._geometry_session,
+                    tuple(tuple(img.shape[1:]) for img in imgs),
+                    tuple(blended.shape[1:]),
+                    applied_rotation,
+                )
+            ).encode()
+        ).hexdigest()
         out: Dict[str, Any] = {
             "original_images": original_images,
-            "camera_input_geometry": {"post_stitch_rotate_degrees": applied_rotation},
+            "camera_input_geometry": {
+                "post_stitch_rotate_degrees": applied_rotation,
+                "stitched_geometry_revision": geometry_revision,
+            },
             "ids": ids,
             "frame_ids": ids,
             "debug_rgb_stats": stitched_debug,

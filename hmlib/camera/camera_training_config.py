@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from hmlib.camera.camera_gpt_dataset import GameCsvPaths
+from hmlib.camera.rink_context import read_rink_context
 
 
 def read_mapping(path: Path) -> dict:
@@ -113,6 +114,7 @@ def catalog_split(
     root_override: str | None = None,
     min_train_frames: int = 2,
     min_val_frames: int = 2,
+    require_rink_grid: bool = False,
 ) -> tuple[list[GameCsvPaths], list[GameCsvPaths], dict]:
     path = Path(config_path).expanduser().resolve()
     config = read_mapping(path)
@@ -215,6 +217,15 @@ def catalog_split(
         paths = GameCsvPaths(
             entry["game_id"], files["tracking"], files["camera"], files["camera_fast"]
         )
+        if require_rink_grid:
+            context = read_rink_context(paths.tracking_csv)
+            w, h = context["frame_size"]
+            for role in ("tracking", "camera"):
+                max_x, max_y = entry["csv_stats"][role]["max_xy"]
+                if max_x > w + 1e-3 or max_y > h + 1e-3:
+                    raise ValueError(
+                        f"{entry['game_id']}: {role} exceeds declared rink tracking canvas"
+                    )
         (val if entry["game_id"] in val_ids else train).append(paths)
     if not train:
         raise ValueError("Dataset split contains no training games")

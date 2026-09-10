@@ -32,6 +32,10 @@ class CameraGPTConfig:
     feature_mode: str = "legacy_prev_slow"
     include_pose: bool = False
     include_rink: bool = False
+    rink_input: str = "stats"
+    rink_grid_height: int = 32
+    rink_grid_width: int = 64
+    rink_encoder_version: int = 1
     source_model_id: str = ""
     source_checkpoint: str = ""
     source_init: str = ""
@@ -53,6 +57,22 @@ class CameraPanZoomGPT(nn.Module):
         self.cfg = cfg
         self.input = nn.Linear(int(cfg.d_in), int(cfg.d_model))
         self.pe = PositionalEncoding(int(cfg.d_model))
+        if cfg.rink_input not in {"stats", "grid"}:
+            raise ValueError(f"Unknown rink input: {cfg.rink_input}")
+        self.rink_encoder = None
+        if cfg.include_rink and cfg.rink_input == "grid":
+            if cfg.rink_encoder_version != 1:
+                raise ValueError(f"Unsupported rink encoder version: {cfg.rink_encoder_version}")
+            if min(cfg.rink_grid_height, cfg.rink_grid_width) < 2:
+                raise ValueError("Rink grid dimensions must be >=2")
+            # Flattening retains absolute placement in the tracking coordinate plane.
+            self.rink_encoder = nn.Sequential(
+                nn.Flatten(start_dim=1),
+                nn.Linear(cfg.rink_grid_height * cfg.rink_grid_width, cfg.d_model),
+                nn.ReLU(),
+                nn.Linear(cfg.d_model, cfg.d_model),
+                nn.Tanh(),
+            )
         self.encoder: Optional[nn.TransformerEncoder] = None
         self.decoder: Optional[nn.TransformerDecoder] = None
         if str(getattr(cfg, "model_kind", "gpt")) == "drivegpt":
@@ -81,12 +101,28 @@ class CameraPanZoomGPT(nn.Module):
             nn.Sigmoid(),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def encode_rink(self, rink: torch.Tensor) -> torch.Tensor:
+        if self.rink_encoder is None:
+            raise ValueError("This checkpoint does not use static rink grids")
+        expected = (1, self.cfg.rink_grid_height, self.cfg.rink_grid_width)
+        if rink.ndim != 4 or tuple(rink.shape[1:]) != expected:
+            raise ValueError(f"Expected rink [B,{expected}], got {tuple(rink.shape)}")
+        return self.rink_encoder(rink)
+
+    def forward(
+        self, x: torch.Tensor, *, rink_embedding: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         # x: [B, T, D]
         if x.ndim != 3:
             raise ValueError(f"Expected x to be [B,T,D], got shape {tuple(x.shape)}")
         t = int(x.shape[1])
         h = self.input(x)
+        if self.rink_encoder is not None:
+            if rink_embedding is None or rink_embedding.shape != (x.shape[0], self.cfg.d_model):
+                raise ValueError("Static rink checkpoint requires one rink embedding per sequence")
+            h = h + rink_embedding.unsqueeze(1)
+        elif rink_embedding is not None:
+            raise ValueError("Unexpected rink embedding for a checkpoint without static rink input")
         h = self.pe(h)
         # Causal (GPT-style) mask: prevent attending to future timesteps.
         mask = torch.triu(torch.ones((t, t), device=x.device, dtype=torch.bool), diagonal=1)
@@ -127,6 +163,10 @@ def pack_gpt_checkpoint(
             "feature_mode": str(cfg.feature_mode),
             "include_pose": bool(cfg.include_pose),
             "include_rink": bool(getattr(cfg, "include_rink", False)),
+            "rink_input": cfg.rink_input,
+            "rink_encoder_version": cfg.rink_encoder_version,
+            "rink_grid_height": cfg.rink_grid_height,
+            "rink_grid_width": cfg.rink_grid_width,
             "source_model_id": str(getattr(cfg, "source_model_id", "")),
             "source_checkpoint": str(getattr(cfg, "source_checkpoint", "")),
             "source_init": str(getattr(cfg, "source_init", "")),
@@ -157,6 +197,10 @@ def unpack_gpt_checkpoint(
         feature_mode=str(model_cfg.get("feature_mode", "legacy_prev_slow")),
         include_pose=bool(include_pose),
         include_rink=bool(include_rink),
+        rink_input=str(model_cfg.get("rink_input", "stats")),
+        rink_encoder_version=int(model_cfg.get("rink_encoder_version", 1)),
+        rink_grid_height=int(model_cfg.get("rink_grid_height", 32)),
+        rink_grid_width=int(model_cfg.get("rink_grid_width", 64)),
         source_model_id=str(model_cfg.get("source_model_id", "")),
         source_checkpoint=str(model_cfg.get("source_checkpoint", "")),
         source_init=str(model_cfg.get("source_init", "")),

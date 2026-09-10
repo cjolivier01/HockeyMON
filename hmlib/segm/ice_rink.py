@@ -515,6 +515,7 @@ def configure_ice_rink_mask(
     show: bool = False,
     image: torch.Tensor = None,
     scale: Optional[float] = None,
+    persist: bool = True,
 ) -> Optional[torch.Tensor]:
     if expected_shape is None and image is not None:
         expected_shape = torch.Size((image_height(image), image_width(image)))
@@ -596,6 +597,8 @@ def configure_ice_rink_mask(
         rink_mask = rink_results["combined_mask"]
         assert image_width(rink_mask) == image_width(image_frame)
         assert image_height(rink_mask) == image_height(image_frame)
+    if not persist:
+        return rink_results
     if rink_results:
         save_rink_profile_config(game_id=game_id, rink_profile=rink_results)
     return load_rink_combined_mask(game_id=game_id)

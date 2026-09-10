@@ -21,6 +21,7 @@ from hmlib.camera.camera_transformer import (
     unpack_checkpoint,
 )
 from hmlib.camera.clusters import ClusterMan
+from hmlib.camera.rink_context import StaticRinkEncoderCache
 from hmlib.log import logger
 from hmlib.tracking_utils.utils import get_track_mask
 from hmlib.utils.gpu import unwrap_tensor, wrap_tensor
@@ -70,6 +71,7 @@ class CameraControllerPlugin(Plugin):
         self._cluster_man: Optional[ClusterMan] = None
         self._ar = float(aspect_ratio)
         self._feat_device: Optional[torch.device] = None
+        self._rink_cache = StaticRinkEncoderCache()
 
         controller = self._controller
 
@@ -353,6 +355,38 @@ class CameraControllerPlugin(Plugin):
 
         return feat
 
+    def _static_rink_embedding(self, context, frame_w, frame_h, device):
+        if self._gpt_model is None or self._gpt_cfg is None or self._norm is None:
+            raise RuntimeError("Static rink context requires a loaded camera model")
+        profile = context.get("rink_profile")
+        if (
+            not isinstance(profile, dict)
+            or profile.get("coordinate_space") != "original_stitched_pixels"
+        ):
+            raise ValueError(
+                "Static rink input requires a profile in original stitched tracking pixels; "
+                "set ice_config.params.require_geometry_provenance=true for this checkpoint"
+            )
+        mask = unwrap_tensor(profile.get("combined_mask"))
+        if mask is None:
+            raise ValueError("Static rink input requires the complete rink mask")
+        if profile.get("frame_size") != [frame_w, frame_h]:
+            raise ValueError("Rink profile geometry does not match the tracked frame")
+        if next(self._gpt_model.parameters()).device != device:
+            self._gpt_model.to(device)
+        embedding, changed = self._rink_cache.get(
+            self._gpt_model,
+            mask,
+            self._norm,
+            (frame_w, frame_h),
+            game_id=context.get("game_id") or context.get("shared", {}).get("game_id"),
+            revision=profile.get("geometry_revision"),
+        )
+        if changed:
+            self._feat_buf.clear()
+            self._prev_center = self._prev_h = self._prev_y = None
+        return embedding
+
     def _rink_features(self, context: Dict[str, Any], device: torch.device) -> torch.Tensor:
         """Fixed-length rink features (7,) derived from rink_profile or rink_mask_0.png."""
         feat = torch.zeros((7,), device=device, dtype=torch.float32)
@@ -482,7 +516,12 @@ class CameraControllerPlugin(Plugin):
         for frame_index in range(video_len):
             img_data_sample = track_data_sample[frame_index]
             inst: InstanceData = getattr(img_data_sample, "pred_track_instances", None)
-            device = self._resolve_device(context)
+            raw_boxes = (
+                unwrap_tensor(inst.bboxes) if inst is not None and "bboxes" in inst else None
+            )
+            device = (
+                raw_boxes.device if torch.is_tensor(raw_boxes) else self._resolve_device(context)
+            )
             if self._feat_device is None:
                 self._feat_device = device
             elif self._feat_device != device:
@@ -493,8 +532,17 @@ class CameraControllerPlugin(Plugin):
                 self._prev_y = None
 
             ori_shape = img_data_sample.metainfo.get("ori_shape")
-            H = int(ori_shape[0]) if isinstance(ori_shape, (list, tuple)) else int(1080)
-            W = int(ori_shape[1]) if isinstance(ori_shape, (list, tuple)) else int(1920)
+            H = int(ori_shape[0]) if isinstance(ori_shape, (list, tuple, torch.Size)) else int(1080)
+            W = int(ori_shape[1]) if isinstance(ori_shape, (list, tuple, torch.Size)) else int(1920)
+            rink_embedding = None
+            if (
+                self._gpt_cfg is not None
+                and self._gpt_cfg.include_rink
+                and self._gpt_cfg.rink_input == "grid"
+            ):
+                if not isinstance(ori_shape, (list, tuple, torch.Size)) or len(ori_shape) < 2:
+                    raise ValueError("Static rink input requires original frame dimensions")
+                rink_embedding = self._static_rink_embedding(context, W, H, device)
             play_bounds = self._play_bounds(context, frame_index, W, H, device, dtype=torch.float32)
             if inst is None or not hasattr(inst, "bboxes"):
                 # Default to centered wide shot
@@ -716,7 +764,7 @@ class CameraControllerPlugin(Plugin):
                 )
                 rink_feat = (
                     self._rink_features(context, device)
-                    if bool(getattr(self._gpt_cfg, "include_rink", False))
+                    if self._gpt_cfg.include_rink and self._gpt_cfg.rink_input == "stats"
                     else None
                 )
 
@@ -778,7 +826,7 @@ class CameraControllerPlugin(Plugin):
                 # GPT supports variable context length; emit a prediction as soon as we have any history.
                 x = torch.cat(list(self._feat_buf), dim=0).unsqueeze(0)
                 with torch.no_grad():
-                    pred_seq = self._gpt_model(x).squeeze(0)
+                    pred_seq = self._gpt_model(x, rink_embedding=rink_embedding).squeeze(0)
                 pred_last = pred_seq[-1]
 
                 if int(self._gpt_cfg.d_out) == 3:

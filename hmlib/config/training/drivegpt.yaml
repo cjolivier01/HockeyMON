@@ -18,7 +18,10 @@ features:
   feature_mode: players_prev_y
   target_mode: slow_tlwh
   include_pose: false
-  include_rink: false
+  include_rink: true
+  rink_input: grid
+  rink_grid_height: 32
+  rink_grid_width: 64
   max_players: 22
   residual_prev_y: true
   residual_scale: 0.1
@@ -62,7 +65,7 @@ validation:
   target_iou: 0.97
 
 checkpoint:
-  out: /mnt/ripper-data/datasets/HockeyDriveGPT/runs/slow-camera/drivegpt_best.pt
+  out: /mnt/ripper-data/datasets/HockeyDriveGPT/runs/slow-camera-rink/drivegpt_best.pt
   checkpoint_every: 1000
   max_checkpoints: 5
   log_every: 25

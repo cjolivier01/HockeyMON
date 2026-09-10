@@ -2,7 +2,7 @@
 
 DriveGPT learns the final smooth 16:9 camera box from tracked object boxes and its
 own previous camera prediction. The official configuration uses `slow_tlwh` targets
-and `players_prev_y` inputs, with pose and rink-mask features disabled. The catalog
+and `players_prev_y` inputs, with pose disabled and a compact static rink grid. The catalog
 retains fast-camera CSVs for provenance; `slow_fast_tlwh` remains available as an
 optional dual-output training target. Runtime consumes live tracking tensors;
 CSV files are only used to record training examples and supervision.
@@ -82,6 +82,78 @@ download `ckpts/uniad_base_e2e.pth` from
 `OpenDriveLab/UniAD2.0_R101_nuScenes` via Hugging Face. The official configuration
 requires initialization to succeed. `drivegpt_init: none` trains from scratch.
 
+## Static rink context
+
+The rink defines the players' spatial domain. The official recipe uses
+`include_rink: true` and `rink_input: grid`. The default 32-by-64 occupancy grid
+preserves shape, placement, holes, and multiple mask components. Its axes use the
+same `x / norm.scale_x`, `y / norm.scale_y` coordinate plane as tracking boxes;
+smaller game canvases are padded, not independently stretched to fill the grid.
+The new run's normalization contains the declared training-frame dimensions as
+well as the observed boxes. Validation/live canvases outside that extent fail.
+
+A float32 grid costs 8 KiB per sequence, independent of rollout length. The loader
+caches this grid per game and passes it separately as `[B,1,H,W]`. Mixed-game
+batches need each sequence's own rink. The learned encoder preserves spatial
+position through flattening and projects the grid to a bounded embedding, computed
+once inside each DDP rollout forward and broadcast across time. Raw grids can be
+cached during training; learned embeddings are recomputed after optimizer updates.
+Live inference caches the embedding by game, immutable geometry revision, model
+parameter version, device, dtype, normalization, and grid schema. Geometry changes
+reset camera history. Full masks never become per-frame model inputs.
+
+Detector boxes are rescaled to the original stitched-image coordinates before
+tracking; tracking CSVs store those coordinates. Live rink profiles must identify
+that same coordinate space and match the original tracked frame dimensions. The
+stitching producer identifies the actual stitcher instance, input/output shape,
+and applied rotation. With `ice_config.params.require_geometry_provenance: true`, each new geometry
+causes the rink producer to segment the
+original frame in memory; it does not certify old saved masks from dimensions
+alone or overwrite them. A changed geometry invalidates the profile and embedding.
+Legacy pipelines lacking this identity cannot supply a grid checkpoint. The camera
+model uses the same rasterizer as training. RLE/PNG are useful storage compression; the compact
+occupancy grid is the neural input. Rasterization samples 4-by-4 points per grid
+cell with nearest binary sampling, union before pooling, fractional boundary
+occupancy, and zero outside the tracking canvas. Binary sampling makes component
+union agree with sampling the combined live mask at component seams.
+Grid height/width are YAML settings stored in the checkpoint.
+
+Each selected tracking export needs a generation-matched descriptor: for example,
+`tracking-3.csv` requires `rink_context-3.json`. This explicitly binds the mask to
+the CSV and documents the source of its coordinate transform:
+
+```json
+{
+  "schema": "hockey-drivegpt-rink-v1",
+  "coordinate_space": "original_stitched_pixels",
+  "frame_size": [1920, 1080],
+  "tracking": {"file": "tracking-3.csv", "sha256": "<tracking SHA-256>"},
+  "masks": [{
+    "file": "rink_mask_0.png",
+    "sha256": "<mask SHA-256>",
+    "mask_to_tracking": [[1, 0, 0], [0, 1, 0]]
+  }],
+  "evidence": "Describe the matching source-frame/calibration artifact and its identity."
+}
+```
+
+`frame_size` is original tracking width/height. `mask_to_tracking` maps mask pixel
+edge coordinates into that canvas; identity applies to a matching full-resolution
+mask. Multiple masks are unioned in that plane. Affines must be finite/invertible
+and justified by known geometry. They cannot repair different lens projections or
+stitching calibrations. Never infer scale from observed box extrema or silently
+substitute a newer mask. The curator preserves descriptors and mask files; training
+validates hashes, frame bounds, descriptor identity, PNG decoding, and transformed
+occupancy in a coordinated preflight before workers start. The compact grids are
+then reused by workers.
+Missing/unverified rink context is an error, not an all-zero substitute.
+
+Legacy checkpoints without the new fields retain `rink_input: stats`, their
+previous seven per-frame features, and their original input dimensions. The CLI
+also retains that legacy default; the official YAML explicitly selects `grid`.
+Grid checkpoints store the encoder version and grid dimensions and require a new
+output directory. The official grid run writes to `runs/slow-camera-rink`.
+
 ## Two-host DDP
 
 Use the same repository revision and PyTorch/CUDA/NCCL release on both hosts.
@@ -137,3 +209,29 @@ bazelisk test //tests:test_camera_gpt //tests:test_drivegpt_training
 
 The training tests include a two-rank CPU/Gloo rollout, validation, coordinated
 early stopping, checkpoint writing, and resumption selection.
+
+Future exports should save a generation-specific rink descriptor and mask with
+original canvas dimensions, calibration/source identity, and any explicit affine.
+These are static sidecars, not repeated CSV columns. If stitching geometry changes
+during an export, each geometry interval needs its matching context before that
+export can be used with this static-per-game recipe. A descriptor cannot certify
+multiple different calibrations just because their output dimensions match.
+
+When running a grid checkpoint, enable strict rink context in the runtime Aspen
+YAML together with the camera model:
+
+```yaml
+aspen:
+  plugins:
+    ice_config:
+      params:
+        require_geometry_provenance: true
+    camera_controller:
+      params:
+        controller: drivegpt
+        model_path: /path/to/drivegpt_best.pt
+```
+
+Other controllers and legacy checkpoints retain their existing saved-mask behavior
+by default. The grid controller reports a missing-provenance error when strict
+context has not been enabled; it never silently substitutes geometry.

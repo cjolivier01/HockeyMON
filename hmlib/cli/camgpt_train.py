@@ -4,6 +4,7 @@ import math
 import os
 import random
 import sys
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -32,6 +33,12 @@ from hmlib.camera.camera_gpt_dataset import (
 )
 from hmlib.camera.camera_training_config import catalog_split, expand_training_config
 from hmlib.camera.camera_transformer import CameraNorm
+from hmlib.camera.rink_context import (
+    file_sha256,
+    load_rink_grid,
+    read_rink_context,
+    rink_context_path,
+)
 from hmlib.log import logger
 
 
@@ -406,6 +413,15 @@ def _checkpoint_compatible(ckpt: dict, cfg: CameraGPTConfig, norm: CameraNorm) -
             and str(m.get("feature_mode")) == str(cfg.feature_mode)
             and bool(m.get("include_pose")) == bool(cfg.include_pose)
             and bool(m.get("include_rink", False)) == bool(cfg.include_rink)
+            and (
+                not cfg.include_rink
+                or (
+                    m.get("rink_input", "stats") == cfg.rink_input
+                    and m.get("rink_grid_height", 32) == cfg.rink_grid_height
+                    and m.get("rink_grid_width", 64) == cfg.rink_grid_width
+                    and m.get("rink_encoder_version", 1) == cfg.rink_encoder_version
+                )
+            )
             and bool(m.get("residual_prev_y", False)) == bool(cfg.residual_prev_y)
             and float(m.get("residual_scale", 0.1)) == float(cfg.residual_scale)
             and int(m.get("d_model")) == int(cfg.d_model)
@@ -538,11 +554,18 @@ def _predict_batch(
     runtime_slow_aspect_norm: Optional[float],
     context_window: Optional[int] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    kwargs = (
+        {"rink_embedding": model.encode_rink(batch["rink"].to(device))} if "rink" in batch else {}
+    )
+
+    def predict(features):
+        return model(features, **kwargs)
+
     y = batch["y"].to(device)
     if "x" in batch:
         x_full = batch["x"].to(device)
         if not free_run:
-            return model(x_full), y
+            return predict(x_full), y
         if int(x_full.shape[-1]) < 11:
             raise ValueError(
                 "legacy_prev_slow free-run expects previous [cx,cy,h] at feature indices 8:11"
@@ -555,7 +578,7 @@ def _predict_batch(
             x_t[:, 8:11] = prev
             prefix.append(x_t)
             x = torch.stack(prefix, dim=1)
-            pred_t = model(x[:, -context_window:] if context_window else x)[:, -1, :]
+            pred_t = predict(x[:, -context_window:] if context_window else x)[:, -1, :]
             preds.append(pred_t)
             prev = _legacy_prev_slow_feedback_target(pred_t, runtime_slow_aspect_norm).detach()
         return torch.stack(preds, dim=1), y
@@ -565,7 +588,7 @@ def _predict_batch(
     if not free_run:
         prev_y = torch.cat([prev0.unsqueeze(1), y[:, :-1, :]], dim=1)
         x = torch.cat([base, prev_y], dim=-1)
-        return model(x), y
+        return predict(x), y
 
     prev = prev0
     preds = []
@@ -574,7 +597,7 @@ def _predict_batch(
         x_t = torch.cat([base[:, t, :], prev], dim=-1)
         prefix.append(x_t)
         x = torch.stack(prefix, dim=1)
-        pred_t = model(x[:, -context_window:] if context_window else x)[:, -1, :]
+        pred_t = predict(x[:, -context_window:] if context_window else x)[:, -1, :]
         preds.append(pred_t)
         prev = _runtime_feedback_target(pred_t, runtime_slow_aspect_norm).detach()
     return torch.stack(preds, dim=1), y
@@ -658,29 +681,38 @@ class TrainingRollout(nn.Module):
         self.aspect = aspect
         self.context_window = context_window
 
-    def _teacher_forced(self, features: torch.Tensor) -> torch.Tensor:
+    def _teacher_forced(
+        self, features: torch.Tensor, kwargs: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
         if features.shape[1] <= self.context_window:
-            return self.model(features)
+            return self.model(features, **kwargs)
         return torch.stack(
             [
-                self.model(features[:, max(0, t + 1 - self.context_window) : t + 1])[:, -1]
+                self.model(features[:, max(0, t + 1 - self.context_window) : t + 1], **kwargs)[
+                    :, -1
+                ]
                 for t in range(features.shape[1])
             ],
             dim=1,
         )
 
     def forward(self, batch: dict[str, torch.Tensor], probability: float) -> torch.Tensor:
+        # The trainable encoder stays inside this single DDP forward. Its graph
+        # is reused across prefixes, then recomputed after the next optimizer step.
+        kwargs = (
+            {"rink_embedding": self.model.encode_rink(batch["rink"])} if "rink" in batch else {}
+        )
         if "x" in batch:
-            return self._teacher_forced(batch["x"])
+            return self._teacher_forced(batch["x"], kwargs)
         base, prev, y = batch["base"], batch["prev0"], batch["y"]
         if probability <= 0:
             previous = torch.cat([prev.unsqueeze(1), y[:, :-1]], dim=1)
-            return self._teacher_forced(torch.cat([base, previous], dim=-1))
+            return self._teacher_forced(torch.cat([base, previous], dim=-1), kwargs)
         prefix, predictions = [], []
         for t in range(y.shape[1]):
             prefix.append(torch.cat([base[:, t], prev], dim=-1))
             prefix = prefix[-self.context_window :]
-            prediction = self.model(torch.stack(prefix, dim=1))[:, -1]
+            prediction = self.model(torch.stack(prefix, dim=1), **kwargs)[:, -1]
             predictions.append(prediction)
             feedback = _runtime_feedback_target(prediction, self.aspect).detach()
             use_prediction = torch.rand((len(y), 1), device=y.device) < probability
@@ -711,6 +743,9 @@ def main(argv: Optional[List[str]] = None):
         default=None,
         help="Training rollout length (>=seq-len); defaults to --seq-len runtime context",
     )
+    ap.add_argument("--rink-input", choices=["stats", "grid"], default="stats")
+    ap.add_argument("--rink-grid-height", type=int, default=32)
+    ap.add_argument("--rink-grid-width", type=int, default=64)
     ap.add_argument("--cpu-threads", type=int, default=4)
     ap.add_argument("--ddp-backend", choices=["nccl", "gloo"], default=None)
     ap.add_argument(
@@ -1031,6 +1066,8 @@ def main(argv: Optional[List[str]] = None):
     )
     argv = expand_training_config(ap, list(sys.argv[1:] if argv is None else argv))
     args = ap.parse_args(argv)
+    if min(args.rink_grid_height, args.rink_grid_width) < 2:
+        ap.error("Rink grid dimensions must be >=2")
     # Resolve seconds-based legacy sampling before deriving any horizon defaults.
     if args.file_list and not _arg_in_argv("--seq-len", argv):
         args.seq_len = int(round(max(0.1, float(args.sample_seconds)) * max(1.0, float(args.fps))))
@@ -1148,6 +1185,7 @@ def main(argv: Optional[List[str]] = None):
                 args.dataset_root,
                 min_train_frames=args.rollout_len,
                 min_val_frames=args.val_seq_len,
+                require_rink_grid=args.include_rink and args.rink_input == "grid",
             )
         except Exception as error:
             catalog_error = f"rank {rank}: {type(error).__name__}: {error}"
@@ -1254,10 +1292,48 @@ def main(argv: Optional[List[str]] = None):
             "train_games": [p.game_id for p in train_games],
             "validation_games": [p.game_id for p in val_games],
         }
-    # Use a train-only normalization scale for train/val consistency without validation leakage.
-    max_x, max_y = _scan_games_max_xy(train_games)
-    norm = CameraNorm(scale_x=max_x, scale_y=max_y, max_players=int(args.max_players))
-    _validate_validation_scale(val_games, norm)
+    geometry_error = None
+    try:
+        # Use a train-only normalization scale for train/val consistency without validation leakage.
+        max_x, max_y = _scan_games_max_xy(train_games)
+        if args.include_rink and args.rink_input == "grid":
+            # Frame geometry, rather than observed player extrema, defines the world.
+            contexts = {game.game_id: read_rink_context(game.tracking_csv) for game in game_csvs}
+            max_x = max(max_x, *(contexts[game.game_id]["frame_size"][0] for game in train_games))
+            max_y = max(max_y, *(contexts[game.game_id]["frame_size"][1] for game in train_games))
+            for game in val_games:
+                w, h = contexts[game.game_id]["frame_size"]
+                if w > max_x or h > max_y:
+                    raise ValueError(
+                        f"Validation rink exceeds training coordinate extent: {game.game_id}"
+                    )
+            data_identity["rink_contexts"] = {
+                game.game_id: file_sha256(rink_context_path(game.tracking_csv))
+                for game in game_csvs
+            }
+        norm = CameraNorm(scale_x=max_x, scale_y=max_y, max_players=int(args.max_players))
+        _validate_validation_scale(val_games, norm)
+
+        rink_grids = (
+            {
+                game.game_id: load_rink_grid(
+                    game.tracking_csv, norm, args.rink_grid_height, args.rink_grid_width
+                )
+                for game in game_csvs
+            }
+            if args.include_rink and args.rink_input == "grid"
+            else {}
+        )
+    except (Exception, SystemExit) as error:
+        geometry_error = f"rank {rank}: {type(error).__name__}: {error}"
+    errors = [geometry_error]
+    if dist.is_initialized():
+        errors = [None] * world_size
+        dist.all_gather_object(errors, geometry_error)
+    if any(errors):
+        raise RuntimeError(
+            "Dataset geometry preflight failed: " + "; ".join(error for error in errors if error)
+        )
 
     train_ds = CameraPanZoomGPTIterableDataset(
         games=train_games,
@@ -1267,6 +1343,10 @@ def main(argv: Optional[List[str]] = None):
         feature_mode=str(args.feature_mode),
         include_pose=bool(args.include_pose),
         include_rink=bool(args.include_rink),
+        rink_input=args.rink_input,
+        rink_grid_height=args.rink_grid_height,
+        rink_grid_width=args.rink_grid_width,
+        rink_grids=rink_grids,
         max_players_for_norm=int(args.max_players),
         seed=int(args.seed),
         max_cached_games=int(args.max_cached_games),
@@ -1296,6 +1376,10 @@ def main(argv: Optional[List[str]] = None):
             feature_mode=str(args.feature_mode),
             include_pose=bool(args.include_pose),
             include_rink=bool(args.include_rink),
+            rink_input=args.rink_input,
+            rink_grid_height=args.rink_grid_height,
+            rink_grid_width=args.rink_grid_width,
+            rink_grids=rink_grids,
             max_players_for_norm=int(args.max_players),
             seed=int(args.seed) + 999,
             max_cached_games=max(1, int(args.max_cached_games // 2)),
@@ -1331,6 +1415,9 @@ def main(argv: Optional[List[str]] = None):
         feature_mode=str(args.feature_mode),
         include_pose=bool(args.include_pose),
         include_rink=bool(args.include_rink),
+        rink_input=args.rink_input,
+        rink_grid_height=args.rink_grid_height,
+        rink_grid_width=args.rink_grid_width,
         source_model_id=(
             str(args.drivegpt_source_model) if str(args.model_kind) == "drivegpt" else ""
         ),
@@ -1353,23 +1440,11 @@ def main(argv: Optional[List[str]] = None):
                 filename=str(args.drivegpt_source_file),
                 checkpoint_path=args.drivegpt_source_checkpoint,
             )
-            cfg = CameraGPTConfig(
-                d_in=int(cfg.d_in),
-                d_out=int(cfg.d_out),
-                model_kind=str(cfg.model_kind),
-                feature_mode=str(cfg.feature_mode),
-                include_pose=bool(cfg.include_pose),
-                include_rink=bool(cfg.include_rink),
+            cfg = replace(
+                cfg,
                 source_model_id=str(args.drivegpt_source_model),
                 source_checkpoint=str(source_checkpoint),
                 source_init="opendrive-uniad-planning",
-                residual_prev_y=bool(cfg.residual_prev_y),
-                residual_scale=float(cfg.residual_scale),
-                d_model=int(cfg.d_model),
-                nhead=int(cfg.nhead),
-                nlayers=int(cfg.nlayers),
-                dim_feedforward=int(cfg.dim_feedforward),
-                dropout=float(cfg.dropout),
             )
         except Exception as ex:
             if str(args.drivegpt_init) == "require":
@@ -1392,24 +1467,8 @@ def main(argv: Optional[List[str]] = None):
             if str(args.drivegpt_init) == "require":
                 raise
             logger.warning("OpenDriveLab DriveGPT initialization failed: %s", ex)
-            cfg = CameraGPTConfig(
-                d_in=int(cfg.d_in),
-                d_out=int(cfg.d_out),
-                model_kind=str(cfg.model_kind),
-                feature_mode=str(cfg.feature_mode),
-                include_pose=bool(cfg.include_pose),
-                include_rink=bool(cfg.include_rink),
-                source_model_id=str(cfg.source_model_id),
-                source_checkpoint=str(cfg.source_checkpoint),
-                source_init="",
-                residual_prev_y=bool(cfg.residual_prev_y),
-                residual_scale=float(cfg.residual_scale),
-                d_model=int(cfg.d_model),
-                nhead=int(cfg.nhead),
-                nlayers=int(cfg.nlayers),
-                dim_feedforward=int(cfg.dim_feedforward),
-                dropout=float(cfg.dropout),
-            )
+            cfg = replace(cfg, source_init="")
+            model.cfg = cfg
 
     model = model.to(device)
     n_params = sum(p.numel() for p in model.parameters())

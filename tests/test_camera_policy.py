@@ -357,8 +357,12 @@ def should_attach_rendered_rotation_even_if_request_changes_during_stitching(mon
     first = plugin.forward(context)
     second = plugin.forward(context)
     assert angles == [2, 9]
-    assert first["camera_input_geometry"] == {"post_stitch_rotate_degrees": 2}
-    assert second["camera_input_geometry"] == {"post_stitch_rotate_degrees": 9}
+    assert first["camera_input_geometry"]["post_stitch_rotate_degrees"] == 2
+    assert second["camera_input_geometry"]["post_stitch_rotate_degrees"] == 9
+    assert (
+        first["camera_input_geometry"]["stitched_geometry_revision"]
+        != second["camera_input_geometry"]["stitched_geometry_revision"]
+    )
 
 
 def should_ignore_color_changes_and_repeat_controls_but_capture_applied_target_changes():
