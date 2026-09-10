@@ -346,7 +346,7 @@ def _delete_globs(game_dir: Path, patterns: Sequence[str]) -> int:
 def _set_hugin_optimization_variables(
     project_file_path: Union[str, Path], variables: Sequence[str]
 ) -> None:
-    """Restrict Hugin optimization to the geometry variables used by learned matches."""
+    """Select explicit geometry variables instead of Hugin's optimizer preset."""
     path = Path(project_file_path)
     lines = path.read_text().splitlines()
     updated: List[str] = []
@@ -358,6 +358,9 @@ def _set_hugin_optimization_variables(
         updated.append("v")
 
     for line in lines:
+        if line.startswith("#hugin_optimizerMasterSwitch"):
+            updated.append("#hugin_optimizerMasterSwitch 0")
+            continue
         if line.startswith("# specify variables"):
             updated.append(line)
             write_variable_block()
@@ -388,6 +391,27 @@ def _set_hugin_optimization_variables(
         updated[insertion:insertion] = block
 
     path.write_text("\n".join(updated) + "\n")
+
+
+def _optimize_hugin_geometry(command: Sequence[str], project: Union[str, Path]) -> None:
+    """Try fixed-lens alignment before fitting the shared lens to the matches."""
+    for fit_lens in (False, True):
+        if fit_lens:
+            logger.warning(
+                "Fixed-lens Hugin alignment exceeded 50 pixels RMS; "
+                "retrying with shared field of view and radial distortion optimization"
+            )
+            _set_hugin_optimization_variables(project, ("r1", "p1", "y1", "v0", "b0"))
+        output = _run_stitching_command(command)
+        rms_values = re.findall(r"(\S+)\s+units", output)
+        if not rms_values:
+            raise CalibrationAlignmentError("Hugin optimization did not report an RMS error")
+        rms = float(rms_values[-1])
+        if np.isfinite(rms) and rms <= 50:
+            return
+    raise CalibrationAlignmentError(
+        f"Hugin optimization did not produce a finite RMS below 50 pixels (RMS: {rms:g})"
+    )
 
 
 def _delete_extracted_frames(game_dir: Path) -> int:
@@ -1046,18 +1070,7 @@ def _build_stitching_project_in_place(
                     autooptimiser_out,
                     hm_project,
                 ]
-                output = _run_stitching_command(cmd)
-                rms_values = re.findall(
-                    r"([0-9]+(?:[.][0-9]+)?(?:[eE][+-]?[0-9]+)?)\s+units", output
-                )
-                if (
-                    not rms_values
-                    or not np.isfinite(float(rms_values[-1]))
-                    or float(rms_values[-1]) > 50
-                ):
-                    raise CalibrationAlignmentError(
-                        "Hugin optimization did not produce a finite RMS below 50 pixels"
-                    )
+                _optimize_hugin_geometry(cmd, hm_project)
                 _set_hugin_optimization_variables(autooptimiser_out, ("r1", "p1", "y1"))
                 apply_projection(
                     autooptimiser_out,

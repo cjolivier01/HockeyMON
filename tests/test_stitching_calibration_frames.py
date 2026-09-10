@@ -206,3 +206,38 @@ def should_rebuild_user_edited_pto_without_replacing_points(monkeypatch, tmp_pat
     assert calls[0]["skip_if_exists"] is False
     assert "control_points" not in calls[0]
     assert calls[0]["image_files"] == [str(tmp_path / "left.png"), str(tmp_path / "right.png")]
+
+
+@pytest.mark.parametrize(
+    "errors, fails",
+    [([12.0], False), ([58.7, 9.5], False), ([58.7, 55.0], True), ([58.7, float("nan")], True)],
+)
+def should_retry_fixed_lens_alignment_without_relaxing_quality_limit(
+    tmp_path, monkeypatch, caplog, errors, fails
+):
+    project = tmp_path / "input.pto"
+    project.write_text(
+        "# specify variables\nv r1\nv p1\nv y1\nv\n\n#hugin_optimizerMasterSwitch 1\n"
+    )
+    calls = []
+
+    def optimize(command):
+        calls.append(project.read_text())
+        # An earlier finite RMS must not hide a final NaN.
+        return f"100 units\n{errors[len(calls) - 1]} units"
+
+    monkeypatch.setattr(configure_stitching, "_run_stitching_command", optimize)
+    if fails:
+        with pytest.raises(CalibrationAlignmentError, match="finite RMS below 50"):
+            configure_stitching._optimize_hugin_geometry(["autooptimiser"], project)
+    else:
+        configure_stitching._optimize_hugin_geometry(["autooptimiser"], project)
+    assert len(calls) == len(errors)
+    if len(errors) == 2:
+        assert "retrying" in caplog.text
+        assert "v v0\n" in calls[1]
+        assert "v b0\n" in calls[1]
+        assert "#hugin_optimizerMasterSwitch 0\n" in calls[1]
+    else:
+        assert "retrying" not in caplog.text
+        assert "v v0\n" not in project.read_text()
