@@ -211,6 +211,8 @@ class StitchingSettings:
     vertical_fov: float
     max_output_dimension: int | None = None
     max_output_width: int | None = None
+    calibration_frame_count: int = 4
+    max_control_points: int = 1500
 
     def manifest(self) -> dict[str, str]:
         """Stable resolved provenance, independent of config spelling/inheritance."""
@@ -334,6 +336,14 @@ def read_stitching_settings(
             "mapping_backend=nona and run_autooptimizer=true"
         )
     width = normalize_max_output_dimension(stitch.get("max_output_width"))
+    frame_count = _number(
+        _defaulted(stitch, "calibration_frame_count", 4), "calibration_frame_count"
+    )
+    if not frame_count.is_integer() or not 1 <= frame_count <= 64:
+        raise ValueError("calibration_frame_count must be between 1 and 64")
+    point_count = _number(_defaulted(stitch, "max_control_points", 1500), "max_control_points")
+    if not point_count.is_integer() or point_count < 4:
+        raise ValueError("max_control_points must be an integer of at least four")
     return StitchingSettings(
         matcher,
         backend,
@@ -346,4 +356,6 @@ def read_stitching_settings(
         vertical,
         normalize_max_output_dimension(stitch.get("max_output_dimension")),
         width,
+        int(frame_count),
+        int(point_count),
     )

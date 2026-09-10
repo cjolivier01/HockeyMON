@@ -75,7 +75,7 @@ std::array<cv::Point2d, 4> transformed_corners(
     const double denominator = homography(2, 0) * point.x +
         homography(2, 1) * point.y + homography(2, 2);
     if (!std::isfinite(denominator)) {
-      throw std::runtime_error(
+      throw CalibrationAlignmentError(
           "Estimated transform produced a non-finite projective denominator");
     }
     denominators[index] = denominator;
@@ -86,14 +86,14 @@ std::array<cv::Point2d, 4> transformed_corners(
   bool has_negative_denominator = false;
   for (const double denominator : denominators) {
     if (std::abs(denominator) <= denominator_tolerance) {
-      throw std::runtime_error(
+      throw CalibrationAlignmentError(
           "Estimated transform has a projective pole on the image boundary");
     }
     has_positive_denominator |= denominator > 0.0;
     has_negative_denominator |= denominator < 0.0;
   }
   if (has_positive_denominator && has_negative_denominator) {
-    throw std::runtime_error(
+    throw CalibrationAlignmentError(
         "Estimated transform has a projective pole within the image bounds");
   }
 
@@ -106,7 +106,7 @@ std::array<cv::Point2d, 4> transformed_corners(
   std::copy(destination.begin(), destination.end(), result.begin());
   for (const auto& point : result) {
     if (!std::isfinite(point.x) || !std::isfinite(point.y)) {
-      throw std::runtime_error(
+      throw CalibrationAlignmentError(
           "Estimated transform produced non-finite image bounds");
     }
   }
@@ -157,7 +157,7 @@ HomographyImageMap make_image_map(
       0,
       canvas_height);
   if (x1 <= x0 || y1 <= y0) {
-    throw std::runtime_error(
+    throw CalibrationAlignmentError(
         "Estimated transform produced an empty image mapping");
   }
 
@@ -179,7 +179,7 @@ HomographyImageMap make_image_map(
           canvas_to_image.val, canvas_to_image.val + 9, [](double value) {
             return std::isfinite(value);
           })) {
-    throw std::runtime_error(
+    throw CalibrationAlignmentError(
         "Estimated transform produced a singular image mapping");
   }
   cv::parallel_for_(cv::Range(0, result.height), [&](const cv::Range& range) {
@@ -273,7 +273,7 @@ HomographyMapResult build_map_result(
         return value != 0;
       });
   if (inlier_count < static_cast<decltype(inlier_count)>(minimum_inliers)) {
-    throw std::runtime_error(
+    throw CalibrationAlignmentError(
         std::string("OpenCV ") + estimator_name + " found fewer than " +
         std::to_string(minimum_inliers) + " transform inliers");
   }
@@ -386,7 +386,8 @@ HomographyMapResult create_homography_maps(
       max_iterations,
       confidence);
   if (homography.empty()) {
-    throw std::runtime_error("OpenCV MAGSAC++ failed to estimate a homography");
+    throw CalibrationAlignmentError(
+        "OpenCV MAGSAC++ failed to estimate a homography");
   }
   cv::Mat homography_64;
   homography.convertTo(homography_64, CV_64F);
@@ -453,7 +454,7 @@ HomographyMapResult create_affine_ransac_maps(
       confidence,
       static_cast<size_t>(refine_iterations));
   if (affine.empty()) {
-    throw std::runtime_error(
+    throw CalibrationAlignmentError(
         "OpenCV affine RANSAC failed to estimate a transform");
   }
   cv::Mat affine_64;

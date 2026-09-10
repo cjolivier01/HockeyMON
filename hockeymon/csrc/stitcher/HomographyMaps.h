@@ -2,9 +2,15 @@
 
 #include <array>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace hm::stitcher {
+
+class CalibrationAlignmentError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
 
 struct HomographyImageMap {
   int x_position{0};

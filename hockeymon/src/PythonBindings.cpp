@@ -649,6 +649,9 @@ void init_stitching(::pybind11::module_& m) {
     return output;
   };
 
+  py::register_exception<hm::stitcher::CalibrationAlignmentError>(
+      m, "CalibrationAlignmentError", PyExc_RuntimeError);
+
   m.def(
       "create_homography_maps",
       [homography_result_to_dict](
