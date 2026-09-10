@@ -703,6 +703,8 @@ impl HmUiApp {
         ui.label("Common local commands");
         ui.monospace("hmtrack --game-id <game> --camera-ui=1");
         ui.monospace("hmstitch --game-id <game> --camera-ui=1");
+        ui.monospace("hmlevel --game-id <game>");
+        ui.label("Level vertical posts and crop a calibrated NONA panorama in the browser.");
         ui.monospace("bazelisk build //hm-ui:hm-ui");
         ui.add_space(14.0);
         ui.label("This panel is intentionally a launcher guide for now. The tracking process remains the owner of video, detector, and stitch runtime state.");

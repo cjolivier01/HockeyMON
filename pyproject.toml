@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 [project.scripts]
 hmtrack = "hmlib.cli.hmtrack:main"
 hmstitch = "hmlib.cli.stitch:main"
+hmlevel = "hmlib.cli.level_stitching:main"
 hmcreate_control_points = "hmlib.cli.create_control_points:main"
 hmplayers = "hmlib.cli.players:main"
 hmfind_ice_rink = "hmlib.cli.find_ice_rink:main"
