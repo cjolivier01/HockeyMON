@@ -201,7 +201,9 @@ def player_size_exclusion_mask(
     keep = torch.ones(size, dtype=torch.bool, device=batch_bboxes.device)
     if size <= 3 or (largest_count == 0 and not ignore_oversized):
         return keep
-    areas = batch_bboxes[:, 2].to(torch.float64) * batch_bboxes[:, 3].to(torch.float64)
+    # BBox::area() uses float32 products. Promote the result for accumulation,
+    # preserving native ties and strict threshold boundaries on fractional boxes.
+    areas = (batch_bboxes[:, 2].float() * batch_bboxes[:, 3].float()).to(torch.float64)
     order = torch.argsort(areas, descending=True, stable=True)
     count = min(largest_count, size - 3)
     keep[order[:count]] = False
