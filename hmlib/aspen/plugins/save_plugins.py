@@ -8,7 +8,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import torch
 
-from hmlib.camera.camera_dataframe import CameraTrackingDataFrame
+from hmlib.camera.camera_dataframe import CameraPolicyDataFrame, CameraTrackingDataFrame
+from hmlib.camera.camera_policy import POLICY_SCHEMA, camera_policy_path
 from hmlib.tracking_utils.action_dataframe import ActionDataFrame
 from hmlib.tracking_utils.detection_dataframe import DetectionDataFrame
 from hmlib.tracking_utils.pose_dataframe import PoseDataFrame
@@ -582,6 +583,9 @@ class SaveCameraPlugin(SavePluginBase):
         self._write_interval = write_interval
         self._camera_dataframe: Optional[CameraTrackingDataFrame] = None
         self._camera_fast_dataframe: Optional[CameraTrackingDataFrame] = None
+        self._camera_policy_dataframes: List[CameraPolicyDataFrame] = []
+        self._last_policy_frame: Optional[int] = None
+        self._last_camera_frame: Optional[int] = None
 
     def _ensure_dataframe(self, context: Dict[str, Any]) -> Optional[CameraTrackingDataFrame]:
         if self._camera_dataframe is not None:
@@ -644,14 +648,38 @@ class SaveCameraPlugin(SavePluginBase):
                 raise ValueError(f"Camera CSV requires Nx4 boxes; received shape {arr.shape}")
             return arr.astype(np.float32, copy=False)
 
-        for dataframe, box in ((df, current_box), (fast_df, current_fast_box)):
-            if dataframe is None or box is None:
-                continue
-            tlbr = _to_tlbr_array(box)
-            if frame_id0 < 0:
-                raise ValueError("Camera CSV requires a nonnegative frame_id")
+        batches = [
+            (dataframe, _to_tlbr_array(box))
+            for dataframe, box in ((df, current_box), (fast_df, current_fast_box))
+            if dataframe is not None and box is not None
+        ]
+        batch_sizes = {len(boxes) for _, boxes in batches}
+        if len(batch_sizes) > 1:
+            raise ValueError("Slow/fast camera CSV batches must contain the same frames")
+        batch_size = next(iter(batch_sizes), 0)
+        source_ids = context.get("frame_ids")
+        if source_ids is None:
+            frame_ids = list(range(frame_id0, frame_id0 + batch_size))
+        else:
+            source_ids = unwrap_tensor(source_ids)
+            if isinstance(source_ids, torch.Tensor):
+                source_ids = source_ids.detach().cpu().numpy()
+            source_ids = np.asarray(source_ids)
+            if source_ids.shape != (batch_size,) or source_ids.dtype.kind not in "iu":
+                raise ValueError("Camera CSV frame_ids must be a one-dimensional integer batch")
+            frame_ids = [int(frame) for frame in source_ids]
+        if any(frame < 0 for frame in frame_ids):
+            raise ValueError("Camera CSV requires nonnegative source frame IDs")
+        if "camera_policy_events" in context and batch_size:
+            self._save_policy_events(
+                context["camera_policy_events"], frame_ids, [dataframe for dataframe, _ in batches]
+            )
+        elif self._camera_policy_dataframes and batch_size:
+            raise ValueError("Camera policy provenance is missing after export started")
+
+        for dataframe, tlbr in batches:
             for i in range(int(tlbr.shape[0])):
-                dataframe.add_frame_records(frame_id=frame_id0 + i, tlbr=tlbr[i : i + 1])
+                dataframe.add_frame_records(frame_id=frame_ids[i], tlbr=tlbr[i : i + 1])
 
         out: Dict[str, Any] = {}
         if df is not None:
@@ -660,8 +688,61 @@ class SaveCameraPlugin(SavePluginBase):
             out["camera_fast_dataframe"] = fast_df
         return out
 
+    def _save_policy_events(
+        self,
+        events: List[Dict[str, Any]],
+        frame_ids: List[int],
+        cameras: List[CameraTrackingDataFrame],
+    ) -> None:
+        if not isinstance(events, list):
+            raise ValueError("Camera policy events must be a list")
+        if any(right <= left for left, right in zip(frame_ids, frame_ids[1:])) or (
+            self._last_camera_frame is not None and frame_ids[0] <= self._last_camera_frame
+        ):
+            raise ValueError("Camera policy export requires increasing source frame IDs")
+        last = self._last_policy_frame
+        for event in events:
+            if not isinstance(event, dict):
+                raise ValueError("Invalid camera policy event")
+            frame = event.get("frame")
+            if (
+                isinstance(frame, bool)
+                or not isinstance(frame, int)
+                or frame not in frame_ids
+                or event.get("schema") != POLICY_SCHEMA
+                or event.get("kind") != ("startup" if last is None else "change")
+                or not isinstance(event.get("policy"), dict)
+                or (last is not None and frame <= last)
+            ):
+                raise ValueError("Camera policy event does not match its source frame batch")
+            if last is None and frame != frame_ids[0]:
+                raise ValueError("Camera policy startup must precede the first exported frame")
+            last = frame
+        if last is None:
+            raise ValueError("Camera policy export is missing its startup event")
+        if not self._camera_policy_dataframes:
+            self._camera_policy_dataframes = [
+                CameraPolicyDataFrame(output_file=str(camera_policy_path(camera.output_file)))
+                for camera in cameras
+            ]
+        elif [dataframe.output_file for dataframe in self._camera_policy_dataframes] != [
+            str(camera_policy_path(camera.output_file)) for camera in cameras
+        ]:
+            raise ValueError("Camera policy outputs changed during export")
+        for dataframe in self._camera_policy_dataframes:
+            dataframe.add_events(events)
+        self._last_policy_frame = last
+        self._last_camera_frame = frame_ids[-1]
+
     def input_keys(self):
-        return {"frame_id", "current_box", "current_fast_box_list", "shared"}
+        return {
+            "frame_id",
+            "frame_ids",
+            "current_box",
+            "current_fast_box_list",
+            "camera_policy_events",
+            "shared",
+        }
 
     def output_keys(self):
         return {"camera_dataframe", "camera_fast_dataframe"}
@@ -672,4 +753,6 @@ class SaveCameraPlugin(SavePluginBase):
             actions.append(("camera CSV", self._camera_dataframe.close))
         if self._camera_fast_dataframe is not None:
             actions.append(("fast camera CSV", self._camera_fast_dataframe.close))
+        for dataframe in self._camera_policy_dataframes:
+            actions.append((f"camera policy CSV {dataframe.output_file}", dataframe.close))
         finalize_resources(actions)

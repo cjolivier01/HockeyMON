@@ -569,8 +569,10 @@ class StitchingPlugin(Plugin):
         blended = self._prepare_frame_for_video(blended, image_roi=None)
 
         rotate_degrees = self._resolve_rotation_degrees(context)
+        applied_rotation = 0.0
         if rotate_degrees is not None and abs(rotate_degrees) > 1e-6:
             blended = self._rotate_tensor_keep_size(blended, rotate_degrees)
+            applied_rotation = float(rotate_degrees)
 
         rgb_stats: Optional[Dict[str, Any]] = None
         if self._capture_rgb_stats:
@@ -656,6 +658,7 @@ class StitchingPlugin(Plugin):
 
         out: Dict[str, Any] = {
             "original_images": original_images,
+            "camera_input_geometry": {"post_stitch_rotate_degrees": applied_rotation},
             "ids": ids,
             "frame_ids": ids,
             "debug_rgb_stats": stitched_debug,
@@ -681,6 +684,7 @@ class StitchingPlugin(Plugin):
             "inputs",
             "data_samples",
             "original_images",
+            "camera_input_geometry",
             "debug_rgb_stats",
             "hm_real_time_fps",
             "fps",

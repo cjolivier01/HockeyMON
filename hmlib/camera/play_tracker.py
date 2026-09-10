@@ -28,6 +28,7 @@ from hmlib.bbox.box_functions import (
 )
 from hmlib.builder import HM
 from hmlib.camera.camera import HockeyMON
+from hmlib.camera.camera_policy import CameraPolicyRecorder
 from hmlib.camera.clusters import ClusterMan
 from hmlib.camera.moving_box import MovingBox
 from hmlib.config import (
@@ -42,7 +43,7 @@ from hmlib.log import logger
 from hmlib.tracking_utils import visualization as vis
 from hmlib.tracking_utils.utils import get_track_mask
 from hmlib.utils.gpu import unwrap_tensor, wrap_tensor
-from hmlib.utils.image import make_channels_last
+from hmlib.utils.image import image_height, image_width, make_channels_last
 from hmlib.utils.progress_bar import ProgressBar
 from hockeymon.core import AllLivingBoxConfig, BBox, HmLogLevel
 from hockeymon.core import PlayTracker as CppPlayTracker
@@ -404,6 +405,17 @@ class PlayTracker(torch.nn.Module):
         self._last_sticky_temporal_box = None
         self._frame_counter: int = 0
         self._initial_box_applied: bool = False
+        self._camera_policy_recorder = CameraPolicyRecorder()
+        self._camera_policy_play_box = self._play_box.detach().cpu().tolist()
+        self._applied_camera_targets = {"fast": False, "follower": True}
+        # Legacy stitching has static geometry: the CLI requires Aspen stitching
+        # for live camera controls. Never infer rendered pixels from a later UI
+        # request when consuming an already-stitched/prefetched batch.
+        self._camera_policy_initial_rotation = (
+            (self._current_stitch_rotation_degrees() or 0.0)
+            if self._stitch_rotation_controller is not None
+            else 0.0
+        )
 
         play_width = width(self._play_box)
         play_height = height(self._play_box)
@@ -1010,6 +1022,7 @@ class PlayTracker(torch.nn.Module):
         frame_ids_list: List[torch.Tensor] = []
         current_box_list: List[torch.Tensor] = []
         current_fast_box_list: List[torch.Tensor] = []
+        camera_policy_events: List[Dict[str, Any]] = []
         online_images: List[torch.Tensor] = []
         # Per-frame player footprint centers (bottom of bbox midpoints) and ids
         player_bottom_points_list: List[torch.Tensor] = []
@@ -1072,6 +1085,13 @@ class PlayTracker(torch.nn.Module):
 
             # Always sync camera UI controls so sliders affect tracking even without plotting.
             self._apply_ui_controls()
+            policy_event = self._record_camera_policy(
+                int(scalar_frame_id),
+                (image_width(online_im), image_height(online_im)),
+                results.get("camera_input_geometry"),
+            )
+            if policy_event is not None:
+                camera_policy_events.append(policy_event)
 
             if self._playtracker is not None:
                 assert not use_transformer, "Cannot use transformer with C++ PlayTracker"
@@ -1570,6 +1590,7 @@ class PlayTracker(torch.nn.Module):
         results["frame_ids"] = wrap_tensor(torch.stack(frame_ids_list))
         results["current_box"] = wrap_tensor(torch.stack(current_box_list))
         results["current_fast_box_list"] = wrap_tensor(torch.stack(current_fast_box_list))
+        results["camera_policy_events"] = camera_policy_events
         # Attach per-frame player bottom points and ids for downstream overlays
         results["player_bottom_points"] = player_bottom_points_list
         results["player_ids"] = player_ids_list
@@ -2298,6 +2319,31 @@ class PlayTracker(torch.nn.Module):
             )
         self._hm_ui_process.set_system_defaults(defaults)
 
+    def _record_camera_policy(
+        self,
+        frame: int,
+        canvas_wh: Tuple[int, int],
+        input_geometry: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        # Color changes do not alter the pan/zoom policy. Config snapshots also
+        # detect resets/reloads, including changes between forward batches.
+        camera = {key: value for key, value in self._camera_cfg().items() if key != "color"}
+        return self._camera_policy_recorder.record(
+            frame,
+            {
+                "camera": camera,
+                "controller": self._camera_controller,
+                "applied_targets": self._applied_camera_targets,
+                "post_stitch_rotate_degrees": (
+                    input_geometry["post_stitch_rotate_degrees"]
+                    if input_geometry is not None
+                    else self._camera_policy_initial_rotation
+                ),
+                "canvas_wh": canvas_wh,
+                "play_box": self._camera_policy_play_box,
+            },
+        )
+
     def _apply_ui_controls(self):
         if not self._camera_ui_enabled or not self._ui_inited:
             return
@@ -2569,6 +2615,9 @@ class PlayTracker(torch.nn.Module):
                 except Exception as ex:
                     logger.warning("Failed to apply camera UI values to C++ play tracker: %s", ex)
             # For Python-only breakaway values, we read from self._game_config in calculate_breakaway
+            # Record the sampled target selectors, not a later UI snapshot. The
+            # other effective values are already written into _camera_cfg().
+            self._applied_camera_targets = {"fast": apply_fast, "follower": apply_follower}
             return True
         except Exception as ex:
             # If we failed to read UI, try again next frame

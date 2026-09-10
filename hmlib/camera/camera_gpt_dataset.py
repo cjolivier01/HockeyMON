@@ -14,6 +14,7 @@ import pandas as pd
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
 
+from hmlib.camera.camera_policy import read_camera_policy_boundaries
 from hmlib.camera.camera_transformer import (
     CameraNorm,
     build_frame_base_features,
@@ -130,11 +131,13 @@ def scan_game_max_xy(
     return max_x, max_y
 
 
-def _contiguous_frame_runs(frames: list[int]) -> list[list[int]]:
-    """Split sorted frame IDs wherever numeric timeline adjacency is lost."""
+def _contiguous_frame_runs(
+    frames: list[int], policy_boundaries: Optional[set[int]] = None
+) -> list[list[int]]:
+    """Split sorted frames at numeric gaps or effective camera-policy changes."""
     runs: list[list[int]] = []
     for frame in frames:
-        if not runs or frame != runs[-1][-1] + 1:
+        if not runs or frame != runs[-1][-1] + 1 or frame in (policy_boundaries or ()):
             runs.append([frame])
         else:
             runs[-1].append(frame)
@@ -273,7 +276,12 @@ def _load_game(
             frames_set = frames_set.intersection(set(cams_fast["Frame"].unique()))
     frames = sorted(frames_set)
     frames_int = [int(f) for f in frames]
-    frame_runs = _contiguous_frame_runs(frames_int)
+    policy_boundaries = read_camera_policy_boundaries(paths.camera_csv, cams["Frame"])
+    if target_mode == "slow_fast_tlwh" and cams_fast is not None:
+        policy_boundaries.update(
+            read_camera_policy_boundaries(paths.camera_fast_csv, cams_fast["Frame"])
+        )
+    frame_runs = _contiguous_frame_runs(frames_int, policy_boundaries)
 
     tracks_by_frame: Dict[int, np.ndarray] = {}
     if not tracks.empty:
