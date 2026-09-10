@@ -81,7 +81,7 @@ video_out:
   encoder_backend: "auto"
   output_width: "auto"
   output_height: null
-  bit_rate: 55000000
+  bit_rate: null  # Auto: scale source bitrate per pixel to the final output dimensions.
   show_image: false
   show_scaled: null
   show_youtube: false

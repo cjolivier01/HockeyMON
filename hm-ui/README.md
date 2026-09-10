@@ -4,6 +4,17 @@ Rust operator UI for HockeyMON runtime camera controls.
 
 `hm-ui` is a sidecar process. The Python tracker owns the video pipeline and writes a JSON control spec/state file; `hm-ui` renders the controls and writes value changes back.
 
+The **Zoom In Aggressiveness** control tunes how readily the follower camera
+zooms in. Its range is 0–100, with 25 retaining the original shrink thresholds;
+higher values respond to smaller reductions in the tracked play area. It always
+affects the follower, independently of the motion-limit box selection, and keeps
+the current camera velocity and braking state. Save/reset uses
+`rink.camera.zoom_in_aggressiveness` in the game configuration.
+
+Preview labels show each stream's current source resolution, before the bridge
+reduces frames for display. The Stitched and Final views update independently
+when the output dimensions change.
+
 ## Build
 
 ```bash

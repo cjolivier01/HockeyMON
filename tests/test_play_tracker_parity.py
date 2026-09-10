@@ -35,6 +35,7 @@ def _base_game_config() -> Dict:
         "rink": {
             "camera": {
                 "pan_smoothing_alpha": 0.18,
+                "zoom_in_aggressiveness": 25,
                 "sticky_size_ratio_to_frame_width": 0.5,
                 "sticky_translation_gaussian_mult": 1.0,
                 "unsticky_translation_size_ratio": 0.2,

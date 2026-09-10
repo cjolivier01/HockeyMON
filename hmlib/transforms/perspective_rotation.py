@@ -45,6 +45,7 @@ class HmPerspectiveRotation:
         if fixed_edge_rotation is not None:
             enabled = bool(fixed_edge_rotation)
         self._enabled = enabled
+        self._camera_space_leveling = False
         self._pre_clip = pre_clip
         self._dtype = dtype
         self.set_fixed_edge_rotation_angle(fixed_edge_rotation_angle)
@@ -71,8 +72,12 @@ class HmPerspectiveRotation:
             return all(float(item) == 0.0 for item in value)
         return float(value) == 0.0
 
+    def set_camera_space_leveling(self, enabled: bool) -> None:
+        """Suppress Program edge correction without discarding its saved angles."""
+        self._camera_space_leveling = bool(enabled)
+
     def __call__(self, results):
-        if not self._enabled or self._rotation_disabled():
+        if not self._enabled or self._camera_space_leveling or self._rotation_disabled():
             return results
         online_im = results.pop(self._image_label)
         current_box = results.pop(self._bbox_label)

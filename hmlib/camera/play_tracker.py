@@ -30,6 +30,7 @@ from hmlib.builder import HM
 from hmlib.camera.camera import HockeyMON
 from hmlib.camera.clusters import ClusterMan
 from hmlib.camera.moving_box import MovingBox
+from hmlib.camera.zoom import zoom_in_shrink_thresholds
 from hmlib.config import (
     get_config,
     get_game_config_private,
@@ -56,6 +57,7 @@ from .camera_transformer import (
 )
 from .hm_ui_bridge import HmUiDialog, HmUiProcess
 from .living_box import PyLivingBox, from_bbox, to_bbox
+from hmlib.utils.shadow_lift import shadow_lift_settings
 
 _CPP_BOXES: bool = True
 # _CPP_BOXES: bool = False
@@ -74,6 +76,8 @@ _COLOR_TRACKBARS = {
     "White_Balance_Blue_Gain_x100",
     "Brightness_Multiplier_x100",
     "Exposure_EV_x10",
+    "Shadow_Lift_Percent",
+    "Shadow_Lift_Black_Point",
     "Contrast_Multiplier_x100",
     "Gamma_Multiplier_x100",
 }
@@ -772,6 +776,8 @@ class PlayTracker(torch.nn.Module):
                 ),
                 time_to_dest_stop_speed_threshold=ttg_stop_thresh,
             )
+
+        self._apply_zoom_in_aggressiveness(self._require_camera_value("zoom_in_aggressiveness"))
 
         if self._camera_ui_enabled:
             self._init_ui_controls()
@@ -1827,6 +1833,9 @@ class PlayTracker(torch.nn.Module):
         self._on_ui_control_changed(None)
 
     def _base_color_slider_defaults(self, color_cfg: Dict[str, Any]) -> Dict[str, int]:
+        shadow, black_point = shadow_lift_settings(
+            color_cfg.get("shadow_lift"), color_cfg.get("shadow_lift_black_point")
+        )
         defaults: Dict[str, int] = {
             "White_Balance_Kelvin_Enable": 0,
             "White_Balance_Kelvin_Temperature": 6500,
@@ -1835,6 +1844,8 @@ class PlayTracker(torch.nn.Module):
             "White_Balance_Blue_Gain_x100": 100,
             "Brightness_Multiplier_x100": 100,
             "Exposure_EV_x10": _EXPOSURE_EV_X10_SLIDER_ZERO,
+            "Shadow_Lift_Percent": int(round(shadow)),
+            "Shadow_Lift_Black_Point": int(black_point),
             "Contrast_Multiplier_x100": 100,
             "Gamma_Multiplier_x100": 100,
         }
@@ -1933,6 +1944,8 @@ class PlayTracker(torch.nn.Module):
             b100 = self._ui_slider_value(color_win, "White_Balance_Blue_Gain_x100")
             br100 = self._ui_slider_value(color_win, "Brightness_Multiplier_x100")
             ev_x10 = self._ui_slider_value(color_win, "Exposure_EV_x10")
+            shadow = self._ui_slider_value(color_win, "Shadow_Lift_Percent")
+            black_point = self._ui_slider_value(color_win, "Shadow_Lift_Black_Point")
             ct100 = self._ui_slider_value(color_win, "Contrast_Multiplier_x100")
             gm100 = self._ui_slider_value(color_win, "Gamma_Multiplier_x100")
 
@@ -1952,6 +1965,16 @@ class PlayTracker(torch.nn.Module):
             self._set_ui_color_value_at_prefixes(
                 prefixes, "exposure_ev", self._slider_to_exposure_ev(ev_x10)
             )
+            for key, value in (
+                ("shadow_lift", float(shadow)),
+                ("shadow_lift_black_point", bool(black_point)),
+            ):
+                for prefix in prefixes:
+                    if (
+                        value
+                        or self._get_path_value(self._game_config, prefix + (key,)) is not _MISSING
+                    ):
+                        self._set_ui_color_value_at_prefixes([prefix], key, value)
             self._set_ui_color_value_at_prefixes(prefixes, "contrast", max(1, ct100) / 100.0)
             self._set_ui_color_value_at_prefixes(prefixes, "gamma", max(1, gm100) / 100.0)
         except KeyError as ex:
@@ -1990,6 +2013,7 @@ class PlayTracker(torch.nn.Module):
             tb("Post_Nonstop_Stop_Delay_Frames", 60, postns)
             tb("Overshoot_Speed_Ratio_x100", 200, ov_scale)
             tb("Time_To_Dest_Speed_Limit_Frames", 120, ttg)
+            tb("Zoom_In_Aggressiveness", 100, self._require_camera_value("zoom_in_aggressiveness"))
             # Translation constraints and target selection
             # Apply to fast and/or follower boxes
             tb("Apply_To_Fast_Box", 1, 0)
@@ -2044,6 +2068,7 @@ class PlayTracker(torch.nn.Module):
                 Post_Nonstop_Stop_Delay_Frames=postns,
                 Overshoot_Speed_Ratio_x100=ov_scale,
                 Time_To_Dest_Speed_Limit_Frames=ttg,
+                Zoom_In_Aggressiveness=int(camera_cfg["zoom_in_aggressiveness"]),
                 Apply_To_Fast_Box=0,
                 Apply_To_Follower_Box=1,
                 Link_Fixed_Edge_Rotation_Left_Right=fixed_linked,
@@ -2080,6 +2105,8 @@ class PlayTracker(torch.nn.Module):
                 tb2("White_Balance_Blue_Gain_x100", 300, 100)
                 tb2("Brightness_Multiplier_x100", 300, 100)
                 tb2("Exposure_EV_x10", _EXPOSURE_EV_X10_SLIDER_MAX, _EXPOSURE_EV_X10_SLIDER_ZERO)
+                tb2("Shadow_Lift_Percent", 100, 0)
+                tb2("Shadow_Lift_Black_Point", 1, 0)
                 tb2("Contrast_Multiplier_x100", 300, 100)
                 tb2("Gamma_Multiplier_x100", 300, 100)
                 # Apply defaults from current config so UI reflects runtime values
@@ -2124,10 +2151,14 @@ class PlayTracker(torch.nn.Module):
                         ("White_Balance_Blue_Gain_x100", 300),
                         ("Brightness_Multiplier_x100", 300),
                         ("Exposure_EV_x10", _EXPOSURE_EV_X10_SLIDER_MAX),
+                        ("Shadow_Lift_Percent", 100),
+                        ("Shadow_Lift_Black_Point", 1),
                         ("Contrast_Multiplier_x100", 300),
                         ("Gamma_Multiplier_x100", 300),
                     ):
-                        if name == "Exposure_EV_x10":
+                        if name in ("Shadow_Lift_Percent", "Shadow_Lift_Black_Point"):
+                            init = 0
+                        elif name == "Exposure_EV_x10":
                             init = _EXPOSURE_EV_X10_SLIDER_ZERO
                         else:
                             init = 100 if "Enable" not in name and "Temperature" not in name else 0
@@ -2174,10 +2205,14 @@ class PlayTracker(torch.nn.Module):
                         ("White_Balance_Blue_Gain_x100", 300),
                         ("Brightness_Multiplier_x100", 300),
                         ("Exposure_EV_x10", _EXPOSURE_EV_X10_SLIDER_MAX),
+                        ("Shadow_Lift_Percent", 100),
+                        ("Shadow_Lift_Black_Point", 1),
                         ("Contrast_Multiplier_x100", 300),
                         ("Gamma_Multiplier_x100", 300),
                     ):
-                        if name == "Exposure_EV_x10":
+                        if name in ("Shadow_Lift_Percent", "Shadow_Lift_Black_Point"):
+                            init = 0
+                        elif name == "Exposure_EV_x10":
                             init = _EXPOSURE_EV_X10_SLIDER_ZERO
                         else:
                             init = 100 if "Enable" not in name and "Temperature" not in name else 0
@@ -2237,6 +2272,7 @@ class PlayTracker(torch.nn.Module):
         )
         _replace("Stop_Cancel_Hysteresis_Frames", camera_cfg.get("stop_cancel_hysteresis_frames"))
         _replace("Stop_Delay_Cooldown_Frames", camera_cfg.get("stop_delay_cooldown_frames"))
+        _replace("Zoom_In_Aggressiveness", camera_cfg.get("zoom_in_aggressiveness"))
         _replace("Overshoot_Stop_Delay_Frames", breakaway_cfg.get("overshoot_stop_delay_count"))
         _replace(
             "Post_Nonstop_Stop_Delay_Frames",
@@ -2407,6 +2443,13 @@ class PlayTracker(torch.nn.Module):
             ttg = int(
                 self._ui_slider_value(self._ui_window_name, "Time_To_Dest_Speed_Limit_Frames")
             )
+            zoom_aggressiveness = self._ui_slider_value(
+                self._ui_window_name, "Zoom_In_Aggressiveness"
+            )
+            self._apply_zoom_in_aggressiveness(zoom_aggressiveness)
+            self._set_ui_config_value(
+                ("rink", "camera", "zoom_in_aggressiveness"), zoom_aggressiveness
+            )
 
             # Apply runtime scaling so frame-count settings are stable across FPS.
             dir_delay_scaled = self._scale_frames_for_fps(dir_delay)
@@ -2576,6 +2619,18 @@ class PlayTracker(torch.nn.Module):
             logger.warning("Failed to read/apply camera UI controls: %s", ex)
             return False
 
+    def _apply_zoom_in_aggressiveness(self, aggressiveness: int) -> None:
+        """Zoom always tunes the follower; motion-limit box selection is separate."""
+        thresholds = zoom_in_shrink_thresholds(aggressiveness)
+        follower = (
+            self._playtracker.get_live_box(1)
+            if self._playtracker is not None
+            else self._current_roi_aspect
+        )
+        if follower is None:
+            raise RuntimeError("Zoom tuning requires an initialized follower camera box")
+        follower.set_resizing_shrink_thresholds(*thresholds)
+
     def _draw_ui_overlay(self, img):
         if not self._camera_ui_enabled or not self._ui_inited:
             return img
@@ -2709,6 +2764,7 @@ class PlayTracker(torch.nn.Module):
         )
         for key in required_keys:
             self._require_camera_value(key)
+        zoom_in_shrink_thresholds(self._require_camera_value("zoom_in_aggressiveness"))
         breakaway_keys = (
             "overshoot_stop_delay_count",
             "post_nonstop_stop_delay_count",
@@ -2803,6 +2859,7 @@ class PlayTracker(torch.nn.Module):
                     ("rink", "camera", "stop_cancel_hysteresis_frames"),
                     ("rink", "camera", "stop_delay_cooldown_frames"),
                     ("rink", "camera", "time_to_dest_speed_limit_frames"),
+                    ("rink", "camera", "zoom_in_aggressiveness"),
                     ("rink", "camera", "max_speed_ratio_x"),
                     ("rink", "camera", "max_speed_ratio_y"),
                     ("rink", "camera", "max_accel_ratio_x"),
@@ -2835,6 +2892,8 @@ class PlayTracker(torch.nn.Module):
             "white_balance_temp",
             "brightness",
             "exposure_ev",
+            "shadow_lift",
+            "shadow_lift_black_point",
             "contrast",
             "gamma",
         }

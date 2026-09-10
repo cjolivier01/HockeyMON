@@ -372,3 +372,39 @@ def should_suppress_local_preview_when_rust_camera_ui_owns_it(monkeypatch):
     plugin = VideoPreviewPlugin()
     plugin(context)
     assert _FakeShower.instances == []
+
+
+def should_save_and_reset_shadow_lift_controls(monkeypatch):
+    _FakeHmUiProcess.instances.clear()
+    config = _config(rotation=0)
+    system = copy.deepcopy(config)
+    config["stitching"]["left"]["color"].update(shadow_lift=25, shadow_lift_black_point=True)
+    saved = {}
+    monkeypatch.setattr(stitch_ui_module, "HmUiProcess", _FakeHmUiProcess)
+    monkeypatch.setattr(stitch_ui_module, "get_config", lambda **_kwargs: copy.deepcopy(system))
+    monkeypatch.setattr(stitch_ui_module, "get_game_config_private", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        stitch_ui_module,
+        "save_private_config",
+        lambda _game_id, data, **_kwargs: saved.update(copy.deepcopy(data)),
+    )
+    plugin = StitchUiPlugin()
+    context = {"shared": {"camera_ui": True, "game_id": "game", "game_config": config}}
+    plugin.forward(context)
+    process = _FakeHmUiProcess.instances[0]
+    controls = process.values["Tracker Controls (Left Color)"]
+    assert controls["Shadow_Lift_Percent"] == 25
+    assert controls["Shadow_Lift_Black_Point"] == 1
+    controls["Shadow_Lift_Percent"] = 80
+    controls["Shadow_Lift_Black_Point"] = 0
+    process.queue_action("save")
+    plugin.forward(context)
+    assert saved["stitching"]["left"]["color"] == {
+        "shadow_lift": 80.0,
+        "shadow_lift_black_point": False,
+    }
+    process.queue_reset(system=True)
+    plugin.forward(context)
+    assert "shadow_lift" not in config["stitching"]["left"]["color"]
+    assert "shadow_lift_black_point" not in config["stitching"]["left"]["color"]
+    plugin.finalize()

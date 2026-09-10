@@ -15,6 +15,7 @@ import torch
 from typeguard import typechecked
 
 from hmlib.log import get_logger
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor, wrap_tensor
 from hmlib.video.ffmpeg import BasicVideoInfo, preexec_fn
 
@@ -653,26 +654,43 @@ class PyAmdVideoEncoder:
         self._opened = False
         if process is None:
             return
-        if process.stdin is not None:
+
+        def wait_process():
             try:
-                process.stdin.close()
-            except OSError:
-                pass
-        try:
-            process.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-        if self._stdout_thread is not None:
-            self._stdout_thread.join(timeout=2.0)
-            self._stdout_thread = None
-        if self._stderr_thread is not None:
-            self._stderr_thread.join(timeout=2.0)
-            self._stderr_thread = None
-        self._check_background_error()
-        if process.returncode not in (0, None):
-            stderr_tail = "\n".join(self._stderr_tail)
-            raise RuntimeError(f"AMD encoder exited with code {process.returncode}.\n{stderr_tail}")
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired as error:
+                process.kill()
+                process.wait(timeout=5)
+                raise RuntimeError("AMD encoder timed out during finalization") from error
+
+        def join_thread(attribute):
+            thread = getattr(self, attribute)
+            if thread is not None:
+                thread.join(timeout=2.0)
+                if thread.is_alive():
+                    raise RuntimeError(f"AMD encoder worker {attribute} did not stop")
+                setattr(self, attribute, None)
+
+        def check_exit_status():
+            if process.returncode != 0:
+                stderr_tail = "\n".join(self._stderr_tail)
+                raise RuntimeError(
+                    f"AMD encoder exited with code {process.returncode}.\n{stderr_tail}"
+                )
+
+        actions = []
+        if process.stdin is not None:
+            actions.append(("AMD encoder input flush", process.stdin.close))
+        actions.extend(
+            [
+                ("AMD encoder process", wait_process),
+                ("AMD encoder bitstream worker", lambda: join_thread("_stdout_thread")),
+                ("AMD encoder stderr worker", lambda: join_thread("_stderr_thread")),
+                ("AMD encoder background output", self._check_background_error),
+                ("AMD encoder exit status", check_exit_status),
+            ]
+        )
+        finalize_resources(actions)
 
 
 __all__ = ["PyAmdVideoCodec", "PyAmdVideoDecoder", "PyAmdVideoEncoder"]
