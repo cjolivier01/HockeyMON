@@ -57,6 +57,7 @@ from .camera_transformer import (
 )
 from .hm_ui_bridge import HmUiDialog, HmUiProcess
 from .living_box import PyLivingBox, from_bbox, to_bbox
+from hmlib.utils.shadow_lift import shadow_lift_settings
 
 _CPP_BOXES: bool = True
 # _CPP_BOXES: bool = False
@@ -75,6 +76,8 @@ _COLOR_TRACKBARS = {
     "White_Balance_Blue_Gain_x100",
     "Brightness_Multiplier_x100",
     "Exposure_EV_x10",
+    "Shadow_Lift_Percent",
+    "Shadow_Lift_Black_Point",
     "Contrast_Multiplier_x100",
     "Gamma_Multiplier_x100",
 }
@@ -1830,6 +1833,9 @@ class PlayTracker(torch.nn.Module):
         self._on_ui_control_changed(None)
 
     def _base_color_slider_defaults(self, color_cfg: Dict[str, Any]) -> Dict[str, int]:
+        shadow, black_point = shadow_lift_settings(
+            color_cfg.get("shadow_lift"), color_cfg.get("shadow_lift_black_point")
+        )
         defaults: Dict[str, int] = {
             "White_Balance_Kelvin_Enable": 0,
             "White_Balance_Kelvin_Temperature": 6500,
@@ -1838,6 +1844,8 @@ class PlayTracker(torch.nn.Module):
             "White_Balance_Blue_Gain_x100": 100,
             "Brightness_Multiplier_x100": 100,
             "Exposure_EV_x10": _EXPOSURE_EV_X10_SLIDER_ZERO,
+            "Shadow_Lift_Percent": int(round(shadow)),
+            "Shadow_Lift_Black_Point": int(black_point),
             "Contrast_Multiplier_x100": 100,
             "Gamma_Multiplier_x100": 100,
         }
@@ -1936,6 +1944,8 @@ class PlayTracker(torch.nn.Module):
             b100 = self._ui_slider_value(color_win, "White_Balance_Blue_Gain_x100")
             br100 = self._ui_slider_value(color_win, "Brightness_Multiplier_x100")
             ev_x10 = self._ui_slider_value(color_win, "Exposure_EV_x10")
+            shadow = self._ui_slider_value(color_win, "Shadow_Lift_Percent")
+            black_point = self._ui_slider_value(color_win, "Shadow_Lift_Black_Point")
             ct100 = self._ui_slider_value(color_win, "Contrast_Multiplier_x100")
             gm100 = self._ui_slider_value(color_win, "Gamma_Multiplier_x100")
 
@@ -1955,6 +1965,16 @@ class PlayTracker(torch.nn.Module):
             self._set_ui_color_value_at_prefixes(
                 prefixes, "exposure_ev", self._slider_to_exposure_ev(ev_x10)
             )
+            for key, value in (
+                ("shadow_lift", float(shadow)),
+                ("shadow_lift_black_point", bool(black_point)),
+            ):
+                for prefix in prefixes:
+                    if (
+                        value
+                        or self._get_path_value(self._game_config, prefix + (key,)) is not _MISSING
+                    ):
+                        self._set_ui_color_value_at_prefixes([prefix], key, value)
             self._set_ui_color_value_at_prefixes(prefixes, "contrast", max(1, ct100) / 100.0)
             self._set_ui_color_value_at_prefixes(prefixes, "gamma", max(1, gm100) / 100.0)
         except KeyError as ex:
@@ -2085,6 +2105,8 @@ class PlayTracker(torch.nn.Module):
                 tb2("White_Balance_Blue_Gain_x100", 300, 100)
                 tb2("Brightness_Multiplier_x100", 300, 100)
                 tb2("Exposure_EV_x10", _EXPOSURE_EV_X10_SLIDER_MAX, _EXPOSURE_EV_X10_SLIDER_ZERO)
+                tb2("Shadow_Lift_Percent", 100, 0)
+                tb2("Shadow_Lift_Black_Point", 1, 0)
                 tb2("Contrast_Multiplier_x100", 300, 100)
                 tb2("Gamma_Multiplier_x100", 300, 100)
                 # Apply defaults from current config so UI reflects runtime values
@@ -2129,10 +2151,14 @@ class PlayTracker(torch.nn.Module):
                         ("White_Balance_Blue_Gain_x100", 300),
                         ("Brightness_Multiplier_x100", 300),
                         ("Exposure_EV_x10", _EXPOSURE_EV_X10_SLIDER_MAX),
+                        ("Shadow_Lift_Percent", 100),
+                        ("Shadow_Lift_Black_Point", 1),
                         ("Contrast_Multiplier_x100", 300),
                         ("Gamma_Multiplier_x100", 300),
                     ):
-                        if name == "Exposure_EV_x10":
+                        if name in ("Shadow_Lift_Percent", "Shadow_Lift_Black_Point"):
+                            init = 0
+                        elif name == "Exposure_EV_x10":
                             init = _EXPOSURE_EV_X10_SLIDER_ZERO
                         else:
                             init = 100 if "Enable" not in name and "Temperature" not in name else 0
@@ -2179,10 +2205,14 @@ class PlayTracker(torch.nn.Module):
                         ("White_Balance_Blue_Gain_x100", 300),
                         ("Brightness_Multiplier_x100", 300),
                         ("Exposure_EV_x10", _EXPOSURE_EV_X10_SLIDER_MAX),
+                        ("Shadow_Lift_Percent", 100),
+                        ("Shadow_Lift_Black_Point", 1),
                         ("Contrast_Multiplier_x100", 300),
                         ("Gamma_Multiplier_x100", 300),
                     ):
-                        if name == "Exposure_EV_x10":
+                        if name in ("Shadow_Lift_Percent", "Shadow_Lift_Black_Point"):
+                            init = 0
+                        elif name == "Exposure_EV_x10":
                             init = _EXPOSURE_EV_X10_SLIDER_ZERO
                         else:
                             init = 100 if "Enable" not in name and "Temperature" not in name else 0
@@ -2862,6 +2892,8 @@ class PlayTracker(torch.nn.Module):
             "white_balance_temp",
             "brightness",
             "exposure_ev",
+            "shadow_lift",
+            "shadow_lift_black_point",
             "contrast",
             "gamma",
         }
