@@ -11,6 +11,7 @@
 namespace {
 
 using hm::BBox;
+using hm::IntValue;
 using namespace hm::play_tracker;
 
 void expect(bool condition, const std::string& message) {
@@ -219,6 +220,42 @@ void rejects_malformed_state() {
   });
   check([](auto& s) { s.living_boxes[0].resizing.cooldown_w_counter = -1; });
   check([](auto& s) { s.config.play_detector.max_velocity_positions = 0; });
+  check([](auto& s) { s.config.play_detector.group_ratio_threshold = -1; });
+  check([](auto& s) { s.config.play_detector.group_ratio_threshold = 0.49f; });
+  check([](auto& s) { s.config.play_detector.group_ratio_threshold = 1.01f; });
+  check([](auto& s) {
+    s.config.play_detector.min_considered_group_velocity = 0;
+  });
+  check([](auto& s) {
+    s.config.play_detector.nonstop_delay_count =
+        std::numeric_limits<uint64_t>::max();
+  });
+  check([](auto& s) {
+    s.living_boxes[0].translation.nonstop_delay = 1;
+    s.living_boxes[0].translation.nonstop_delay_counter =
+        std::numeric_limits<IntValue>::max();
+  });
+  check([](auto& s) {
+    s.living_boxes[0].translation.stop_delay_x = 1;
+    s.living_boxes[0].translation.stop_delay_x_counter = 2;
+  });
+  check([](auto& s) {
+    s.living_boxes[0].translation.cancel_opp_y_count =
+        std::numeric_limits<IntValue>::max();
+  });
+  check([](auto& s) {
+    s.living_boxes[0].resizing.stop_delay_h = 1;
+    s.living_boxes[0].resizing.stop_delay_h_counter =
+        std::numeric_limits<IntValue>::max();
+  });
+  check([](auto& s) {
+    s.living_boxes[0].resizing.cancel_opp_w_count =
+        std::numeric_limits<IntValue>::max();
+  });
+  check([](auto& s) {
+    s.living_boxes[0].config.cancel_stop_hysteresis_frames =
+        std::numeric_limits<IntValue>::max();
+  });
   check(
       [](auto& s) { s.detector.tracks.push_back(s.detector.tracks.front()); });
   check([](auto& s) {

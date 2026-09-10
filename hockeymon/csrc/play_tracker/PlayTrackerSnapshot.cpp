@@ -522,6 +522,10 @@ bool positive_box(const BBox& box) {
   return box.right > box.left && box.bottom > box.top;
 }
 
+bool safe_counter(IntValue value) {
+  return value >= 0 && value < std::numeric_limits<IntValue>::max();
+}
+
 void validate_box_config(const AllLivingBoxConfig& c) {
   require(c.arena_box && positive_box(*c.arena_box), "missing/empty arena");
   require(
@@ -549,35 +553,46 @@ void validate_box_config(const AllLivingBoxConfig& c) {
       c.dynamic_acceleration_scaling == 0 || c.sticky_translation,
       "dynamic acceleration requires sticky translation");
   require(
-      c.stop_translation_on_dir_change_delay >= 0 &&
-          c.cancel_stop_hysteresis_frames >= 0 &&
-          c.stop_delay_cooldown_frames >= 0 &&
-          c.post_nonstop_stop_delay_count >= 0 &&
-          c.time_to_dest_speed_limit_frames >= 0 &&
-          c.resizing_stop_on_dir_change_delay >= 0 &&
-          c.resizing_stop_cancel_hysteresis_frames >= 0 &&
-          c.resizing_stop_delay_cooldown_frames >= 0 &&
-          c.resizing_time_to_dest_speed_limit_frames >= 0,
-      "negative braking duration");
+      safe_counter(c.stop_translation_on_dir_change_delay) &&
+          safe_counter(c.cancel_stop_hysteresis_frames) &&
+          safe_counter(c.stop_delay_cooldown_frames) &&
+          safe_counter(c.post_nonstop_stop_delay_count) &&
+          safe_counter(c.time_to_dest_speed_limit_frames) &&
+          safe_counter(c.resizing_stop_on_dir_change_delay) &&
+          safe_counter(c.resizing_stop_cancel_hysteresis_frames) &&
+          safe_counter(c.resizing_stop_delay_cooldown_frames) &&
+          safe_counter(c.resizing_time_to_dest_speed_limit_frames),
+      "invalid braking duration");
+}
+
+void validate_delay(const std::optional<IntValue>& duration, IntValue counter) {
+  require(
+      safe_counter(duration.value_or(0)) && safe_counter(counter) &&
+          counter <= duration.value_or(0),
+      "invalid active delay or elapsed counter");
 }
 
 void validate_translation(const TranslationState& s) {
+  validate_delay(s.nonstop_delay, s.nonstop_delay_counter);
+  validate_delay(s.stop_delay_x, s.stop_delay_x_counter);
+  validate_delay(s.stop_delay_y, s.stop_delay_y_counter);
   require(
-      s.nonstop_delay.value_or(0) >= 0 && s.nonstop_delay_counter >= 0 &&
-          s.stop_delay_x.value_or(0) >= 0 && s.stop_delay_x_counter >= 0 &&
-          s.cancel_opp_x_count >= 0 && s.cooldown_x_counter >= 0 &&
-          s.stop_delay_y.value_or(0) >= 0 && s.stop_delay_y_counter >= 0 &&
-          s.cancel_opp_y_count >= 0 && s.cooldown_y_counter >= 0,
-      "negative translation counter");
+      safe_counter(s.cancel_opp_x_count) &&
+          safe_counter(s.cooldown_x_counter) &&
+          safe_counter(s.cancel_opp_y_count) &&
+          safe_counter(s.cooldown_y_counter),
+      "invalid translation counter");
 }
 
 void validate_resizing(const ResizingState& s) {
+  validate_delay(s.stop_delay_w, s.stop_delay_w_counter);
+  validate_delay(s.stop_delay_h, s.stop_delay_h_counter);
   require(
-      s.stop_delay_w.value_or(0) >= 0 && s.stop_delay_w_counter >= 0 &&
-          s.cancel_opp_w_count >= 0 && s.cooldown_w_counter >= 0 &&
-          s.stop_delay_h.value_or(0) >= 0 && s.stop_delay_h_counter >= 0 &&
-          s.cancel_opp_h_count >= 0 && s.cooldown_h_counter >= 0,
-      "negative resizing counter");
+      safe_counter(s.cancel_opp_w_count) &&
+          safe_counter(s.cooldown_w_counter) &&
+          safe_counter(s.cancel_opp_h_count) &&
+          safe_counter(s.cooldown_h_counter),
+      "invalid resizing counter");
 }
 
 } // namespace
@@ -707,6 +722,17 @@ void validate_snapshot(const PlayTrackerSnapshot& snapshot) {
           detector.frame_step > 0 && detector.frame_step <= kMaxHistory &&
           detector.overshoot_stop_delay_count >= 0,
       "invalid player-history configuration");
+  require(
+      detector.group_ratio_threshold >= 0.5f &&
+          detector.group_ratio_threshold <= 1.0f &&
+          detector.min_considered_group_velocity > 0 &&
+          detector.fps_speed_scale > 0 &&
+          detector.group_velocity_speed_ratio >= 0 &&
+          detector.scale_speed_constraints >= 0 &&
+          detector.overshoot_scale_speed_ratio >= 0 &&
+          detector.nonstop_delay_count <
+              static_cast<uint64_t>(std::numeric_limits<IntValue>::max()),
+      "invalid detector policy thresholds or delay");
   require(
       snapshot.detector.overshoot_stop_delay_override.value_or(0) >= 0 &&
           snapshot.detector.overshoot_scale_override.value_or(0) >= 0,
