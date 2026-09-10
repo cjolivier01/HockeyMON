@@ -5,8 +5,8 @@ and optional Laplacian blending via :class:`hmlib.stitching.laplacian_blend.Lapl
 """
 
 import argparse
-import datetime
 import os
+import subprocess
 import traceback
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -19,7 +19,12 @@ import torch
 
 from hmlib.hm_opts import copy_opts, hm_opts, preferred_arg
 from hmlib.orientation import configure_game_videos
-from hmlib.stitching.configure_stitching import get_image_geo_position
+from hmlib.stitching.artifact_validation import (
+    load_owner_seam_mask,
+    read_mapping_arrays,
+    validate_artifact_generation,
+)
+from hmlib.stitching.artifacts import artifact_stage, publish_artifacts, stitching_lock
 from hmlib.stitching.image_remapper import ImageRemapper, RemapImageInfoEx
 from hmlib.stitching.laplacian_blend import LaplacianBlend, simple_make_full
 from hmlib.stitching.seam import load_canvas_seam_mask, read_mapping_canvas_size
@@ -349,80 +354,72 @@ def make_seam_and_xor_masks(
     @param use_enblend_tool: If True, call external `enblend` for seam masks.
     @return: Pair ``(seam_tensor, xor_mask_tensor)``.
     """
-    assert images_and_positions is None or len(images_and_positions) == 2
-    seam_filename = os.path.join(dir_name, "seam_file.png")
-    xor_filename = os.path.join(dir_name, "xor_file.png")
-    seam_tensor = None
-    if not force and os.path.isfile(seam_filename):
-        mapping_file = os.path.join(dir_name, "mapping_0000.tif")
-        if os.path.exists(mapping_file):
-            mapping_file_mtime = datetime.datetime.fromtimestamp(
-                os.path.getmtime(mapping_file)
-            ).isoformat()
-            seam_file_mtime = datetime.datetime.fromtimestamp(
-                os.path.getmtime(seam_filename)
-            ).isoformat()
-            force = mapping_file_mtime >= seam_file_mtime
-            if force:
-                print(f"Recreating seam files because mapping file is newer ({mapping_file})")
-        else:
-            print(f"Warning: no mapping file found: {mapping_file}")
-    if force or not os.path.isfile(seam_filename):
-        if not use_enblend_tool and EnBlender is not None:
-            blender = EnBlender(
-                args=[
-                    "--save-seams",
-                    seam_filename,
-                    "--save-xor",
-                    xor_filename,
-                ]
-            )
+    from hmlib.stitching.configure_stitching import _save_stitched_reference_frame, get_enblend_bin
 
-            if not images_and_positions:
-                images_and_positions = get_images_and_positions(
-                    dir_name=dir_name, basename=basename
-                )
-
-            # Blend one image to create the seam file
-            _ = blender.blend_images(
-                left_image=make_cv_compatible_tensor(images_and_positions[0].image),
-                left_xy_pos=[images_and_positions[0].xpos, images_and_positions[0].ypos],
-                right_image=make_cv_compatible_tensor(images_and_positions[1].image),
-                right_xy_pos=[images_and_positions[1].xpos, images_and_positions[1].ypos],
-            )
-        else:
-            curr_dir = os.getcwd()
-            os.chdir(dir_name)
-            try:
-                cmd: List[str] = [
-                    "enblend",
-                    f"--save-masks={seam_filename}",
-                    "-o",
-                    f"{os.path.join(dir_name, 'panorama.tif')}",
-                    f"{os.path.join(dir_name, 'mapping_????.tif')}",
-                ]
-                os.system(" ".join(cmd))
-            finally:
-                os.chdir(curr_dir)
-
-    if os.path.exists(seam_filename):
-        mapping_files = sorted(Path(dir_name).glob(f"{basename}????.tif"))
+    if images_and_positions is not None and len(images_and_positions) != 2:
+        raise ValueError("Seam generation requires exactly two mapping images")
+    directory = Path(dir_name).resolve()
+    with stitching_lock(directory):
+        mapping_files = sorted(directory.glob(f"{basename}????.tif"))
         canvas_width, canvas_height = read_mapping_canvas_size(mapping_files)
-        seam_tensor = torch.from_numpy(
-            load_canvas_seam_mask(seam_filename, canvas_width, canvas_height)
+        seam_file = directory / "seam_file.png"
+        rebuild = force or not seam_file.is_file()
+        if not rebuild:
+            rebuild = any(
+                path.stat().st_mtime_ns > seam_file.stat().st_mtime_ns for path in mapping_files
+            )
+        if rebuild:
+            with artifact_stage(directory) as stage:
+                if not use_enblend_tool and EnBlender is not None:
+                    blender = EnBlender(
+                        args=[
+                            "--save-seams",
+                            str(stage / "seam_file.png"),
+                            "--save-xor",
+                            str(stage / "xor_file.png"),
+                        ]
+                    )
+                    if not images_and_positions:
+                        images_and_positions = get_images_and_positions(
+                            dir_name=str(directory), basename=basename
+                        )
+                    blender.blend_images(
+                        left_image=make_cv_compatible_tensor(images_and_positions[0].image),
+                        left_xy_pos=[images_and_positions[0].xpos, images_and_positions[0].ypos],
+                        right_image=make_cv_compatible_tensor(images_and_positions[1].image),
+                        right_xy_pos=[images_and_positions[1].xpos, images_and_positions[1].ypos],
+                    )
+                else:
+                    subprocess.run(
+                        [
+                            get_enblend_bin(),
+                            f"--save-masks={stage / 'seam_file.png'}",
+                            "-o",
+                            str(stage / "panorama.tif"),
+                            *map(str, mapping_files),
+                        ],
+                        check=True,
+                        cwd=stage,
+                    )
+                load_owner_seam_mask(stage / "seam_file.png", canvas_width, canvas_height)
+                if (stage / "xor_file.png").is_file():
+                    load_canvas_seam_mask(stage / "xor_file.png", canvas_width, canvas_height)
+                _save_stitched_reference_frame(stage)
+                names = ["seam_file.png"]
+                for name in ("xor_file.png", "panorama.tif", "s.png"):
+                    if (stage / name).is_file():
+                        names.append(name)
+                if "xor_file.png" not in names:
+                    (directory / "xor_file.png").unlink(missing_ok=True)
+                publish_artifacts(directory, stage, names)
+        seam_tensor = torch.from_numpy(load_owner_seam_mask(seam_file, canvas_width, canvas_height))
+        xor_file = directory / "xor_file.png"
+        xor_tensor = (
+            torch.from_numpy(load_canvas_seam_mask(xor_file, canvas_width, canvas_height))
+            if xor_file.is_file()
+            else None
         )
-
-    if False:
-        seam_w = int(image_width(seam_tensor))
-        v1 = seam_tensor[0][0]
-        v2 = seam_tensor[0][seam_w - 1]
-        seam_tensor[:, : seam_w // 2] = v1
-        seam_tensor[:, seam_w // 2 :] = v2
-    if os.path.exists(xor_filename):
-        xor_tensor = torch.from_numpy(cv2.imread(xor_filename, cv2.IMREAD_ANYDEPTH))
-    else:
-        xor_tensor = None
-    return seam_tensor, xor_tensor
+        return seam_tensor, xor_tensor
 
 
 def create_blender_config(
@@ -901,16 +898,7 @@ class ImageStitcher(torch.nn.Module):
 
 
 def get_mapping(dir_name: str, basename: str):
-    x_file = os.path.join(dir_name, f"{basename}_x.tif")
-    y_file = os.path.join(dir_name, f"{basename}_y.tif")
-    xpos, ypos = get_image_geo_position(os.path.join(dir_name, f"{basename}.tif"))
-
-    x_map = cv2.imread(x_file, cv2.IMREAD_ANYDEPTH)
-    y_map = cv2.imread(y_file, cv2.IMREAD_ANYDEPTH)
-    if x_map is None:
-        raise AssertionError(f"Could not read mapping file: {x_file}")
-    if y_map is None:
-        raise AssertionError(f"Could not read mapping file: {y_file}")
+    xpos, ypos, x_map, y_map = read_mapping_arrays(dir_name, basename)
     col_map = torch.from_numpy(x_map.astype(np.int64))
     row_map = torch.from_numpy(y_map.astype(np.int64))
     return xpos, ypos, col_map, row_map
@@ -966,109 +954,116 @@ def create_stitcher(
     use_cuda_pano_n: bool = False,
 ):
     """Create an ImageStitcher or CUDA panorama stitcher from mapping files."""
-    if use_cuda_pano:
-        assert dir_name
-        if input_image_sizes_wh is None:
-            input_image_sizes_wh = [left_image_size_wh, right_image_size_wh]
-        if len(input_image_sizes_wh) < 2:
-            raise ValueError("Expected at least 2 input views for stitching")
-        input_sizes = [WHDims(w, h) for (w, h) in input_image_sizes_wh]
-        size1 = input_sizes[0]
-        size2 = input_sizes[1]
-        if blend_mode != "laplacian":
-            # Hard seam
-            levels = 0
-        max_output_width_i = int(max_output_width) if max_output_width else 0
-        if len(input_sizes) == 2 and not use_cuda_pano_n:
+    with stitching_lock(dir_name):
+        basenames = (
+            tuple(f"{remapped_basename}{index:04d}" for index in range(len(input_image_sizes_wh)))
+            if input_image_sizes_wh
+            else (mapping_basename_1, mapping_basename_2)
+        )
+        validate_artifact_generation(dir_name, basenames=basenames)
+        if use_cuda_pano:
+            assert dir_name
+            if input_image_sizes_wh is None:
+                input_image_sizes_wh = [left_image_size_wh, right_image_size_wh]
+            if len(input_image_sizes_wh) < 2:
+                raise ValueError("Expected at least 2 input views for stitching")
+            input_sizes = [WHDims(w, h) for (w, h) in input_image_sizes_wh]
+            size1 = input_sizes[0]
+            size2 = input_sizes[1]
+            if blend_mode != "laplacian":
+                # Hard seam
+                levels = 0
+            max_output_width_i = int(max_output_width) if max_output_width else 0
+            if len(input_sizes) == 2 and not use_cuda_pano_n:
+                if dtype == torch.float32:
+                    stitcher = CudaStitchPanoF32(
+                        str(dir_name),
+                        batch_size,
+                        levels,
+                        size1,
+                        size2,
+                        minimize_blend=minimize_blend,
+                        max_output_width=max_output_width_i,
+                    )
+                elif dtype == torch.uint8:
+                    stitcher = CudaStitchPanoU8(
+                        str(dir_name),
+                        batch_size,
+                        levels,
+                        size1,
+                        size2,
+                        minimize_blend=minimize_blend,
+                        max_output_width=max_output_width_i,
+                    )
+                else:
+                    raise ValueError(f"Unsupported dtype for cuda pano: {dtype}")
+                return stitcher
+
+            if python_blender:
+                raise NotImplementedError("python_blender only supports 2 input views")
+
             if dtype == torch.float32:
-                stitcher = CudaStitchPanoF32(
+                return CudaStitchPanoNF32(
                     str(dir_name),
                     batch_size,
                     levels,
-                    size1,
-                    size2,
+                    input_sizes,
                     minimize_blend=minimize_blend,
-                    max_output_width=max_output_width_i,
+                    quiet=False,
                 )
-            elif dtype == torch.uint8:
-                stitcher = CudaStitchPanoU8(
+            if dtype == torch.uint8:
+                return CudaStitchPanoNU8(
                     str(dir_name),
                     batch_size,
                     levels,
-                    size1,
-                    size2,
+                    input_sizes,
                     minimize_blend=minimize_blend,
-                    max_output_width=max_output_width_i,
+                    quiet=False,
                 )
-            else:
-                raise ValueError(f"Unsupported dtype for cuda pano: {dtype}")
-            return stitcher
+            raise ValueError(f"Unsupported dtype for cuda pano N: {dtype}")
 
-        if python_blender:
-            raise NotImplementedError("python_blender only supports 2 input views")
+        blender_config: BlenderConfig = create_blender_config(
+            mode=blend_mode,
+            dir_name=dir_name,
+            basename=remapped_basename,
+            device=device,
+            levels=levels,
+            lazy_init=False,
+            interpolation=interpolation,
+        )
 
-        if dtype == torch.float32:
-            return CudaStitchPanoNF32(
-                str(dir_name),
-                batch_size,
-                levels,
-                input_sizes,
-                minimize_blend=minimize_blend,
-                quiet=False,
-            )
-        if dtype == torch.uint8:
-            return CudaStitchPanoNU8(
-                str(dir_name),
-                batch_size,
-                levels,
-                input_sizes,
-                minimize_blend=minimize_blend,
-                quiet=False,
-            )
-        raise ValueError(f"Unsupported dtype for cuda pano N: {dtype}")
+        xpos_1, ypos_1, col_map_1, row_map_1 = get_mapping(dir_name, mapping_basename_1)
+        xpos_2, ypos_2, col_map_2, row_map_2 = get_mapping(dir_name, mapping_basename_2)
 
-    blender_config: BlenderConfig = create_blender_config(
-        mode=blend_mode,
-        dir_name=dir_name,
-        basename=remapped_basename,
-        device=device,
-        levels=levels,
-        lazy_init=False,
-        interpolation=interpolation,
-    )
+        remap_info_1 = RemapImageInfoEx()
+        remap_info_1.src_width = int(left_image_size_wh[0])
+        remap_info_1.src_height = int(left_image_size_wh[1])
+        remap_info_1.col_map = col_map_1
+        remap_info_1.row_map = row_map_1
+        remap_info_1.xpos = xpos_1
+        remap_info_1.ypos = ypos_1
 
-    xpos_1, ypos_1, col_map_1, row_map_1 = get_mapping(dir_name, mapping_basename_1)
-    xpos_2, ypos_2, col_map_2, row_map_2 = get_mapping(dir_name, mapping_basename_2)
+        remap_info_2 = RemapImageInfoEx()
+        remap_info_2.src_width = int(right_image_size_wh[0])
+        remap_info_2.src_height = int(right_image_size_wh[1])
+        remap_info_2.col_map = col_map_2
+        remap_info_2.row_map = row_map_2
+        remap_info_2.xpos = xpos_2
+        remap_info_2.ypos = ypos_2
 
-    remap_info_1 = RemapImageInfoEx()
-    remap_info_1.src_width = int(left_image_size_wh[0])
-    remap_info_1.src_height = int(left_image_size_wh[1])
-    remap_info_1.col_map = col_map_1
-    remap_info_1.row_map = row_map_1
-    remap_info_1.xpos = xpos_1
-    remap_info_1.ypos = ypos_1
-
-    remap_info_2 = RemapImageInfoEx()
-    remap_info_2.src_width = int(right_image_size_wh[0])
-    remap_info_2.src_height = int(right_image_size_wh[1])
-    remap_info_2.col_map = col_map_2
-    remap_info_2.row_map = row_map_2
-    remap_info_2.xpos = xpos_2
-    remap_info_2.ypos = ypos_2
-
-    stitcher = ImageStitcher(
-        batch_size=batch_size,
-        device=device,
-        remap_image_info=[remap_info_1, remap_info_2],
-        blender_config=blender_config,
-        dtype=dtype,
-        use_python_blender=python_blender,
-        minimize_blend=minimize_blend,
-        draw=draw,
-    )
-    if device is not None:
-        stitcher = stitcher.to(device=device)
-    return stitcher
+        stitcher = ImageStitcher(
+            batch_size=batch_size,
+            device=device,
+            remap_image_info=[remap_info_1, remap_info_2],
+            blender_config=blender_config,
+            dtype=dtype,
+            use_python_blender=python_blender,
+            minimize_blend=minimize_blend,
+            draw=draw,
+        )
+        if device is not None:
+            stitcher = stitcher.to(device=device)
+        return stitcher
 
 
 def ensure_rgba(tensor: torch.Tensor) -> torch.Tensor:
@@ -1189,9 +1184,11 @@ def blend_video(
         else:
             # Hard-seam or other non-laplacian GPU modes: force single level.
             num_levels = 0
-        stitcher: CudaStitchPanoU8 = CudaStitchPanoU8(
-            dir_name, batch_size, num_levels, size1, size2, minimize_blend
-        )
+        with stitching_lock(dir_name):
+            validate_artifact_generation(dir_name)
+            stitcher: CudaStitchPanoU8 = CudaStitchPanoU8(
+                dir_name, batch_size, num_levels, size1, size2, minimize_blend
+            )
         canvas_width = stitcher.canvas_width()
         canvas_height = stitcher.canvas_height()
     else:

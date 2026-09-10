@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
+from stitching_fixtures import write_generation
+
 from hmlib.stitching.configure_stitching import (
     _stitch_game_lock,
     _stitch_project_is_complete,
@@ -53,4 +55,6 @@ def should_reject_partial_stitching_project_cache(tmp_path):
         (tmp_path / f"mapping_{index:04d}_x.tif").touch()
         (tmp_path / f"mapping_{index:04d}_y.tif").touch()
 
+    assert not _stitch_project_is_complete(project_path, autooptimiser_path)
+    write_generation(tmp_path)
     assert _stitch_project_is_complete(project_path, autooptimiser_path)

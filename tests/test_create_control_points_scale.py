@@ -61,7 +61,8 @@ def should_delegate_frame_calibration_with_settings_device_and_temporary_inputs(
 
     def build(**kwargs):
         builds.append(kwargs)
-        assert kwargs["control_points"] is points
+        assert not matches
+        assert kwargs["control_points_factory"]() is points
         for image in kwargs["image_files"]:
             assert Path(image).parent != tmp_path
             np.testing.assert_array_equal(cv2.imread(image), _frame())

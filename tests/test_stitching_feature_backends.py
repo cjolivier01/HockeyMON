@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
 from pathlib import Path
 
 import cv2
@@ -7,6 +9,7 @@ import numpy as np
 import pytest
 import tifffile
 import torch
+from stitching_fixtures import write_mapping_files, write_seam
 
 from hmlib.stitching import configure_stitching
 from hmlib.stitching import control_points as control_points_module
@@ -186,8 +189,8 @@ def should_use_native_mapping_backend_in_project_builder(
 ) -> None:
     left_file = tmp_path / "left.png"
     right_file = tmp_path / "right.png"
-    left_file.touch()
-    right_file.touch()
+    assert cv2.imwrite(str(left_file), np.zeros((3, 4, 3), np.uint8))
+    assert cv2.imwrite(str(right_file), np.zeros((3, 4, 3), np.uint8))
     project_file = tmp_path / "hm_project.pto"
     commands: list[list[str]] = []
     captured: dict[str, str] = {}
@@ -196,9 +199,11 @@ def should_use_native_mapping_backend_in_project_builder(
     def fake_command(command: list[str]) -> None:
         commands.append(command)
         if command[0] == "pto_gen":
-            project_file.write_text("# hugin project\n# control points\n", encoding="utf-8")
+            Path(command[command.index("-o") + 1]).write_text(
+                "# hugin project\n# control points\n", encoding="utf-8"
+            )
         elif command[0] == "enblend":
-            (tmp_path / "seam_file.png").touch()
+            write_seam(Path(command[command.index("-o") + 1]).parent)
 
     def fake_control_points(*_args, matcher: str, **_kwargs):
         captured["matcher"] = matcher
@@ -206,12 +211,7 @@ def should_use_native_mapping_backend_in_project_builder(
 
     def fake_mapping_files(*_args, **_kwargs):
         captured["mapping_backend"] = mapping_backend
-        outputs = [tmp_path / "mapping_0000.tif", tmp_path / "mapping_0001.tif"]
-        for output in outputs:
-            output.touch()
-            output.with_name(f"{output.stem}_x.tif").touch()
-            output.with_name(f"{output.stem}_y.tif").touch()
-        return [str(output) for output in outputs]
+        return write_mapping_files(_args[2])
 
     monkeypatch.setattr(configure_stitching, "_run_stitching_command", fake_command)
     monkeypatch.setattr(configure_stitching, "configure_control_points", fake_control_points)
@@ -277,12 +277,26 @@ def should_reuse_points_only_when_matcher_is_unchanged(
 ) -> None:
     left_file = tmp_path / "left.png"
     right_file = tmp_path / "right.png"
-    left_file.touch()
-    right_file.touch()
+    assert cv2.imwrite(str(left_file), np.zeros((3, 4, 3), np.uint8))
+    assert cv2.imwrite(str(right_file), np.zeros((3, 4, 3), np.uint8))
     project_file = tmp_path / "hm_project.pto"
     project_file.write_text("# hugin project\n# control points\n", encoding="utf-8")
+    previous_settings = replace(
+        configure_stitching.read_stitching_settings(
+            control_point_matcher="dedode-lightglue", mapping_backend="opencv-magsac"
+        ),
+        max_control_points=20,
+    )
     (tmp_path / ".stitching_artifacts.json").write_text(
-        '{"control_point_matcher": "dedode-lightglue", "mapping_backend": "nona"}\n',
+        json.dumps(
+            {
+                **previous_settings.manifest(),
+                "input_images": configure_stitching._image_content_provenance(
+                    [left_file, right_file]
+                ),
+                "output_scale": "1",
+            }
+        ),
         encoding="utf-8",
     )
     points = torch.tensor([[0, 0], [3, 0], [3, 2], [0, 2]], dtype=torch.float32)
@@ -294,16 +308,15 @@ def should_reuse_points_only_when_matcher_is_unchanged(
         return {"m_kpts0": points, "m_kpts1": points}
 
     def fake_mapping_files(*_args, **_kwargs):
-        outputs = [tmp_path / "mapping_0000.tif", tmp_path / "mapping_0001.tif"]
-        for output in outputs:
-            output.touch()
-            output.with_name(f"{output.stem}_x.tif").touch()
-            output.with_name(f"{output.stem}_y.tif").touch()
-        return [str(output) for output in outputs]
+        return write_mapping_files(_args[2])
 
     def fake_command(command: list[str]) -> None:
+        if command[0] == "pto_gen":
+            Path(command[command.index("-o") + 1]).write_text(
+                "# hugin project\n# control points\n", encoding="utf-8"
+            )
         if command[0] == "enblend":
-            (tmp_path / "seam_file.png").touch()
+            write_seam(Path(command[command.index("-o") + 1]).parent)
 
     monkeypatch.setattr(configure_stitching, "configure_control_points", fake_control_points)
     monkeypatch.setattr(

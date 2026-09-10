@@ -9,6 +9,7 @@ import argparse
 import os
 import re
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Tuple, Union
@@ -409,6 +410,7 @@ def configure_stitching(
     game_config: Optional[dict] = None,
     run_autooptimizer: Optional[bool] = None,
     settings: Optional[StitchingSettings] = None,
+    game_id: Optional[str] = None,
 ) -> bool:
     """Calibrate two BGR frames using the shared project builder.
 
@@ -462,9 +464,10 @@ def configure_stitching(
         for image, frame in zip(images, (frame1, frame2)):
             if not cv2.imwrite(image, frame):
                 raise OSError(f"Failed to save calibration frame: {image}")
-        control_points = calculate_control_points(
-            frame1,
-            frame2,
+        control_points_factory = partial(
+            calculate_control_points,
+            images[0],
+            images[1],
             max_control_points=max_control_points,
             device=device,
             matcher=settings.control_point_matcher,
@@ -480,7 +483,9 @@ def configure_stitching(
             settings=settings,
             lens_calibration=lens_calibration,
             lens_calibration_resolved=True,
-            control_points=control_points,
+            control_points_factory=control_points_factory,
+            game_id=game_id,
+            game_config=game_config,
         )
 
 
@@ -625,6 +630,7 @@ def main() -> None:
             device=device,
             settings=settings,
             game_config=game_config,
+            game_id=args.game_id,
         )
         if result is not True:
             raise RuntimeError("Stitching calibration did not produce a usable project")

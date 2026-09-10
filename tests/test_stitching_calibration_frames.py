@@ -95,6 +95,9 @@ def should_reject_changing_camera_geometry_and_invalid_points(tmp_path):
 def should_retry_rejected_geometry_and_preserve_late_failures(monkeypatch, tmp_path, terminal):
     extracted = []
     attempts = []
+    for name in ("left.mp4", "right.mp4"):
+        (tmp_path / name).write_bytes(b"video")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         configure_stitching, "BasicVideoInfo", lambda path: SimpleNamespace(frame_count=100)
     )
@@ -114,8 +117,8 @@ def should_retry_rejected_geometry_and_preserve_late_failures(monkeypatch, tmp_p
 
     def build(**kwargs):
         attempts.append(kwargs)
-        # Each PTO uses stable references, never filenames in a deleted sample directory.
-        assert [Path(name).name for name in kwargs["image_files"]] == ["left.png", "right.png"]
+        # The transactional builder owns stable image publication.
+        assert all(Path(name).is_file() for name in kwargs["image_files"])
         if len(attempts) == 1:
             raise failure
         return True
@@ -154,9 +157,20 @@ def should_keep_frame_count_in_cache_provenance():
 
 def should_rebuild_user_edited_pto_without_replacing_points(monkeypatch, tmp_path):
     settings = replace(read_stitching_settings(), max_control_points=100)
+    videos = [tmp_path / "left.mp4", tmp_path / "right.mp4"]
+    for video in videos:
+        video.write_bytes(b"source video")
     # Use the production manifest filename to keep this fixture tied to its schema.
     (tmp_path / configure_stitching._STITCH_ARTIFACT_MANIFEST).write_text(
-        json.dumps(settings.manifest())
+        json.dumps(
+            {
+                **settings.manifest(),
+                "source_videos": configure_stitching._file_provenance(videos),
+                "source_frame_offsets": "[2, 1]",
+                "stitch_frame_time": "",
+                "output_scale": "1",
+            }
+        )
     )
     for name in ("left.png", "right.png", "autooptimiser_out.pto", "hm_project.pto"):
         (tmp_path / name).write_text("user-edited")
@@ -180,8 +194,8 @@ def should_rebuild_user_edited_pto_without_replacing_points(monkeypatch, tmp_pat
     monkeypatch.setattr(configure_stitching, "calibration_candidates", unexpected)
     configure_stitching.configure_video_stitching(
         str(tmp_path),
-        "left.mp4",
-        "right.mp4",
+        str(videos[0]),
+        str(videos[1]),
         100,
         left_frame_offset=2,
         right_frame_offset=1,
