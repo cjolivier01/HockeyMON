@@ -49,6 +49,13 @@ format bounds payloads to 16 MiB, 64 boxes, 4,096 players and 4,096 history
 entries per player, with a cumulative value budget. It contains no object
 memory dumps, addresses, ABI layout or external file references.
 
+Persisted arenas use nonnegative pixel coordinates up to 1,000,000; fixed
+aspect ratios are between 1/1,024 and 1,024. These deliberately broad video
+geometry limits also bound native diagnostic work and exclude unusable float
+arithmetic. Validation checks representable centers/scaled/aspect-constrained
+boxes and the dynamic projection's positive horizontal span. Initial camera
+boxes may still extend outside their arena, as native initialization permits.
+
 Maintain `kPlayTrackerSnapshotSchema` when the state format changes and
 `kPlayTrackerSnapshotImplementation` when camera-policy interpretation changes.
 Record the application/native revision and execution configuration in capture

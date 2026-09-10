@@ -519,15 +519,39 @@ class Reader : private ValueBudget {
 };
 
 bool positive_box(const BBox& box) {
-  return box.right > box.left && box.bottom > box.top;
+  return box.right > box.left && box.bottom > box.top &&
+      std::isfinite(box.width()) && std::isfinite(box.height()) &&
+      std::isfinite(box.left + box.right) &&
+      std::isfinite(box.top + box.bottom);
 }
 
 bool safe_counter(IntValue value) {
   return value >= 0 && value < std::numeric_limits<IntValue>::max();
 }
 
+void validate_dynamic_projection(const AllLivingBoxConfig& c, float y) {
+  if (c.dynamic_acceleration_scaling == 0)
+    return;
+  const auto& arena = *c.arena_box;
+  const float half_height = arena.height() / 2;
+  const float percent_y = (std::min(half_height, y) - arena.top) / half_height;
+  const float distance =
+      std::sin(c.arena_angle_from_vertical) * half_height * (1 - percent_y);
+  const float adjusted_width = arena.width() / 2 - distance;
+  require(
+      std::isfinite(adjusted_width) && adjusted_width > 0,
+      "dynamic arena projection has no usable horizontal span");
+}
+
 void validate_box_config(const AllLivingBoxConfig& c) {
-  require(c.arena_box && positive_box(*c.arena_box), "missing/empty arena");
+  // Pixel geometry is deliberately bounded well beyond supported video
+  // canvases. Besides float precision, this bounds the native diagnostic's
+  // y -= 100 loop; sufficiently large floats would never advance that loop.
+  require(
+      c.arena_box && positive_box(*c.arena_box) && c.arena_box->left >= 0 &&
+          c.arena_box->top >= 0 && c.arena_box->right <= 1000000 &&
+          c.arena_box->bottom <= 1000000,
+      "arena must have positive finite extent within the million-pixel coordinate domain");
   require(
       c.max_width >= 0 && c.max_height >= 0 && c.min_width >= 0 &&
           c.min_height >= 0 && c.max_width <= c.arena_box->width() &&
@@ -544,8 +568,34 @@ void validate_box_config(const AllLivingBoxConfig& c) {
       "negative motion constraint");
   require(
       c.scale_dest_width > 0 && c.scale_dest_height > 0 &&
-          (!c.fixed_aspect_ratio || *c.fixed_aspect_ratio > 0),
+          (!c.fixed_aspect_ratio ||
+           (*c.fixed_aspect_ratio >= 1.0f / 1024 &&
+            *c.fixed_aspect_ratio <= 1024)),
       "invalid box scale/aspect ratio");
+  const auto center = c.arena_box->center();
+  const float seed_width = c.arena_box->width() * c.scale_dest_width;
+  const float seed_height = c.arena_box->height() * c.scale_dest_height;
+  require(
+      std::isfinite(seed_width) && std::isfinite(seed_height) &&
+          center.x - seed_width / 2 < center.x + seed_width / 2 &&
+          center.y - seed_height / 2 < center.y + seed_height / 2 &&
+          std::isfinite(center.x + seed_width / 2) &&
+          std::isfinite(center.y + seed_height / 2),
+      "initial scaled box is not representable");
+  if (c.fixed_aspect_ratio) {
+    const float max_width = c.max_width ? c.max_width : c.arena_box->width();
+    const float max_height =
+        c.max_height ? c.max_height : c.arena_box->height();
+    const float height =
+        std::min(max_height, max_width / *c.fixed_aspect_ratio);
+    const float width = height * *c.fixed_aspect_ratio;
+    // Even a finite aspect ratio can collapse an axis after native size
+    // clamping and center +/- half-size arithmetic.
+    require(
+        c.arena_box->right - width / 2 < c.arena_box->right + width / 2 &&
+            c.arena_box->bottom - height / 2 < c.arena_box->bottom + height / 2,
+        "aspect-constrained box cannot be represented in arena coordinates");
+  }
   require(
       !c.sticky_translation || c.sticky_size_ratio_to_frame_width > 0,
       "invalid sticky translation divisor");
@@ -553,6 +603,10 @@ void validate_box_config(const AllLivingBoxConfig& c) {
       c.dynamic_acceleration_scaling == 0 ||
           (c.sticky_translation && c.arena_angle_from_vertical != 0),
       "dynamic acceleration requires sticky translation and a nonzero arena angle");
+  // The native projection is affine up to half-height and constant above it.
+  // These endpoints cover its arena and diagnostic input domain.
+  validate_dynamic_projection(c, 0);
+  validate_dynamic_projection(c, c.arena_box->bottom);
   require(
       safe_counter(c.stop_translation_on_dir_change_delay) &&
           safe_counter(c.cancel_stop_hysteresis_frames) &&
@@ -747,6 +801,7 @@ void validate_snapshot(const PlayTrackerSnapshot& snapshot) {
     const auto& box = snapshot.living_boxes[i];
     validate_box_config(box.config);
     require(positive_box(box.bbox), "empty/reversed camera box");
+    validate_dynamic_projection(box.config, box.bbox.center().y);
     // Native construction scales the initial arena before the first forward
     // step clamps it. A scale above one legitimately starts beyond the canvas.
     require(

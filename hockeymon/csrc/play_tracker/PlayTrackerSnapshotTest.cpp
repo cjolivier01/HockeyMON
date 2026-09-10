@@ -271,6 +271,39 @@ void rejects_malformed_state() {
   });
   check([](auto& s) { s.detector.tracks[0].centers.clear(); });
   check([](auto& s) { s.config.living_boxes[0].arena_box.reset(); });
+  check([](auto& s) {
+    s.config.living_boxes[0].arena_box = BBox(-100, -100, 1900, 900);
+  });
+  check([](auto& s) {
+    s.living_boxes[0].config.arena_box = BBox(-100, -100, 1900, 900);
+  });
+  check([](auto& s) {
+    s.living_boxes[0].bbox = BBox(
+        -std::numeric_limits<float>::max(),
+        0,
+        std::numeric_limits<float>::max(),
+        100);
+  });
+  check([](auto& s) { s.living_boxes[0].config.fixed_aspect_ratio = 1e-40f; });
+  check([](auto& s) { s.living_boxes[0].config.fixed_aspect_ratio = 1e-20f; });
+  check([](auto& s) {
+    s.living_boxes[0].config.arena_box = BBox(2e38f, 0, 3e38f, 1000);
+  });
+  check([](auto& s) {
+    auto& c = s.living_boxes[0].config;
+    c.arena_box = BBox(0, 0, 2000, 4000);
+    c.sticky_translation = true;
+    c.dynamic_acceleration_scaling = 0.5f;
+    c.arena_angle_from_vertical = 1.5f;
+  });
+  check([](auto& s) {
+    auto& c = s.living_boxes[0].config;
+    c.arena_box = BBox(0, 0, 2e10f, 1e10f);
+    c.sticky_translation = true;
+    c.dynamic_acceleration_scaling = 0.5f;
+    c.arena_angle_from_vertical = 1.5f;
+  });
+  check([](auto& s) { s.living_boxes[0].config.scale_dest_width = 1e-40f; });
   const auto encoded = serialize_snapshot(valid);
   expect_invalid([&] { deserialize_snapshot(encoded + "extra"); });
   expect_invalid(
