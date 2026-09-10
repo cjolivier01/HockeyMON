@@ -378,10 +378,33 @@ void initial_scaled_arena_restores_before_first_observation() {
   compare_results(advance(tracker, 0), advance(*restored, 0));
 }
 
+void small_arena_restores_in_fresh_process() {
+  PlayTrackerConfig settings;
+  AllLivingBoxConfig box;
+  box.arena_box = BBox(0, 0, 10, 5);
+  box.max_width = 10;
+  box.max_height = 5;
+  box.min_width = box.min_height = 1;
+  box.sticky_translation = true;
+  box.sticky_size_ratio_to_frame_width = 20;
+  box.dynamic_acceleration_scaling = 0.5f;
+  box.arena_angle_from_vertical = 1;
+  settings.living_boxes.push_back(box);
+  PlayTracker source(*box.arena_box, settings);
+  auto restored = PlayTracker::from_snapshot(
+      deserialize_snapshot(serialize_snapshot(source.snapshot())));
+  std::vector<size_t> ids;
+  std::vector<BBox> boxes;
+  compare_results(restored->forward(ids, boxes), source.forward(ids, boxes));
+}
+
 } // namespace
 
 int main() {
   try {
+    // Must precede every other forward call: the geometry diagnostic is
+    // intentionally run only once per process by the native tracker.
+    small_arena_restores_in_fresh_process();
     continuation_matches_uninterrupted();
     repeated_trials_are_independent();
     rejects_malformed_state();

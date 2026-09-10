@@ -663,10 +663,11 @@ void TranslatingBox::test_arena_edge_position_scale() {
   assert(is_close(-far_left, far_right));
   assert(is_close(-left_of_center, right_of_center));
   assert(far_left < left_of_center && far_right > right_of_center);
-  // Don't want to restrict/define the algorithm in this test, so just make sure
-  // it's some reasonable value.
-  assert(std::fabs(1.0 - std::abs(far_left)) < kSmallTestDistance / 10);
-  assert(std::abs(left_of_center) < kSmallTestDistance / 10);
+  // These results are normalized ratios. A pixel-distance tolerance would
+  // reject small arenas even though the same relative geometry is valid.
+  constexpr FloatValue kNormalizedTolerance = 0.1f;
+  assert(std::fabs(1.0 - std::abs(far_left)) < kNormalizedTolerance);
+  assert(std::abs(left_of_center) < kNormalizedTolerance);
 
   // Now check difference in Y changes
   FloatValue adjusted_x_last = 0, first_adjusted_x = 0.0;
