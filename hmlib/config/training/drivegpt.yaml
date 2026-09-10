@@ -26,7 +26,7 @@ features:
 sampling:
   seq_len: 32
   sample_stride: 1
-  # Games have equal probability; runs are weighted by eligible window count.
+  # Games are uniform within worker shards; runs are weighted by window count.
   run_sampling: windows
   seed: 0
   data_workers: 2

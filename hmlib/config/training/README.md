@@ -58,7 +58,8 @@ configuration paths in a training YAML are relative to that YAML; dataset roots
 are relative to their dataset YAML. `--dataset-root` overrides the root on a host.
 Output/checkpoint paths follow normal CLI working-directory semantics.
 
-Games are sampled uniformly. `run_sampling: windows` weights contiguous runs by
+Games are sampled uniformly within each worker's shard. Unequal shard sizes
+slightly change overall game probabilities. `run_sampling: windows` weights contiguous runs by
 their number of eligible windows; `uniform` gives each run equal probability.
 `sample_stride` controls eligible start positions and does not skip frames within
 a sequence. Numeric frame gaps and camera-policy changes split sequences.
