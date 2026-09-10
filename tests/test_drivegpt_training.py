@@ -13,7 +13,7 @@ from hmlib.camera.camera_gpt import CameraPanZoomGPT, unpack_gpt_checkpoint
 from hmlib.camera.camera_gpt_dataset import CameraPanZoomGPTIterableDataset, GameCsvPaths
 from hmlib.camera.camera_training_config import catalog_split, expand_training_config
 from hmlib.camera.camera_transformer import CameraNorm
-from hmlib.cli.camgpt_train import _maybe_resume, _target_met
+from hmlib.cli.camgpt_train import TrainingRollout, _maybe_resume, _target_met
 from hmlib.cli.drivegpt_dataset import choose_generation, publish_dataset
 
 
@@ -157,7 +157,46 @@ def should_require_both_box_metrics_to_meet_target():
     assert _target_met({"iou_slow": 0.97, "iou_fast": 0.97}, 0.97)
 
 
-def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path):
+@pytest.mark.parametrize("mode", ["legacy", "teacher", "feedback"])
+def should_bound_training_context_and_preserve_feedback(mode):
+    class RecordingModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(0.01))
+            self.inputs = []
+
+        def forward(self, features):
+            self.inputs.append(features.detach().clone())
+            return features[..., -8:] + self.weight
+
+    model = RecordingModel()
+    rollout = TrainingRollout(model, aspect=None, context_window=4)
+    base = torch.arange(8.0).reshape(1, 8, 1)
+    y = torch.full((1, 8, 8), 0.2)
+    previous = torch.full((1, 8), 0.1)
+    if mode == "legacy":
+        batch = {"x": torch.cat([base, y], dim=-1)}
+    else:
+        batch = {"base": base, "prev0": previous, "y": y}
+    output = rollout(batch, probability=float(mode == "feedback"))
+    assert output.shape == y.shape
+    assert [x.shape[1] for x in model.inputs] == [1, 2, 3, 4, 4, 4, 4, 4]
+    assert torch.equal(model.inputs[-1][0, :, 0], torch.arange(4.0, 8.0))
+    if mode == "feedback":
+        assert torch.allclose(output[0, :, 0], 0.11 + torch.arange(8.0) * 0.01)
+        # Prediction feedback is detached: the direct weight gradient is one,
+        # independent of rollout length.
+        output.mean().backward()
+        assert torch.allclose(model.weight.grad, torch.tensor(1.0))
+    elif mode == "teacher":
+        assert torch.allclose(output[:, 0], previous + 0.01)
+        assert torch.allclose(output[:, 1:], y[:, 1:] + 0.01)
+    else:
+        assert torch.allclose(output, y + 0.01)
+
+
+@pytest.mark.parametrize("target_mode,output_dim", [("slow_tlwh", 4), ("slow_fast_tlwh", 8)])
+def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path, target_mode, output_dim):
     source, dataset = tmp_path / "source", tmp_path / "dataset"
     for i in range(3):
         _game(source / f"game-{i}", offset=i)
@@ -176,6 +215,7 @@ def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path):
         "hmlib.cli.camgpt_train",
         "--model-kind=drivegpt",
         "--drivegpt-init=none",
+        f"--target-mode={target_mode}",
         "--dataset-config",
         str(dataset / "dataset.yaml"),
         "--no-pose",
@@ -185,8 +225,11 @@ def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path):
         "--nlayers=1",
         "--dim-feedforward=32",
         "--seq-len=4",
+        "--rollout-len=8",
         "--val-seq-len=8",
         "--batch-size=2",
+        "--val-batch-size=2",
+        "--frames=64",
         "--steps=2",
         "--lr=0.00001",
         "--ss-prob-start=0.5",
@@ -216,6 +259,8 @@ def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path):
     assert result.returncode == 0, result.stdout
     checkpoint = torch.load(output, map_location="cpu", weights_only=False)
     assert checkpoint["step"] == 1
+    assert checkpoint["window"] == 4
+    assert checkpoint["model"]["d_out"] == output_dim
     state = checkpoint["training_state"]
     assert state["target_met"]
     assert state["evaluation"]["world_size"] == 2
@@ -225,6 +270,7 @@ def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path):
         json.loads(line) for line in output.with_suffix(".metrics.jsonl").read_text().splitlines()
     ]
     assert [line["kind"] for line in lines] == ["run", "train", "validation", "finished"]
+    assert lines[0]["step_budget"] == 2
     # A newer best checkpoint must win over an older numbered checkpoint.
     checkpoint["step"] = 5
     torch.save(checkpoint, output)
@@ -248,7 +294,7 @@ def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path):
     assert restored["best_val"] == state["best_val"]
     # The step-5 weights have only step-1 validation: resuming must not certify them.
     result = subprocess.run(
-        command + ["--resume"],
+        command + ["--resume", "--batch-size=1", "--rollout-len=10"],
         env=environment,
         text=True,
         stdout=subprocess.PIPE,
@@ -256,5 +302,11 @@ def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path):
         timeout=90,
     )
     assert result.returncode == 0, result.stdout
-    final_line = json.loads(output.with_suffix(".metrics.jsonl").read_text().splitlines()[-1])
+    resumed_lines = [
+        json.loads(line) for line in output.with_suffix(".metrics.jsonl").read_text().splitlines()
+    ]
+    run = next(line for line in reversed(resumed_lines) if line["kind"] == "run")
+    assert run["args"]["batch_size"] == 1 and run["args"]["rollout_len"] == 10
+    assert run["evaluation"] == state["evaluation"]
+    final_line = resumed_lines[-1]
     assert final_line["kind"] == "finished" and not final_line["target_met"]
