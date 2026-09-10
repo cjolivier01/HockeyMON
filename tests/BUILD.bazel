@@ -849,3 +849,16 @@ sh_test(
         "PYTHON_BIN_PATH",
     ],
 )
+
+sh_test(
+    name = "test_player_size_filter",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_player_size_filter.py", "numpy", "pytest", "torch"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_player_size_filter.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)

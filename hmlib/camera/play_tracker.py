@@ -21,7 +21,7 @@ from hmlib.bbox.box_functions import (
     get_enclosing_box,
     height,
     make_box_at_center,
-    remove_largest_bbox,
+    player_size_exclusion_mask,
     scale_box,
     tlwh_to_tlbr_single,
     width,
@@ -274,6 +274,24 @@ class PlayTracker(torch.nn.Module):
                     ex,
                 )
         self._cam_ignore_largest: bool = bool(cam_ignore_largest)
+        # Defaults preserve older rink/game configs that only set the enable switch.
+        self._cam_ignore_largest_count = get_nested_value(
+            game_config, "rink.tracking.cam_ignore_largest_count", 1
+        )
+        self._cam_ignore_oversized = get_nested_value(
+            game_config, "rink.tracking.cam_ignore_oversized", False
+        )
+        self._cam_oversized_percent = get_nested_value(
+            game_config, "rink.tracking.cam_oversized_percent", 100.0
+        )
+        if not isinstance(self._cam_ignore_oversized, bool):
+            raise ValueError("cam_ignore_oversized must be a boolean")
+        player_size_exclusion_mask(
+            torch.empty((0, 4)),
+            self._cam_ignore_largest_count,
+            self._cam_ignore_oversized,
+            self._cam_oversized_percent,
+        )
         self._no_wide_start: bool = bool(no_wide_start)
         self._debug_play_tracker: bool = bool(debug_play_tracker)
         self._plot_moving_boxes: bool = bool(plot_moving_boxes) or debug_play_tracker
@@ -608,6 +626,9 @@ class PlayTracker(torch.nn.Module):
                     current_roi_aspect_config,
                 ]
                 pt_config.ignore_largest_bbox = self._cam_ignore_largest
+                pt_config.ignore_largest_bbox_count = self._cam_ignore_largest_count
+                pt_config.ignore_oversized_bboxes = self._cam_ignore_oversized
+                pt_config.oversized_bbox_percent = self._cam_oversized_percent
                 pt_config.no_wide_start = self._no_wide_start
                 # Scale play-detector velocities and frame-based windows for non-30fps inputs.
                 pt_config.play_detector.fps_speed_scale = fps_speed_scale
@@ -1138,7 +1159,8 @@ class PlayTracker(torch.nn.Module):
                     largest_bbox = from_bbox(playtracker_results.largest_tracking_bbox.bbox)
                     largest_bbox = batch_tlbrs_to_tlwhs(largest_bbox.unsqueeze(0)).squeeze(0)
                     vis_ignored_tracking_ids = {
-                        playtracker_results.largest_tracking_bbox.tracking_id
+                        track.tracking_id
+                        for track in playtracker_results.size_ignored_tracking_boxes
                     }
                 else:
                     largest_bbox = None
@@ -1235,11 +1257,14 @@ class PlayTracker(torch.nn.Module):
 
             else:
                 largest_bbox = None
-                if self._cam_ignore_largest and len(online_tlwhs):
-                    # Don't remove unless we have at least 4 online items being tracked
-                    online_tlwhs, mask, largest_bbox = remove_largest_bbox(
-                        online_tlwhs, min_boxes=4
+                if len(online_tlwhs):
+                    mask = player_size_exclusion_mask(
+                        online_tlwhs,
+                        self._cam_ignore_largest_count if self._cam_ignore_largest else 0,
+                        self._cam_ignore_oversized,
+                        self._cam_oversized_percent,
                     )
+                    online_tlwhs = online_tlwhs[mask]
                     online_ids = online_ids[mask]
 
                 self._hockey_mon.append_online_objects(online_ids, online_tlwhs)

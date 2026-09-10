@@ -30,3 +30,9 @@ cc_test(
     srcs = ["ResizingBoxTest.cpp"],
     deps = [":play_tracker"],
 )
+
+cc_test(
+    name = "player_size_filter_test",
+    srcs = ["PlayerSizeFilterTest.cpp"],
+    deps = [":play_tracker"],
+)

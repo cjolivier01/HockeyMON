@@ -244,7 +244,16 @@ rink:
     #
     # Some tracking config
     #
+    # Legacy switch for count-based filtering. False keeps existing rink overrides disabled.
     cam_ignore_largest: true
+    # Largest player areas to exclude from play tracking; 0 disables this filter.
+    # Size filters always leave at least three players.
+    cam_ignore_largest_count: 1
+    # Optional area filter, applied after the largest-count exclusions.
+    cam_ignore_oversized: false
+    # Percent larger than the mean area of the OTHER remaining players.
+    # 100 means more than twice that average; decisions use the same snapshot.
+    cam_oversized_percent: 100
   camera:
     #
     # Rink-related tracking config

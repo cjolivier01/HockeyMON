@@ -22,7 +22,11 @@ struct PlayTrackerConfig {
   std::vector<AllLivingBoxConfig> living_boxes;
   // After this number of ticks, "lost" tracks are discarded
   size_t max_lost_track_age{30};
+  // Legacy enable switch; false still disables count-based pruning.
   bool ignore_largest_bbox{true};
+  int ignore_largest_bbox_count{1};
+  bool ignore_oversized_bboxes{false};
+  double oversized_bbox_percent{100.0};
   bool ignore_left_and_right_extremes{false};
   // Ignore a cluster item that's very far away from the next person on that
   // side
@@ -50,6 +54,7 @@ struct PlayTrackerResults {
   std::optional<PlayDetectorResults> play_detection;
   // TODO: combine these ignored items
   std::optional<Track> largest_tracking_bbox;
+  std::vector<Track> size_ignored_tracking_boxes;
   std::optional<Track> leftmost_tracking_bbox;
   std::optional<Track> rightmost_tracking_bbox;
   std::vector<HmLogMessage> log_messages;
@@ -78,6 +83,12 @@ class PlayTracker : public IBreakawayAdjuster {
   void set_bboxes_scaled(BBox bbox, float scale_step);
 
   std::shared_ptr<ILivingBox> get_live_box(size_t index) const;
+
+  // Updates player selection without resetting motion history.
+  void set_player_size_filter(
+      int largest_count,
+      bool ignore_oversized,
+      double oversized_percent);
 
   // Live tuning: breakaway braking
   void set_breakaway_braking(int overshoot_delay_count, float overshoot_scale_ratio) {
@@ -119,7 +130,7 @@ class PlayTracker : public IBreakawayAdjuster {
   //
 
   // Config
-  const PlayTrackerConfig config_;
+  PlayTrackerConfig config_;
 
   // Cluster stuff
   const std::array<size_t, 2> cluster_sizes_{2, 3};
