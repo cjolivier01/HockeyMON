@@ -501,6 +501,7 @@ def _save_training_checkpoint(
     model: nn.Module,
     opt: optim.Optimizer,
     train_ds: CameraPanZoomGPTIterableDataset,
+    context_window: int,
     cfg: CameraGPTConfig,
     game_csvs: List[GameCsvPaths],
     target_mode: str,
@@ -510,7 +511,7 @@ def _save_training_checkpoint(
 ) -> None:
     if dist.is_initialized() and dist.get_rank() != 0:
         return
-    ckpt = pack_gpt_checkpoint(model, norm=train_ds.norm, window=int(train_ds._seq_len), cfg=cfg)
+    ckpt = pack_gpt_checkpoint(model, norm=train_ds.norm, window=context_window, cfg=cfg)
     ckpt["step"] = int(step_num)
     ckpt["games"] = [p.game_id for p in game_csvs]
     ckpt["target_mode"] = str(target_mode)
@@ -647,23 +648,38 @@ def _target_met(metrics: dict, target_iou: float) -> bool:
 
 
 class TrainingRollout(nn.Module):
-    """Keep every scheduled-sampling forward inside a single DDP forward call."""
+    """Train a bounded-context rollout inside a single DDP forward call."""
 
-    def __init__(self, model: nn.Module, aspect: Optional[float]) -> None:
+    def __init__(self, model: nn.Module, aspect: Optional[float], context_window: int) -> None:
         super().__init__()
+        if context_window < 2:
+            raise ValueError("Training context window must be >=2")
         self.model = model
         self.aspect = aspect
+        self.context_window = context_window
+
+    def _teacher_forced(self, features: torch.Tensor) -> torch.Tensor:
+        if features.shape[1] <= self.context_window:
+            return self.model(features)
+        return torch.stack(
+            [
+                self.model(features[:, max(0, t + 1 - self.context_window) : t + 1])[:, -1]
+                for t in range(features.shape[1])
+            ],
+            dim=1,
+        )
 
     def forward(self, batch: dict[str, torch.Tensor], probability: float) -> torch.Tensor:
         if "x" in batch:
-            return self.model(batch["x"])
+            return self._teacher_forced(batch["x"])
         base, prev, y = batch["base"], batch["prev0"], batch["y"]
         if probability <= 0:
             previous = torch.cat([prev.unsqueeze(1), y[:, :-1]], dim=1)
-            return self.model(torch.cat([base, previous], dim=-1))
+            return self._teacher_forced(torch.cat([base, previous], dim=-1))
         prefix, predictions = [], []
         for t in range(y.shape[1]):
             prefix.append(torch.cat([base[:, t], prev], dim=-1))
+            prefix = prefix[-self.context_window :]
             prediction = self.model(torch.stack(prefix, dim=1))[:, -1]
             predictions.append(prediction)
             feedback = _runtime_feedback_target(prediction, self.aspect).detach()
@@ -688,6 +704,12 @@ def main(argv: Optional[List[str]] = None):
         type=int,
         default=None,
         help="Validation rollout length; defaults to --seq-len",
+    )
+    ap.add_argument(
+        "--rollout-len",
+        type=int,
+        default=None,
+        help="Training rollout length (>=seq-len); defaults to --seq-len runtime context",
     )
     ap.add_argument("--cpu-threads", type=int, default=4)
     ap.add_argument("--ddp-backend", choices=["nccl", "gloo"], default=None)
@@ -803,6 +825,12 @@ def main(argv: Optional[List[str]] = None):
         help="Optional training budget in frames (overrides --steps when >0)",
     )
     ap.add_argument("--batch-size", type=int, default=32)
+    ap.add_argument(
+        "--val-batch-size",
+        type=int,
+        default=None,
+        help="Per-rank validation batch; defaults to --batch-size",
+    )
     ap.add_argument(
         "--data-workers",
         type=int,
@@ -1003,6 +1031,17 @@ def main(argv: Optional[List[str]] = None):
     )
     argv = expand_training_config(ap, list(sys.argv[1:] if argv is None else argv))
     args = ap.parse_args(argv)
+    # Resolve seconds-based legacy sampling before deriving any horizon defaults.
+    if args.file_list and not _arg_in_argv("--seq-len", argv):
+        args.seq_len = int(round(max(0.1, float(args.sample_seconds)) * max(1.0, float(args.fps))))
+    if args.rollout_len is None:
+        args.rollout_len = args.seq_len
+    if args.rollout_len < args.seq_len:
+        ap.error("rollout-len must be >=seq-len")
+    if args.val_batch_size is None:
+        args.val_batch_size = args.batch_size
+    if args.val_batch_size < 1:
+        ap.error("val-batch-size must be positive")
     if args.seq_len < 2 or args.batch_size < 1 or args.sample_stride < 1 or args.cpu_threads < 1:
         ap.error("seq-len must be >=2; batch-size, sample-stride, cpu-threads must be positive")
     if args.val_seq_len is None:
@@ -1107,7 +1146,7 @@ def main(argv: Optional[List[str]] = None):
             train_games, val_games, data_identity = catalog_split(
                 args.dataset_config,
                 args.dataset_root,
-                min_train_frames=args.seq_len,
+                min_train_frames=args.rollout_len,
                 min_val_frames=args.val_seq_len,
             )
         except Exception as error:
@@ -1126,12 +1165,6 @@ def main(argv: Optional[List[str]] = None):
         if args.max_games:
             ap.error("Use dataset YAML include/exclude selectors instead of --max-games")
     elif args.file_list:
-        # Default to seconds-based sampling unless --seq-len was explicitly provided.
-        if not _arg_in_argv("--seq-len", argv):
-            fps = max(1.0, float(args.fps))
-            secs = max(0.1, float(args.sample_seconds))
-            args.seq_len = int(round(secs * fps))
-
         game_dirs = _load_game_dirs_from_list(args.file_list)
         if int(args.max_games) > 0:
             game_dirs = game_dirs[: int(args.max_games)]
@@ -1221,9 +1254,6 @@ def main(argv: Optional[List[str]] = None):
             "train_games": [p.game_id for p in train_games],
             "validation_games": [p.game_id for p in val_games],
         }
-    if not _arg_in_argv("--val-seq-len", argv):
-        args.val_seq_len = args.seq_len
-
     # Use a train-only normalization scale for train/val consistency without validation leakage.
     max_x, max_y = _scan_games_max_xy(train_games)
     norm = CameraNorm(scale_x=max_x, scale_y=max_y, max_players=int(args.max_players))
@@ -1232,7 +1262,7 @@ def main(argv: Optional[List[str]] = None):
     train_ds = CameraPanZoomGPTIterableDataset(
         games=train_games,
         norm=norm,
-        seq_len=int(args.seq_len),
+        seq_len=int(args.rollout_len),
         target_mode=str(args.target_mode),
         feature_mode=str(args.feature_mode),
         include_pose=bool(args.include_pose),
@@ -1278,7 +1308,7 @@ def main(argv: Optional[List[str]] = None):
         )
         val_loader = DataLoader(
             val_ds,
-            batch_size=int(args.batch_size),
+            batch_size=int(args.val_batch_size),
             num_workers=int(args.data_workers),
             pin_memory=bool(args.pin_memory),
             persistent_workers=int(args.data_workers) > 0,
@@ -1394,17 +1424,19 @@ def main(argv: Optional[List[str]] = None):
     steps = int(args.steps)
     if int(args.frames) > 0:
         steps = int(
-            math.ceil(float(args.frames) / float(args.batch_size * args.seq_len * world_size))
+            math.ceil(float(args.frames) / float(args.batch_size * args.rollout_len * world_size))
         )
     logger.info(
-        "Training %s: games=%d train=%d val=%d seq_len=%d steps=%d bs=%d device=%s",
+        "Training %s: games=%d train=%d val=%d context=%d rollout=%d steps=%d bs=%d val_bs=%d device=%s",
         str(args.model_kind),
         len(game_csvs),
         len(train_games),
         len(val_games),
         int(args.seq_len),
+        int(args.rollout_len),
         steps,
         int(args.batch_size),
+        int(args.val_batch_size),
         device,
     )
 
@@ -1416,7 +1448,7 @@ def main(argv: Optional[List[str]] = None):
             "free_run": args.eval_free_run,
             "runtime_slow_iou": args.runtime_slow_iou,
             "val_steps_per_rank": args.val_steps,
-            "batch_size_per_rank": args.batch_size,
+            "batch_size_per_rank": args.val_batch_size,
             "world_size": world_size,
             "seed": args.seed,
             "sample_stride": args.sample_stride,
@@ -1456,7 +1488,7 @@ def main(argv: Optional[List[str]] = None):
     training_state["resolved_args"] = vars(args)
     for parameter_group in opt.param_groups:
         parameter_group["lr"] = args.lr
-    rollout = TrainingRollout(model, runtime_slow_aspect_norm)
+    rollout = TrainingRollout(model, runtime_slow_aspect_norm, args.seq_len)
     if world_size > 1:
         rollout = DistributedDataParallel(
             rollout,
@@ -1482,6 +1514,7 @@ def main(argv: Optional[List[str]] = None):
             model=model,
             opt=opt,
             train_ds=train_ds,
+            context_window=args.seq_len,
             cfg=cfg,
             game_csvs=game_csvs,
             target_mode=args.target_mode,
@@ -1497,6 +1530,7 @@ def main(argv: Optional[List[str]] = None):
             "data_identity": data_identity,
             "evaluation": training_state["evaluation"],
             "args": vars(args),
+            "step_budget": steps,
             "torch": torch.__version__,
         },
     )
