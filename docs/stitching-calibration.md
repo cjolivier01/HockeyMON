@@ -111,3 +111,50 @@ when using an OpenCV backend. `--device`, `--calibration-frame-count`,
 Frame-array callers of `configure_stitching` use temporary input PNGs and the
 public shared builder. A failed matcher or image write preserves existing
 reference images and removes the temporary inputs.
+
+## Projection review captures
+
+The capture script renders the bundled 58-case matrix across all 22 Hugin
+projections. Run from a checkout with HM's Python dependencies and Hugin tools
+available:
+
+```sh
+python scripts/capture_stitching_projection_frames.py --dry-run
+python scripts/capture_stitching_projection_frames.py \
+  --source-game-dir /path/to/game --output-dir /path/to/projection-review
+```
+
+Video mode reads one `game.videos.left` and one `game.videos.right` input from the
+source game's `config.yaml`; combine split recordings first. It uses configured
+frame offsets or computes audio synchronization without saving into the source.
+For an existing image pair, add `--source-mode images`. Add
+`--reuse-control-points` to use ordinary image-0/image-1 correspondences from the
+source `hm_project.pto`, avoiding a new feature extraction pass. These points must
+refer to the source images and their original lens coordinates.
+
+The source game is read only. Each case has an isolated game directory containing
+its effective config, PTOs, mapping artifacts and `s.png`; its parent records
+`plan.json`, `effective-config.yaml` and `calibration.log`. A failed case retains
+its log and the matrix continues, returning a nonzero status when any selected
+case failed. `pipeline.timeout_seconds` bounds each calibration subprocess and
+its descendants. The default output directory `projection-review/` is ignored
+by Git; choose an output location outside the source game.
+
+Successful captures are reused only when the requested settings, source identity,
+saved configuration, bounded artifact validation and artifact content hashes
+agree. Image inputs are content-hashed; large video inputs use path, size and
+modification time, so use `--force` after replacing a video while preserving that
+metadata. `--force` rebuilds selected cases, and `--start-at 12 --limit 3` selects
+one-based positions in the matrix. Interrupted or failed attempts are retried.
+The manifest is atomically persisted before replacement and after completion;
+output ownership markers and a lock prevent accidental directory deletion or
+concurrent writers.
+
+Use `--config /path/to/matrix.yaml` to customize
+`hmlib/config/stitching_projection_frames.yaml`. YAML paths are relative to the
+matrix file; command-line paths are relative to the current directory. Matrix
+camera overrides are `camera_config`, `camera_horizontal_fov` and
+`camera_vertical_fov`; `horizontal_fov` controls the output projection. Shared HM
+settings validation checks projection parameters and FOV limits before running
+cases. `--dry-run`, `--start-at` and `--limit` allow inspecting the selection
+without creating output files.

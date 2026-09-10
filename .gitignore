@@ -51,3 +51,6 @@ player_shifts_fiverr
 *.torch_tensorrt_cache/
 audit_workdirs
 hmlib.egg-info
+
+# Generated projection previews and local effective game configurations.
+/projection-review/
