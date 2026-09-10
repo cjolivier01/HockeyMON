@@ -116,7 +116,6 @@ class TranslatingBox : virtual public IBasicLivingBox {
   void on_new_position();
 
  private:
-  void test_arena_edge_position_scale();
 
   bool is_nonstop() const;
 

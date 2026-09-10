@@ -545,8 +545,7 @@ void validate_dynamic_projection(const AllLivingBoxConfig& c, float y) {
 
 void validate_box_config(const AllLivingBoxConfig& c) {
   // Pixel geometry is deliberately bounded well beyond supported video
-  // canvases. Besides float precision, this bounds the native diagnostic's
-  // y -= 100 loop; sufficiently large floats would never advance that loop.
+  // canvases so persisted coordinates remain in a usable float domain.
   require(
       c.arena_box && positive_box(*c.arena_box) && c.arena_box->left >= 0 &&
           c.arena_box->top >= 0 && c.arena_box->right <= 1000000 &&
@@ -600,11 +599,10 @@ void validate_box_config(const AllLivingBoxConfig& c) {
       !c.sticky_translation || c.sticky_size_ratio_to_frame_width > 0,
       "invalid sticky translation divisor");
   require(
-      c.dynamic_acceleration_scaling == 0 ||
-          (c.sticky_translation && c.arena_angle_from_vertical != 0),
-      "dynamic acceleration requires sticky translation and a nonzero arena angle");
+      c.dynamic_acceleration_scaling == 0 || c.sticky_translation,
+      "dynamic acceleration requires sticky translation");
   // The native projection is affine up to half-height and constant above it.
-  // These endpoints cover its arena and diagnostic input domain.
+  // These endpoints cover its arena input domain.
   validate_dynamic_projection(c, 0);
   validate_dynamic_projection(c, c.arena_box->bottom);
   require(

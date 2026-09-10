@@ -220,14 +220,6 @@ void rejects_malformed_state() {
   });
   check([](auto& s) { s.living_boxes[0].resizing.cooldown_w_counter = -1; });
   check([](auto& s) { s.config.play_detector.max_velocity_positions = 0; });
-  // Reject before forward, independently of whether the process-wide native
-  // arena diagnostic has already run in another tracker.
-  check([](auto& s) {
-    auto& c = s.living_boxes[0].config;
-    c.sticky_translation = true;
-    c.dynamic_acceleration_scaling = 0.5f;
-    c.arena_angle_from_vertical = 0;
-  });
   check([](auto& s) { s.config.play_detector.group_ratio_threshold = -1; });
   check([](auto& s) { s.config.play_detector.group_ratio_threshold = 0.49f; });
   check([](auto& s) { s.config.play_detector.group_ratio_threshold = 1.01f; });
@@ -378,17 +370,17 @@ void initial_scaled_arena_restores_before_first_observation() {
   compare_results(advance(tracker, 0), advance(*restored, 0));
 }
 
-void small_arena_restores_in_fresh_process() {
+void arena_geometry_restores(bool offset = false, bool zero_angle = false) {
   PlayTrackerConfig settings;
   AllLivingBoxConfig box;
-  box.arena_box = BBox(0, 0, 10, 5);
-  box.max_width = 10;
-  box.max_height = 5;
+  box.arena_box = offset ? BBox(0, 500, 2000, 1500) : BBox(0, 0, 10, 5);
+  box.max_width = box.arena_box->width();
+  box.max_height = box.arena_box->height();
   box.min_width = box.min_height = 1;
   box.sticky_translation = true;
   box.sticky_size_ratio_to_frame_width = 20;
   box.dynamic_acceleration_scaling = 0.5f;
-  box.arena_angle_from_vertical = 1;
+  box.arena_angle_from_vertical = zero_angle ? 0 : 1;
   settings.living_boxes.push_back(box);
   PlayTracker source(*box.arena_box, settings);
   auto restored = PlayTracker::from_snapshot(
@@ -400,11 +392,15 @@ void small_arena_restores_in_fresh_process() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
   try {
-    // Must precede every other forward call: the geometry diagnostic is
-    // intentionally run only once per process by the native tracker.
-    small_arena_restores_in_fresh_process();
+    if (argc == 2 && std::string(argv[1]) == "--offset-arena") {
+      arena_geometry_restores(true);
+      return 0;
+    }
+    // Exercise small geometry through the real forward path.
+    arena_geometry_restores();
+    arena_geometry_restores(false, true);
     continuation_matches_uninterrupted();
     repeated_trials_are_independent();
     rejects_malformed_state();

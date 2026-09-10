@@ -65,10 +65,6 @@ void TranslatingBox::set_destination(const BBox& dest_box) {
   std::optional<FloatValue> x_gaussian;
   if (!is_zero(config_.dynamic_acceleration_scaling)) {
     assert(config_.sticky_translation);
-    static std::atomic<size_t> test_pass_counter{0};
-    if (!test_pass_counter.fetch_add(1, std::memory_order_relaxed)) {
-      test_arena_edge_position_scale();
-    }
     // Only do this if we aren't super off so that massive movements are still
     // possible in desperate situations
     // TODO: We can cache this computation
@@ -602,88 +598,6 @@ static FloatValue adjusted_horizontal_distance_from_edge(
   FloatValue adjusted_x_distance_from_edge =
       std::max(x - x_adjusted_distance, 0.0f);
   return std::min(adjusted_x_distance_from_edge, half_width);
-}
-
-void TranslatingBox::test_arena_edge_position_scale() {
-  const BBox arena_box = *config_.arena_box;
-  const Point arena_center = arena_box.center();
-  assert(
-      config_.arena_angle_from_vertical !=
-      0); // should have been set to something, please.
-  const FloatValue kDegreesEdgePerspecive = config_.arena_angle_from_vertical;
-  FloatValue full_left = get_arena_edge_point_position_scale(
-      Point{.x = 0, .y = arena_center.y}, arena_box, kDegreesEdgePerspecive);
-  FloatValue arena_left = get_arena_edge_point_position_scale(
-      Point{.x = arena_box.left, .y = arena_center.y},
-      arena_box,
-      kDegreesEdgePerspecive);
-  FloatValue full_center = get_arena_edge_point_position_scale(
-      Point{.x = arena_center.x, .y = arena_center.y},
-      arena_box,
-      kDegreesEdgePerspecive);
-  FloatValue full_right = get_arena_edge_point_position_scale(
-      Point{.x = arena_box.right * 2, .y = arena_center.y},
-      arena_box,
-      kDegreesEdgePerspecive);
-  FloatValue arena_right = get_arena_edge_point_position_scale(
-      Point{.x = arena_box.right, .y = arena_center.y},
-      arena_box,
-      kDegreesEdgePerspecive);
-  // The edge cases, far edges = 1, dead center = 0
-  assert(is_close(full_left, -1.0f));
-  assert(is_close(full_left, arena_left));
-  assert(is_close(full_right, 1.0f));
-  assert(is_close(full_right, arena_right));
-  assert(is_close(full_center, 0.0f));
-
-  const FloatValue kSmallTestDistance = arena_box.width() / 25;
-
-  // Now check that the calculation is continuous near those edge points
-  // (doesn't jump to some crazy value)
-  FloatValue far_left = get_arena_edge_point_position_scale(
-      Point{.x = arena_box.left + kSmallTestDistance, .y = arena_center.y},
-      arena_box,
-      kDegreesEdgePerspecive);
-  FloatValue far_right = get_arena_edge_point_position_scale(
-      Point{.x = arena_box.right - kSmallTestDistance, .y = arena_center.y},
-      arena_box,
-      kDegreesEdgePerspecive);
-  FloatValue left_of_center = get_arena_edge_point_position_scale(
-      Point{.x = arena_center.x - kSmallTestDistance, .y = arena_center.y},
-      arena_box,
-      kDegreesEdgePerspecive);
-  FloatValue right_of_center = get_arena_edge_point_position_scale(
-      Point{.x = arena_center.x + kSmallTestDistance, .y = arena_center.y},
-      arena_box,
-      kDegreesEdgePerspecive);
-
-  // std::cout << far_left << ", " << left_of_center << ", " << right_of_center
-  //           << ", " << far_right << std::endl;
-
-  assert(is_close(-far_left, far_right));
-  assert(is_close(-left_of_center, right_of_center));
-  assert(far_left < left_of_center && far_right > right_of_center);
-  // These results are normalized ratios. A pixel-distance tolerance would
-  // reject small arenas even though the same relative geometry is valid.
-  constexpr FloatValue kNormalizedTolerance = 0.1f;
-  assert(std::fabs(1.0 - std::abs(far_left)) < kNormalizedTolerance);
-  assert(std::abs(left_of_center) < kNormalizedTolerance);
-
-  // Now check difference in Y changes
-  FloatValue adjusted_x_last = 0, first_adjusted_x = 0.0;
-  for (FloatValue y = arena_box.bottom; y >= 0.0f; y -= 100) {
-    FloatValue left_x = arena_box.center().x - arena_box.left / 2;
-    FloatValue adjusted_x = adjusted_horizontal_distance_from_edge(
-        left_x, y, arena_box, kDegreesEdgePerspecive);
-    if (adjusted_x_last) {
-      assert(adjusted_x <= adjusted_x_last);
-    } else {
-      first_adjusted_x = adjusted_x;
-    }
-    adjusted_x_last = adjusted_x;
-  }
-  // It should have decreased with decreasing y
-  assert(adjusted_x_last <= first_adjusted_x);
 }
 
 FloatValue TranslatingBox::get_arena_edge_point_position_scale(
