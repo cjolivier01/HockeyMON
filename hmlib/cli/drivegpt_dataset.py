@@ -21,6 +21,7 @@ from hmlib.camera.camera_gpt_dataset import (
     _hstream_manifest_allows_generation,
 )
 from hmlib.camera.camera_policy import camera_policy_path, read_camera_policy_boundaries
+from hmlib.camera.rink_context import read_rink_context, rink_context_path
 
 CATALOG_SCHEMA = "hockey-drivegpt-catalog-v1"
 
@@ -92,6 +93,7 @@ def inspect_generation(directory: Path, suffix: str, min_frames: int) -> dict:
     companions += [
         directory / f"{name}{part}.{extension}"
         for name, extension in (
+            ("rink_context", "json"),
             ("hstream_telemetry", "json"),
             ("hstream_frame_index", "csv"),
             ("hstream_config_events", "csv"),
@@ -100,12 +102,16 @@ def inspect_generation(directory: Path, suffix: str, min_frames: int) -> dict:
     companions += [
         directory / name
         for name in (
-            "rink_mask_0.png",
             "config.yaml",
             "play_tracker_source.yaml",
             "play_tracker_effective.yaml",
         )
     ]
+    companions += sorted(directory.glob("rink_mask_*.png"))
+    if rink_context_path(str(paths["tracking"])).is_file():
+        context = read_rink_context(str(paths["tracking"]))
+        companions += [directory / binding["file"] for binding in context["masks"]]
+    companions = sorted(set(companions))
     return {
         "generation": suffix or "bare",
         "generation_number": int(suffix or 0),

@@ -1,3 +1,4 @@
+import hashlib
 from typing import Any, Dict, Optional
 
 import torch
@@ -359,9 +360,11 @@ class IceRinkSegmConfigPlugin(Plugin):
       - rink_profile: dict with rink mask + metadata (for downstream pruning/camera seeding)
     """
 
-    def __init__(self, enabled: bool = True):
+    def __init__(self, enabled: bool = True, require_geometry_provenance: bool = False):
         super().__init__(enabled=enabled)
+        self._require_geometry_provenance = bool(require_geometry_provenance)
         self._rink_profile = None
+        self._rink_geometry_key = None
 
     def forward(self, context: Dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
@@ -378,42 +381,77 @@ class IceRinkSegmConfigPlugin(Plugin):
         if len(track_data_sample) == 0:
             return {}
 
-        # Build rink profile once from the first frame
+        game_id = context.get("game_id") or context.get("shared", {}).get("game_id")
+        geometry = context.get("camera_input_geometry") or {}
+        revision = (
+            geometry.get("stitched_geometry_revision")
+            if self._require_geometry_provenance
+            else None
+        )
+        if self._require_geometry_provenance and revision is None:
+            raise ValueError("Static rink provenance requires a stitched geometry revision")
+        img = unwrap_tensor(context.get("original_images"))
+        original_frame = img[0] if torch.is_tensor(img) and img.ndim == 4 else img
+        strict_geometry = revision is not None
+        if strict_geometry and (not torch.is_tensor(original_frame) or original_frame.ndim != 3):
+            raise ValueError("Proven rink geometry requires the original stitched frame")
+        geometry_key = (
+            game_id,
+            revision,
+            tuple(original_frame.shape) if torch.is_tensor(original_frame) else None,
+        )
+        if geometry_key != self._rink_geometry_key:
+            self._rink_profile = None
         if self._rink_profile is None:
             from hmlib.segm.ice_rink import configure_ice_rink_mask
 
-            game_id = context.get("game_id") or context.get("shared", {}).get("game_id")
-            # Prefer the live stitched frame. Detector inputs may be resized for
-            # inference and are not suitable for rink-profile geometry.
-            img = context.get("original_images")
-            if img is None:
-                img = context.get("img")
-            img = unwrap_tensor(img)
-            # Use first frame
-            if isinstance(img, torch.Tensor) and img.ndim >= 3:
-                frame0 = img[0] if img.ndim >= 4 else img
-            else:
-                frame0 = None
+            # Never certify a saved mask from shape alone. With authoritative
+            # live geometry, regenerate in memory from that exact coordinate plane.
+            # Legacy non-stitching pipelines may still use their saved profile,
+            # but cannot use a grid checkpoint without a proven original frame.
+            frame0 = original_frame
+            if frame0 is None:
+                fallback = unwrap_tensor(context.get("img"))
+                frame0 = (
+                    fallback[0] if torch.is_tensor(fallback) and fallback.ndim == 4 else fallback
+                )
             exp_shape = None
-            if isinstance(frame0, torch.Tensor) and frame0.ndim == 3:
-                # Prefer the actual stitched-frame geometry when it is available.
-                if frame0.shape[-1] in (3, 4):
-                    exp_shape = torch.Size(frame0.shape[:2])
-                else:
-                    exp_shape = torch.Size(frame0.shape[-2:])
+            if torch.is_tensor(frame0) and frame0.ndim == 3:
+                exp_shape = torch.Size(
+                    frame0.shape[:2] if frame0.shape[-1] in (3, 4) else frame0.shape[-2:]
+                )
             self._rink_profile = configure_ice_rink_mask(
                 game_id=game_id,
-                # device=device if isinstance(device, torch.device) else torch.device("cpu"),
                 device=torch.device("cpu"),
                 expected_shape=exp_shape,
                 image=frame0,
+                force=strict_geometry,
+                persist=not strict_geometry,
             )
+            if self._rink_profile is not None and strict_geometry:
+                mask = self._rink_profile["combined_mask"]
+                if mask is None or tuple(mask.shape) != tuple(exp_shape):
+                    raise ValueError("Rink profile does not match the original stitched frame")
+                raw = mask.detach().cpu().contiguous().numpy()
+                self._rink_profile["coordinate_space"] = "original_stitched_pixels"
+                self._rink_profile["frame_size"] = [int(raw.shape[1]), int(raw.shape[0])]
+                self._rink_profile["geometry_revision"] = hashlib.sha256(
+                    revision.encode() + memoryview(raw).tobytes()
+                ).hexdigest()
+            self._rink_geometry_key = geometry_key
         if self._rink_profile is None:
             return {}
         return {"rink_profile": self._rink_profile}
 
     def input_keys(self):
-        return {"data_samples", "original_images", "img", "inputs", "game_id"}
+        return {
+            "data_samples",
+            "original_images",
+            "img",
+            "inputs",
+            "game_id",
+            "camera_input_geometry",
+        }
 
     def output_keys(self):
         return {"rink_profile"}

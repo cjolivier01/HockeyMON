@@ -21,6 +21,7 @@ from hmlib.camera.camera_transformer import (
     build_frame_features,
     build_player_box_features,
 )
+from hmlib.camera.rink_context import load_rink_grid
 
 
 @dataclass(frozen=True)
@@ -261,7 +262,15 @@ def _rink_features_from_mask_png(game_dir: str, norm: CameraNorm) -> np.ndarray:
 
 
 def _load_game(
-    paths: GameCsvPaths, norm: CameraNorm, target_mode: str, include_pose: bool, include_rink: bool
+    paths: GameCsvPaths,
+    norm: CameraNorm,
+    target_mode: str,
+    include_pose: bool,
+    include_rink: bool,
+    rink_input: str = "stats",
+    rink_grid_height: int = 32,
+    rink_grid_width: int = 64,
+    rink_grid: Optional[np.ndarray] = None,
 ) -> _LoadedGame:
     tracks = _read_tracking_dataframe(paths.tracking_csv)
     cams = _read_camera_dataframe(paths.camera_csv)
@@ -316,11 +325,17 @@ def _load_game(
         except Exception as ex:
             raise RuntimeError(f"Failed to parse pose CSV {paths.pose_csv!r}") from ex
 
-    rink_feat = (
-        _rink_features_from_mask_png(str(Path(paths.tracking_csv).parent), norm=norm)
-        if include_rink
-        else np.zeros((7,), dtype=np.float32)
-    )
+    rink_feat = np.zeros((7,), dtype=np.float32)
+    if include_rink:
+        rink_feat = (
+            (
+                rink_grid
+                if rink_grid is not None
+                else load_rink_grid(paths.tracking_csv, norm, rink_grid_height, rink_grid_width)
+            )
+            if rink_input == "grid"
+            else _rink_features_from_mask_png(str(Path(paths.tracking_csv).parent), norm=norm)
+        )
 
     return _LoadedGame(
         game_id=paths.game_id,
@@ -346,10 +361,14 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
         feature_mode: str = "base_prev_y",
         include_pose: bool = True,
         include_rink: bool = False,
+        rink_input: str = "stats",
+        rink_grid_height: int = 32,
+        rink_grid_width: int = 64,
         max_players_for_norm: int = 22,
         seed: int = 0,
         max_cached_games: int = 8,
         *,
+        rink_grids: Optional[Dict[str, np.ndarray]] = None,
         preload_csv: str = "none",
         shard_games_by_worker: bool = False,
         rank: int = 0,
@@ -369,8 +388,14 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
         self._feature_mode = str(feature_mode)
         self._include_pose = bool(include_pose)
         self._include_rink = bool(include_rink)
+        if rink_input not in {"stats", "grid"}:
+            raise ValueError(f"Unknown rink input: {rink_input}")
+        self._rink_input = rink_input
+        self._rink_grid_height = rink_grid_height
+        self._rink_grid_width = rink_grid_width
+        self._rink_grids = rink_grids or {}
         self._pose_feat_dim = 8 if self._include_pose else 0
-        self._rink_feat_dim = 7 if self._include_rink else 0
+        self._rink_feat_dim = 7 if self._include_rink and rink_input == "stats" else 0
         self._seed = int(seed)
         self._max_cached = int(max_cached_games)
         self._preload_csv = str(preload_csv)
@@ -436,6 +461,10 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
                 target_mode=self._target_mode,
                 include_pose=self._include_pose,
                 include_rink=self._include_rink,
+                rink_input=self._rink_input,
+                rink_grid_height=self._rink_grid_height,
+                rink_grid_width=self._rink_grid_width,
+                rink_grid=self._rink_grids.get(paths.game_id),
             )
         except Exception as ex:
             raise RuntimeError(f"Failed to load camera GPT CSVs for game {game_id!r}") from ex
@@ -596,7 +625,7 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
                     if pose_feat is None:
                         pose_feat = np.zeros((self._pose_feat_dim,), dtype=np.float32)
                     feat = np.concatenate([feat, pose_feat.astype(np.float32, copy=False)], axis=0)
-                if self._include_rink:
+                if self._include_rink and self._rink_input == "stats":
                     rf = game.rink_feat
                     if rf is None or rf.shape[0] != int(self._rink_feat_dim):
                         rf = np.zeros((self._rink_feat_dim,), dtype=np.float32)
@@ -633,6 +662,8 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
             x = torch.from_numpy(np.stack(feats, axis=0))  # [T, D] (legacy) or base features
             y = torch.from_numpy(np.stack(targets, axis=0))  # [T, target_dim]
             out: Dict[str, torch.Tensor] = {"y": y}
+            if self._include_rink and self._rink_input == "grid":
+                out["rink"] = torch.from_numpy(game.rink_feat)
             if self._feature_mode == "legacy_prev_slow":
                 out["x"] = x
             else:
