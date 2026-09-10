@@ -19,6 +19,7 @@ import torch
 
 from hmlib.log import get_logger
 from hmlib.stitching.control_points import calculate_control_points
+from hmlib.stitching.akaze import LensCalibrationPair
 
 _CONTROL_POINTS_LINE = "# control points"
 
@@ -136,6 +137,7 @@ def configure_control_points(
     output_directory: Optional[str] = None,
     use_hugin: bool = False,
     matcher: str = "superpoint-lightglue",
+    lens_calibration: Optional[LensCalibrationPair] = None,
 ) -> Dict[str, torch.Tensor]:
     """Populate or update control points in a Hugin PTO project.
 
@@ -179,6 +181,7 @@ def configure_control_points(
             image1=image1,
             max_control_points=max_control_points,
             matcher=matcher,
+            lens_calibration=lens_calibration,
         )
         print(f"Calculated control points in {time.time() - start} seconds")
 
@@ -186,6 +189,13 @@ def configure_control_points(
         # Don't rewrite if we got them from the Hugin project file.
         return control_points
 
+    write_control_points(project_file_path, control_points)
+    return control_points
+
+
+def write_control_points(project_file_path: str, control_points: Dict[str, torch.Tensor]) -> None:
+    """Install precomputed paired points, replacing points from earlier candidates."""
+    pto_file = load_pto_file(project_file_path)
     pts0 = control_points["m_kpts0"]
     pts1 = control_points["m_kpts1"]
     assert len(pts0) == len(pts1)
@@ -208,7 +218,6 @@ def configure_control_points(
         pto_file.append(line)
     save_pto_file(file_path=project_file_path, data=pto_file)
     get_logger(__name__).info("Done with control points")
-    return control_points
 
 
 def parse_pto_transformations(lines: List[str]) -> List[Dict[str, Any]]:

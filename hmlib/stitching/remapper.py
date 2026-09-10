@@ -4,13 +4,12 @@ import argparse
 import os
 from typing import Tuple
 
-import cv2
 import numpy as np
 import torch
 
 import hockeymon.core as core
 from hmlib.log import get_root_logger
-from hmlib.stitching.configure_stitching import get_image_geo_position
+from hmlib.stitching.artifact_validation import read_mapping_arrays
 from hmlib.stitching.image_remapper import ImageRemapper
 from hmlib.tracking_utils.timer import Timer
 from hmlib.ui import show_image
@@ -61,20 +60,11 @@ def create_remapper_config(
     interpolation: str = "bilinear",
 ) -> core.RemapperConfig:
     """Build a :class:`core.RemapperConfig` from mapping TIFFs and image size."""
-    x_file = os.path.join(dir_name, f"{basename}000{image_index}_x.tif")
-    y_file = os.path.join(dir_name, f"{basename}000{image_index}_y.tif")
-    x_map = cv2.imread(x_file, cv2.IMREAD_ANYDEPTH)
-    y_map = cv2.imread(y_file, cv2.IMREAD_ANYDEPTH)
-    if x_map is None:
-        raise AssertionError(f"Could not read mapping file: {x_file}")
-    if y_map is None:
-        raise AssertionError(f"Could not read mapping file: {y_file}")
+    xpos, ypos, x_map, y_map = read_mapping_arrays(dir_name, f"{basename}{image_index:04d}")
     config = core.RemapperConfig()
     config.src_height = source_hw[0]
     config.src_width = source_hw[1]
-    config.x_pos, config.y_pos = get_image_geo_position(
-        os.path.join(dir_name, f"{basename}000{image_index}.tif")
-    )
+    config.x_pos, config.y_pos = xpos, ypos
     config.device = str(device)
     config.col_map = torch.from_numpy(x_map.astype(np.int64))
     config.row_map = torch.from_numpy(y_map.astype(np.int64))

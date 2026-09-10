@@ -1,71 +1,42 @@
 #!/usr/bin/env python3
 """
 This script synchronizes two videos using audio cross-correlation, extracts the corresponding frames,
-computes control points with a selectable learned matcher and updates a Hugin
+computes control points with a selectable matcher and updates a Hugin
 PTO file with the newly computed control points.
 """
 
 import argparse
-import math
 import os
 import re
-import shutil
-import subprocess
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 import ffmpegio
 import numpy as np
 import scipy.signal
-import tifffile
 import torch
-import yaml
-from hmlib.config import get_game_dir
-from hmlib.stitching.configure_stitching import (
-    MAPPING_BACKENDS,
-    OPENCV_MAPPING_BACKENDS,
-    get_enblend_bin,
-    normalize_mapping_backend,
-    normalize_max_output_dimension,
-)
+from hmlib.config import get_game_config, get_game_dir
+from hmlib.stitching.akaze import LensCalibrationPair, load_lens_calibration
+from hmlib.stitching.configure_stitching import build_stitching_project, configure_video_stitching
 from hmlib.stitching.control_points import (
     CONTROL_POINT_MATCHERS,
     calculate_control_points as calculate_stitching_control_points,
 )
-from hmlib.stitching.homography_maps import (
-    create_opencv_affine_ransac_mapping_files,
-    create_opencv_magsac_mapping_files,
+from hmlib.stitching.settings import (
+    MAPPING_BACKENDS,
+    StitchingSettings,
+    read_stitching_settings,
+    validate_output_scale,
 )
+from hmlib.video.video_stream import time_to_frame
+from hmlib.video.ffmpeg import BasicVideoInfo
 
 # Constant marker used in PTO files to denote control points.
 _CONTROL_POINTS_LINE = "# control points"
-
-
-def _run_stitching_command(cmd: List[str]) -> None:
-    executable = cmd[0]
-    if os.path.sep in executable:
-        resolved = executable if os.access(executable, os.X_OK) else None
-    else:
-        resolved = shutil.which(executable)
-    if resolved is None:
-        raise FileNotFoundError(
-            f"Required Hugin executable not found: {executable}. "
-            "Install/build the Jetson-native Hugin tools or put them on PATH."
-        )
-    subprocess.run(cmd, check=True)
-
-
-def _read_pto_canvas_size(pto_file: str) -> Optional[Tuple[int, int]]:
-    with open(pto_file, "r") as file:
-        for line in file:
-            if not line.startswith("p "):
-                continue
-            width = re.search(r"(?:^|\s)w(\d+)(?:\s|$)", line)
-            height = re.search(r"(?:^|\s)h(\d+)(?:\s|$)", line)
-            if width and height:
-                return int(width.group(1)), int(height.group(1))
-    return None
 
 
 def _game_dir_for_id(game_id: str) -> str:
@@ -74,80 +45,6 @@ def _game_dir_for_id(game_id: str) -> str:
         return game_dir
     base_dir = os.environ.get("HM_GAME_DIR") or os.path.join(os.environ["HOME"], "Videos")
     return str(Path(base_dir) / game_id)
-
-
-def _tiff_tag_number(tag, default: float) -> float:
-    if tag is None:
-        return default
-    value = tag.value
-    if isinstance(value, (list, tuple)):
-        if len(value) == 2:
-            numerator, denominator = value
-            return float(numerator) / float(denominator)
-        if len(value) == 1:
-            return float(value[0])
-    return float(value)
-
-
-def _read_mapping_canvas_size(mapping_files: List[str]) -> Optional[Tuple[int, int]]:
-    placements = []
-    for mapping_file in mapping_files:
-        with tifffile.TiffFile(mapping_file) as tif:
-            page = tif.pages[0]
-            tags = page.tags
-            x_resolution = _tiff_tag_number(tags.get("XResolution"), 1.0)
-            y_resolution = _tiff_tag_number(tags.get("YResolution"), 1.0)
-            x_position = _tiff_tag_number(tags.get("XPosition"), 0.0)
-            y_position = _tiff_tag_number(tags.get("YPosition"), 0.0)
-            placements.append(
-                (
-                    x_position * x_resolution,
-                    y_position * y_resolution,
-                    int(page.imagewidth),
-                    int(page.imagelength),
-                )
-            )
-    if not placements:
-        return None
-
-    min_x = min(x for x, _, _, _ in placements)
-    min_y = min(y for _, y, _, _ in placements)
-    width = math.ceil(max(x - min_x + w for x, _, w, _ in placements))
-    height = math.ceil(max(y - min_y + h for _, y, _, h in placements))
-    return int(width), int(height)
-
-
-def _remove_remap_outputs(directory: str) -> None:
-    for pattern in (
-        "autooptimiser_out.pto",
-        "mapping_*.tif",
-        "mapping_*.tiff",
-        "panorama.tif",
-        "seam_file.png",
-        "s.png",
-        "rink_mask_*.png",
-    ):
-        for path in Path(directory).glob(pattern):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
-
-
-def _remove_mapping_outputs(directory: str) -> None:
-    for pattern in (
-        "mapping_*.tif",
-        "mapping_*.tiff",
-        "panorama.tif",
-        "seam_file.png",
-        "s.png",
-        "rink_mask_*.png",
-    ):
-        for path in Path(directory).glob(pattern):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
 
 
 def load_audio_as_tensor(
@@ -285,8 +182,11 @@ def extract_frame(video_path: str, frame_idx: Optional[float]) -> np.ndarray:
     Raises:
         ValueError: If the frame cannot be extracted.
     """
-    if video_path.endswith(".png"):
-        return cv2.imread(video_path)
+    if Path(video_path).suffix.lower() == ".png":
+        frame = cv2.imread(video_path)
+        if frame is None:
+            raise ValueError(f"Could not read calibration image: {video_path}")
+        return frame
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
     ret, frame = cap.read()
@@ -338,6 +238,7 @@ def calculate_control_points(
     max_num_keypoints: int = 2048,
     output_directory: Optional[str] = None,
     matcher: str = "superpoint-lightglue",
+    lens_calibration: Optional[LensCalibrationPair] = None,
 ) -> Dict[str, torch.Tensor]:
     """
     Compute control points between two frames with the selected matcher.
@@ -362,6 +263,7 @@ def calculate_control_points(
         max_num_keypoints=max_num_keypoints,
         output_directory=output_directory,
         matcher=matcher,
+        lens_calibration=lens_calibration,
     )
 
 
@@ -498,232 +400,93 @@ def configure_stitching(
     directory: str,
     force: bool = True,
     skip_if_exists: bool = False,
-    fov: float = 108,  # Default FOV (e.g., GoPro Wide)
+    fov: Optional[float] = None,
     max_control_points: int = 240,
-    scale: float = None,
+    scale: Optional[float] = None,
     max_output_dimension: Optional[int] = None,
     device: Optional[torch.device] = None,
-    control_point_matcher: str = "superpoint-lightglue",
-    mapping_backend: str = "nona",
+    control_point_matcher: Optional[str] = None,
+    mapping_backend: Optional[str] = None,
+    game_config: Optional[dict] = None,
+    run_autooptimizer: Optional[bool] = None,
+    settings: Optional[StitchingSettings] = None,
+    game_id: Optional[str] = None,
 ) -> bool:
+    """Calibrate two BGR frames using the shared project builder.
+
+    Explicit arguments override game settings; unspecified values use the same
+    defaults as the tracker. Input images stay temporary until the shared
+    builder publishes the completed generation.
     """
-    Configure and run the stitching pipeline. This includes:
-      - Saving input frames as images.
-      - Generating a Hugin PTO project file.
-      - Computing control points and updating the PTO file.
-      - Running auto-optimisation and generating mapping and panorama images.
-
-    Args:
-        frame1: First input frame (BGR image as a NumPy array).
-        frame2: Second input frame (BGR image as a NumPy array).
-        directory: Directory where output files will be saved.
-        force: If True, force re-creation of the project file.
-        skip_if_exists: If True, skip creation if output files already exist and are up-to-date.
-        fov: Field-of-view parameter for the project generation.
-        max_control_points: Maximum number of control points to compute.
-        max_output_dimension: Maximum generated panorama width/height. If set, the PTO is auto-scaled to fit.
-        device: Torch device for computations.
-        control_point_matcher: Learned matcher used for point correspondences.
-        mapping_backend: ``nona`` or a native OpenCV mapping backend.
-
-    Returns:
-        True if the process completes successfully.
-    """
-    mapping_backend = normalize_mapping_backend(mapping_backend)
-    if mapping_backend in OPENCV_MAPPING_BACKENDS and scale not in (None, 1.0):
-        raise ValueError(
-            f"The {mapping_backend} backend does not accept --scale; " "use --max-output-dimension"
-        )
-    max_output_dimension = normalize_max_output_dimension(max_output_dimension)
-
-    # Define file names for saved images.
-    left_image_file: str = "left.png"
-    right_image_file: str = "right.png"
-    f1: str = os.path.join(directory, left_image_file)
-    f2: str = os.path.join(directory, right_image_file)
-
-    # Save the frames to disk.
-    cv2.imwrite(f1, frame1)
-    cv2.imwrite(f2, frame2)
-
-    # Define paths for the project file and autooptimiser output.
-    project_file_path: str = os.path.join(directory, "hm_project.pto")
-    pto_path: Path = Path(project_file_path)
-    dir_name: str = str(pto_path.parent)
-    hm_project: str = project_file_path
-    autooptimiser_out: str = os.path.join(dir_name, "autooptimiser_out.pto")
-    assert autooptimiser_out != hm_project, "Output project file conflicts with input project file."
-
-    # Optionally skip processing if outputs already exist and are up-to-date.
-    if skip_if_exists and (
-        os.path.exists(project_file_path)
-        and os.path.exists(autooptimiser_out)
-        and not is_older_than(project_file_path, autooptimiser_out)
+    camera_fov = None
+    if fov is not None:
+        stitch_config = (game_config or {}).get("stitching")
+        if stitch_config is None:
+            stitch_config = {}
+        inherited_fov = stitch_config.get("camera_fov")
+        camera_fov = dict(inherited_fov) if inherited_fov is not None else {}
+        camera_fov["horizontal_fov"] = fov
+    settings = settings or read_stitching_settings(
+        game_config,
+        control_point_matcher=control_point_matcher,
+        mapping_backend=mapping_backend,
+        max_output_dimension=max_output_dimension,
+        run_autooptimizer=run_autooptimizer,
+        camera_fov=camera_fov,
+    )
+    if (
+        isinstance(max_control_points, bool)
+        or not isinstance(max_control_points, int)
+        or max_control_points < 4
     ):
-        print(f"Project file already exists (skipping project creation): {autooptimiser_out}")
-        return True
-
-    curr_dir: str = os.getcwd()
-    os.chdir(dir_name)
-    try:
-        # Generate the initial PTO project file if it doesn't exist or if forced.
-        if not os.path.exists(hm_project) or force:
-            cmd = [
-                "pto_gen",
-                "-p",
-                "0",
-                "-o",
-                hm_project,
-                "-f",
-                str(fov),
-                left_image_file,
-                right_image_file,
-            ]
-            _run_stitching_command(cmd)
-
-        # Calculate control points using the provided frames.
-        control_points: Dict[str, torch.Tensor] = calculate_control_points(
-            frame1,
-            frame2,
+        raise ValueError("max_control_points must be an integer of at least four")
+    if settings.control_point_matcher == "akaze-hamming" and max_control_points < 6:
+        raise ValueError("AKAZE max_control_points must be at least six")
+    settings = replace(settings, max_control_points=max_control_points)
+    validate_output_scale(scale, settings.mapping_backend)
+    directory = str(Path(directory).resolve())
+    lens_calibration = (
+        load_lens_calibration(directory)
+        if settings.control_point_matcher == "akaze-hamming"
+        else None
+    )
+    if lens_calibration is not None and settings.mapping_backend == "nona":
+        raise ValueError(
+            "Calibrated AKAZE requires an OpenCV mapping backend; NONA does not consume KB4 lenses"
+        )
+    settings = replace(
+        settings,
+        lens_profile_fingerprint=lens_calibration.fingerprint if lens_calibration else None,
+    )
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix="hm-calibration-input-", dir=directory) as sampled:
+        images = [str(Path(sampled) / name) for name in ("left.png", "right.png")]
+        for image, frame in zip(images, (frame1, frame2)):
+            if not cv2.imwrite(image, frame):
+                raise OSError(f"Failed to save calibration frame: {image}")
+        control_points_factory = partial(
+            calculate_control_points,
+            images[0],
+            images[1],
             max_control_points=max_control_points,
             device=device,
-            max_num_keypoints=2048,
-            output_directory=directory,
-            matcher=control_point_matcher,
+            matcher=settings.control_point_matcher,
+            lens_calibration=lens_calibration,
         )
-        # Update the PTO file with the new control points.
-        update_pto_file(project_file_path, control_points)
-
-        _remove_remap_outputs(dir_name)
-
-        def run_autooptimiser(output_scale: Optional[float]) -> None:
-            cmd = [
-                "autooptimiser",
-                "-a",
-                "-l",
-                "-s",
-                "-o",
-                autooptimiser_out,
-                hm_project,
-            ]
-            if output_scale and output_scale != 1.0:
-                cmd += [
-                    "-x",
-                    str(output_scale),
-                ]
-            _run_stitching_command(cmd)
-
-        output_scale = float(scale) if scale else None
-        if mapping_backend == "nona":
-            run_autooptimiser(output_scale)
-            if max_output_dimension and max_output_dimension > 0:
-                canvas_size = _read_pto_canvas_size(autooptimiser_out)
-                if canvas_size:
-                    canvas_width, canvas_height = canvas_size
-                    longest_dimension = max(canvas_width, canvas_height)
-                    if longest_dimension > max_output_dimension:
-                        current_scale = output_scale if output_scale else 1.0
-                        output_scale = current_scale * (
-                            float(max_output_dimension) / float(longest_dimension)
-                        )
-                        print(
-                            "Scaling Hugin canvas from "
-                            f"{canvas_width}x{canvas_height} to fit max dimension "
-                            f"{max_output_dimension} (autooptimiser -x {output_scale:.6f})"
-                        )
-                        run_autooptimiser(output_scale)
-        else:
-            shutil.copyfile(hm_project, autooptimiser_out)
-
-        def run_nona() -> List[str]:
-            cmd = [
-                "nona",
-                "-m",
-                "TIFF_m",
-                "-z",
-                "NONE",
-                "--bigtiff",
-                "-c",
-                "-o",
-                "mapping_",
-                autooptimiser_out,
-            ]
-            _run_stitching_command(cmd)
-            files = sorted(str(path) for path in Path(dir_name).glob("mapping_????.tif"))
-            if not files:
-                raise FileNotFoundError(f"No Hugin mapping TIFFs were generated in {dir_name}")
-            return files
-
-        mapping_files: List[str] = []
-        if mapping_backend == "opencv-magsac":
-            mapping_files = create_opencv_magsac_mapping_files(
-                [f1, f2],
-                control_points,
-                dir_name,
-                max_output_dimension=max_output_dimension,
-            )
-        elif mapping_backend == "opencv-affine-ransac":
-            mapping_files = create_opencv_affine_ransac_mapping_files(
-                [f1, f2],
-                control_points,
-                dir_name,
-                max_output_dimension=max_output_dimension,
-            )
-        else:
-            for attempt in range(3):
-                mapping_files = run_nona()
-                if not max_output_dimension or max_output_dimension <= 0:
-                    break
-
-                mapping_canvas_size = _read_mapping_canvas_size(mapping_files)
-                if not mapping_canvas_size:
-                    break
-
-                mapping_width, mapping_height = mapping_canvas_size
-                longest_mapping_dimension = max(mapping_width, mapping_height)
-                if longest_mapping_dimension <= max_output_dimension:
-                    break
-
-                if attempt == 2:
-                    raise RuntimeError(
-                        "Generated Hugin mapping canvas "
-                        f"{mapping_width}x{mapping_height} still exceeds max dimension "
-                        f"{max_output_dimension}"
-                    )
-
-                current_scale = output_scale if output_scale else 1.0
-                output_scale = (
-                    current_scale
-                    * (float(max_output_dimension) / float(longest_mapping_dimension))
-                    * 0.999
-                )
-                print(
-                    "Generated mapping canvas "
-                    f"{mapping_width}x{mapping_height} exceeds max dimension "
-                    f"{max_output_dimension}; retrying autooptimiser -x {output_scale:.6f}"
-                )
-                _remove_mapping_outputs(dir_name)
-                run_autooptimiser(output_scale)
-
-        # Blend the mappings into a panorama using enblend.
-        cmd = [
-            get_enblend_bin(),
-            "--save-masks=seam_file.png",
-            "-o",
-            os.path.join(dir_name, "panorama.tif"),
-            *mapping_files,
-        ]
-        try:
-            _run_stitching_command(cmd)
-        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-            try:
-                Path(dir_name, "seam_file.png").unlink()
-            except FileNotFoundError:
-                pass
-            print(f"Warning: failed to run enblend for seam mask generation: {exc}")
-    finally:
-        os.chdir(curr_dir)
-    return True
+        return build_stitching_project(
+            project_file_path=str(Path(directory) / "hm_project.pto"),
+            image_files=images,
+            max_control_points=max_control_points,
+            skip_if_exists=skip_if_exists,
+            force=force,
+            scale=scale,
+            settings=settings,
+            lens_calibration=lens_calibration,
+            lens_calibration_resolved=True,
+            control_points_factory=control_points_factory,
+            game_id=game_id,
+            game_config=game_config,
+        )
 
 
 def main() -> None:
@@ -746,24 +509,24 @@ def main() -> None:
         help="Game ID (everything being in $HOME/Videos/game-id)",
     )
     parser.add_argument("--left", default=None, help="Path to left video file")
-    parser.add_argument("--right", default=None, help="Path to left video file")
+    parser.add_argument("--right", default=None, help="Path to right video file")
     parser.add_argument(
-        "--max-control-points", type=int, default=500, help="Maximum number of control points"
+        "--max-control-points", type=int, default=None, help="Maximum number of control points"
     )
     parser.add_argument(
         "--control-point-matcher",
         choices=CONTROL_POINT_MATCHERS,
-        default="superpoint-lightglue",
+        default=None,
         help="Feature matcher used to find control points",
     )
     parser.add_argument(
         "--mapping-backend",
         choices=MAPPING_BACKENDS,
-        default="nona",
+        default=None,
         help="Backend used to generate mapping TIFFs",
     )
-    parser.add_argument("--lfo", default=None, help="Left frame offset")
-    parser.add_argument("--rfo", default=None, help="Right frame offset")
+    parser.add_argument("--lfo", type=int, default=None, help="Left frame offset")
+    parser.add_argument("--rfo", type=int, default=None, help="Right frame offset")
     parser.add_argument(
         "--synchronize-only",
         action="store_true",
@@ -781,63 +544,125 @@ def main() -> None:
         type=int,
         help="Maximum final panorama width/height; scales the Hugin canvas to fit when needed",
     )
+    parser.add_argument(
+        "--run-autooptimizer",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable Hugin optimization (required for NONA)",
+    )
+    parser.add_argument(
+        "--device", default=None, help="Torch matcher device, for example cpu or cuda:0"
+    )
+    parser.add_argument(
+        "--stitch-frame-time", default=None, help="Calibration time (HH:MM:SS or seconds)"
+    )
+    parser.add_argument(
+        "--calibration-frame-count",
+        type=int,
+        default=None,
+        help="Synchronized frame pairs to sample (1–64)",
+    )
     args = parser.parse_args()
 
     if (not args.left or not args.right) and not args.game_id:
-        print("You must supply either left and right videos or a game-id")
-        exit(1)
+        parser.error("Supply both --left and --right, or --game-id")
+    if (args.lfo is None) != (args.rfo is None):
+        parser.error("--lfo and --rfo must be supplied together")
+    if any(offset is not None and offset < 0 for offset in (args.lfo, args.rfo)):
+        parser.error("Frame offsets must be nonnegative")
 
-    if (not args.left or not args.right) and args.game_id:
-        game_dir: str = _game_dir_for_id(args.game_id)
-        config_file: str = os.path.join(game_dir, "config.yaml")
-        if not os.path.exists(config_file):
-            print(f"Could not find config file: {config_file}")
-            exit(1)
-        with open(config_file, "r") as file:
-            config_yaml = yaml.safe_load(file)
-        args.left = config_yaml["game"]["videos"]["left"][0]
-        if "/" not in args.left:
-            args.left = os.path.join(game_dir, args.left)
-        args.right = config_yaml["game"]["videos"]["right"][0]
-        if "/" not in args.right:
-            args.right = os.path.join(game_dir, args.right)
-
-    is_image = False
-    if args.left.endswith(".png") and args.right.endswith(".png"):
-        is_image = True
-
-    if not is_image:
-        # Determine frame offsets by synchronizing audio.
-        if (args.lfo is None and args.rfo is None) or args.synchronize_only:
-            lfo, rfo = synchronize_by_audio(args.left, args.right)
+    game_config = get_game_config(args.game_id) if args.game_id else {}
+    game_dir = _game_dir_for_id(args.game_id) if args.game_id else None
+    videos = game_config.get("game", {}).get("videos", {})
+    for side in ("left", "right"):
+        explicit = args.left if side == "left" else args.right
+        if explicit is None:
+            configured = videos.get(side)
+            if (
+                not isinstance(configured, list)
+                or not configured
+                or not isinstance(configured[0], str)
+            ):
+                parser.error(f"Game configuration must define game.videos.{side}")
+            explicit = configured[0]
+            if not Path(explicit).is_absolute():
+                explicit = str(Path(game_dir) / explicit)
+        if side == "left":
+            args.left = explicit
         else:
-            lfo, rfo = args.lfo, args.rfo
+            args.right = explicit
 
-        if args.synchronize_only:
-            print(f"Left frame offset: {lfo}")
-            print(f"Right frame offset: {rfo}")
-            exit(0)
+    image_left = Path(args.left).suffix.lower() == ".png"
+    image_right = Path(args.right).suffix.lower() == ".png"
+    if image_left != image_right:
+        parser.error("Both inputs must be PNG images or both must be videos")
+    if args.synchronize_only:
+        if image_left:
+            parser.error("--synchronize-only requires video inputs")
+        lfo, rfo = synchronize_by_audio(args.left, args.right)
+        print(f"Left frame offset: {lfo}")
+        print(f"Right frame offset: {rfo}")
+        return
 
-        print("Extracting frames at the sync points...")
-    else:
-        lfo, rfo = None, None
-
-    # Ensure frame indices are integers.
-    frame1: np.ndarray = extract_frame(args.left, lfo)
-    frame2: np.ndarray = extract_frame(args.right, rfo)
-
-    # Run the stitching pipeline which includes control point computation and PTO update.
-    print(f"Running {args.control_point_matcher} to obtain control point matches...")
-    configure_stitching(
-        frame1,
-        frame2,
-        directory=str(Path(args.left).parent),
-        max_control_points=args.max_control_points,
-        scale=args.scale,
-        max_output_dimension=args.max_output_dimension,
+    settings = read_stitching_settings(
+        game_config,
         control_point_matcher=args.control_point_matcher,
         mapping_backend=args.mapping_backend,
+        max_output_dimension=args.max_output_dimension,
+        run_autooptimizer=args.run_autooptimizer,
+        calibration_frame_count=args.calibration_frame_count,
+        max_control_points=args.max_control_points,
     )
+    validate_output_scale(args.scale, settings.mapping_backend)
+    device = torch.device(args.device) if args.device is not None else None
+    directory = game_dir or str(Path(args.left).resolve().parent)
+    if image_left:
+        if args.lfo is not None or args.stitch_frame_time is not None:
+            parser.error("Frame offsets and calibration times require video inputs")
+        if args.calibration_frame_count not in (None, 1):
+            parser.error("Multiple calibration frames require video inputs")
+        result = configure_stitching(
+            extract_frame(args.left, None),
+            extract_frame(args.right, None),
+            directory=directory,
+            max_control_points=settings.max_control_points,
+            scale=args.scale,
+            device=device,
+            settings=settings,
+            game_config=game_config,
+            game_id=args.game_id,
+        )
+        if result is not True:
+            raise RuntimeError("Stitching calibration did not produce a usable project")
+    else:
+        stitch_frame_time = args.stitch_frame_time
+        if stitch_frame_time is None:
+            stitch_config = game_config.get("stitching")
+            stitch_frame_time = (
+                stitch_config.get("stitch_frame_time") if stitch_config is not None else None
+            )
+        base_frame_offset = 0
+        if stitch_frame_time is not None:
+            base_frame_offset = time_to_frame(str(stitch_frame_time), BasicVideoInfo(args.left).fps)
+            if base_frame_offset < 0:
+                raise ValueError("Calibration time must be nonnegative")
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        configure_video_stitching(
+            dir_name=directory,
+            video_left=args.left,
+            video_right=args.right,
+            max_control_points=settings.max_control_points,
+            left_frame_offset=args.lfo,
+            right_frame_offset=args.rfo,
+            base_frame_offset=base_frame_offset,
+            stitch_frame_time=stitch_frame_time,
+            game_id=args.game_id,
+            game_config=game_config,
+            force=True,
+            settings=settings,
+            scale=args.scale,
+            device=device,
+        )
 
 
 if __name__ == "__main__":

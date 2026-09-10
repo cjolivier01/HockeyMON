@@ -5,9 +5,9 @@ rm -f panorama.tif nona*.tif
 PROJECT_FILE="hm_project.pto"
 #PROJECT_FILE="my_project.pto"
 
-# generate project file from images, FOV=108 degrees
-#pto_gen -p 0 -o my_project.pto -f 108 left.png right.png
-#pto_gen -p 1 -o my_project.pto -f 108 left.png right.png
+# generate project file from images, FOV=120 degrees
+# pto_gen -p 0 -o my_project.pto -f 120 left.png right.png
+# pto_gen --ignore-fov-rectilinear -p 0 -o my_project.pto -f 120 left.png right.png
 
 # add control points with the LightGlue-based tooling before optimizing
 
@@ -19,6 +19,12 @@ if [ "$(uname -p)" == "aarch64" ]; then
 else
   autooptimiser -a -l -s -o autooptimiser_out.pto "${PROJECT_FILE}"
 fi
+
+# Keep the project independent of intermediate outputs removed by calibration.
+PROJECT_COPY="$(mktemp "${PROJECT_FILE}.XXXXXX")"
+trap 'rm -f "${PROJECT_COPY}"' EXIT
+cp autooptimiser_out.pto "${PROJECT_COPY}"
+mv -f "${PROJECT_COPY}" "${PROJECT_FILE}"
 
 echo "Making mapping files..."
 nona --bigtiff -m TIFF_m -z NONE -c -o mapping_ autooptimiser_out.pto

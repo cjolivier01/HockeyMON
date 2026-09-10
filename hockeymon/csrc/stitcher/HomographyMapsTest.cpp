@@ -48,6 +48,84 @@ int main() {
   assert(scaled.canvas_height == 45);
   assert(std::abs(scaled.output_scale - 0.5) < 1e-6);
 
+  // A width cap does not constrain a taller canvas's height.
+  const auto width_capped = hm::stitcher::create_homography_maps(
+      left_points, right_points, 100, 240, 100, 240, 1.0, 0.999, 10000, 0, 60);
+  assert(width_capped.canvas_width == 60);
+  assert(width_capped.canvas_height == 125);
+  assert(std::abs(width_capped.output_scale - 0.5) < 1e-6);
+
+  const std::vector<std::vector<double>> lenses = {
+      {100, 80, 50, 50, 50, 40, 0, 0, 0, 0},
+      {100, 80, 50, 50, 50, 40, 0, 0, 0, 0}};
+  const auto calibrated = hm::stitcher::create_homography_maps(
+      right_points,
+      right_points,
+      100,
+      80,
+      100,
+      80,
+      1.0,
+      0.999,
+      10000,
+      0,
+      60,
+      lenses);
+  assert(calibrated.canvas_width == 60);
+  const auto& calibrated_left = calibrated.image_maps[0];
+  for (int x = 0; x < calibrated_left.width; ++x) {
+    const int y = 24;
+    const double rectified_x = x / calibrated.output_scale;
+    const double expected_x =
+        50.0 * std::atan((rectified_x - 50.0) / 50.0) + 50.0;
+    const auto index = static_cast<size_t>(y * calibrated_left.width + x);
+    assert(calibrated_left.x_map[index] == std::lround(expected_x));
+    assert(calibrated_left.y_map[index] == 40);
+  }
+  bool rejected_small_coverage = false;
+  std::vector<std::array<double, 2>> concentrated;
+  for (int y = 0; y < 4; ++y) {
+    for (int x = 0; x < 5; ++x)
+      concentrated.push_back({10.0 + x, 10.0 + y});
+  }
+  try {
+    hm::stitcher::create_homography_maps(
+        concentrated,
+        concentrated,
+        1000,
+        800,
+        1000,
+        800,
+        1.0,
+        0.999,
+        10000,
+        0,
+        0,
+        lenses);
+  } catch (const hm::stitcher::CalibrationAlignmentError&) {
+    rejected_small_coverage = true;
+  }
+  assert(rejected_small_coverage);
+  bool rejected_partial_lenses = false;
+  try {
+    hm::stitcher::create_homography_maps(
+        right_points,
+        right_points,
+        100,
+        80,
+        100,
+        80,
+        1.0,
+        0.999,
+        10000,
+        0,
+        0,
+        {lenses[0]});
+  } catch (const std::invalid_argument&) {
+    rejected_partial_lenses = true;
+  }
+  assert(rejected_partial_lenses);
+
   std::vector<std::array<double, 2>> affine_left_points;
   affine_left_points.reserve(right_points.size());
   for (const auto& point : right_points) {

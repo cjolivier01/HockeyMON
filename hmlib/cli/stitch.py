@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import math
 import os
+import sys
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -23,6 +24,7 @@ from hmlib.hm_opts import _get_baseline_runtime_config, hm_opts, preferred_arg
 from hmlib.log import get_root_logger
 from hmlib.orientation import configure_game_videos
 from hmlib.stitching.configure_stitching import clean_stitch_game_artifacts
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.iterators import CachedIterator
 from hmlib.utils.path import add_prefix_to_filename
 
@@ -654,13 +656,6 @@ def stitch_videos(
         config_stitch_frame_time = stitch_cfg.get("stitch_frame_time")
         stitch_frame_time = preferred_arg(stitch_frame_time, config_stitch_frame_time)
         blend_mode = str(stitch_cfg.get("blend_mode") or blend_mode)
-        control_point_matcher = str(
-            stitch_cfg.get("control_point_matcher") or "superpoint-lightglue"
-        )
-        mapping_backend = str(stitch_cfg.get("mapping_backend") or "nona")
-        max_output_dimension = stitch_cfg.get("max_output_dimension")
-        if max_output_dimension is not None:
-            max_output_dimension = int(max_output_dimension)
         minimize_blend = bool(stitch_cfg.get("minimize_blend", minimize_blend))
         python_blender = bool(stitch_cfg.get("python_blender", python_blender))
         dtype = _resolve_stitch_tensor_dtype(dtype, stitch_cfg)
@@ -701,9 +696,6 @@ def stitch_videos(
             stitch_frame_time=stitch_frame_time,
             ignore_private_config=ignore_private_config,
             game_config=aspen_cfg_all,
-            control_point_matcher=control_point_matcher,
-            mapping_backend=mapping_backend,
-            max_output_dimension=max_output_dimension,
         )
 
         stitch_videos = {
@@ -957,6 +949,7 @@ def stitch_videos(
             "device": encoder_device,
             "work_dir": work_dir,
             "progress_bar": progress_bar,
+            "source_video_paths": list(videos["left"]) + list(videos["right"]),
         }
         if profiler is not None:
             aspen_shared["profiler"] = profiler
@@ -1082,13 +1075,11 @@ def stitch_videos(
         except StopIteration:
             pass
         finally:
-            data_loader.close()
+            actions = [("stitch dataloader", data_loader.close)]
             if shower is not None:
-                shower.close()
-            try:
-                aspen_net.finalize()
-            except Exception:
-                pass
+                actions.append(("stitch preview", shower.close))
+            actions.append(("stitch pipeline", aspen_net.finalize))
+            finalize_resources(actions, primary_error=sys.exc_info()[1])
     return lfo, rfo
 
 

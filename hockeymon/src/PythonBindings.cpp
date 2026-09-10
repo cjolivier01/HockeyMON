@@ -34,6 +34,7 @@
 #include "hockeymon/csrc/pytorch/image_stitch.h"
 #include "hockeymon/csrc/pytorch/torch_cuda_compat.h"
 #include "hockeymon/csrc/stitcher/HomographyMaps.h"
+#include "hockeymon/csrc/stitcher/AkazeBindings.h"
 #include "hockeymon/csrc/ui/HmRenderSet.h"
 
 #ifndef NO_CPP_BLENDING
@@ -543,6 +544,7 @@ void on_python_exit() {
 } // namespace hm
 
 void init_stitching(::pybind11::module_& m) {
+  hm::stitcher::bind_akaze_features(m);
   // hm::init_stack_trace();
 
   // py::class_<hm::HMPostprocessConfig,
@@ -649,6 +651,9 @@ void init_stitching(::pybind11::module_& m) {
     return output;
   };
 
+  py::register_exception<hm::stitcher::CalibrationAlignmentError>(
+      m, "CalibrationAlignmentError", PyExc_RuntimeError);
+
   m.def(
       "create_homography_maps",
       [homography_result_to_dict](
@@ -661,7 +666,9 @@ void init_stitching(::pybind11::module_& m) {
           double reprojection_threshold,
           double confidence,
           int max_iterations,
-          int max_output_dimension) {
+          int max_output_dimension,
+          int max_output_width,
+          const std::vector<std::vector<double>>& lens_calibration) {
         hm::stitcher::HomographyMapResult result;
         {
           py::gil_scoped_release release;
@@ -675,7 +682,9 @@ void init_stitching(::pybind11::module_& m) {
               reprojection_threshold,
               confidence,
               max_iterations,
-              max_output_dimension);
+              max_output_dimension,
+              max_output_width,
+              lens_calibration);
         }
         return homography_result_to_dict(result);
       },
@@ -688,7 +697,9 @@ void init_stitching(::pybind11::module_& m) {
       py::arg("reprojection_threshold") = 3.0,
       py::arg("confidence") = 0.999,
       py::arg("max_iterations") = 10000,
-      py::arg("max_output_dimension") = 0);
+      py::arg("max_output_dimension") = 0,
+      py::arg("max_output_width") = 0,
+      py::arg("lens_calibration") = std::vector<std::vector<double>>{});
 
   m.def(
       "create_affine_ransac_maps",
@@ -703,7 +714,9 @@ void init_stitching(::pybind11::module_& m) {
           double confidence,
           int max_iterations,
           int refine_iterations,
-          int max_output_dimension) {
+          int max_output_dimension,
+          int max_output_width,
+          const std::vector<std::vector<double>>& lens_calibration) {
         hm::stitcher::HomographyMapResult result;
         {
           py::gil_scoped_release release;
@@ -718,7 +731,9 @@ void init_stitching(::pybind11::module_& m) {
               confidence,
               max_iterations,
               refine_iterations,
-              max_output_dimension);
+              max_output_dimension,
+              max_output_width,
+              lens_calibration);
         }
         return homography_result_to_dict(result);
       },
@@ -732,7 +747,9 @@ void init_stitching(::pybind11::module_& m) {
       py::arg("confidence") = 0.999,
       py::arg("max_iterations") = 10000,
       py::arg("refine_iterations") = 10,
-      py::arg("max_output_dimension") = 0);
+      py::arg("max_output_dimension") = 0,
+      py::arg("max_output_width") = 0,
+      py::arg("lens_calibration") = std::vector<std::vector<double>>{});
 
   py::class_<hm::BlenderConfig, std::shared_ptr<hm::BlenderConfig>>(
       m, "BlenderConfig")
@@ -1772,6 +1789,11 @@ void init_living_boxes(::pybind11::module_& m) {
           py::arg("max_speed_y"),
           py::arg("max_accel_x"),
           py::arg("max_accel_y"))
+      .def(
+          "set_resizing_shrink_thresholds",
+          &LivingBox::set_resizing_shrink_thresholds,
+          py::arg("width_ratio"),
+          py::arg("height_ratio"))
       .def("resizing_state", &LivingBox::ResizingBox::get_state)
       .def("resizing_config", &LivingBox::ResizingBox::get_config)
       .def("translation_state", &LivingBox::TranslatingBox::get_state)

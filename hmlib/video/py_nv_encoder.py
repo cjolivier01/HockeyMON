@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import os
 import subprocess
+import sys
 import threading
 from collections import deque
 from fractions import Fraction
@@ -13,6 +14,7 @@ import torch
 from typeguard import typechecked
 
 from hmlib.log import get_logger
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor
 from hmlib.video.ffmpeg import build_ffmpeg_output_handler, iter_ffmpeg_output_lines
 from hmlib.video.ffmpeg_mux_cmd import build_ffmpeg_raw_bitstream_mux_cmd
@@ -314,58 +316,74 @@ class PyNvVideoEncoder:
         if not self._opened:
             return
 
-        if self._encoder is not None:
-            # Flush encoder
-            bitstream = self._encoder.EndEncode()  # type: ignore[union-attr]
-            if bitstream:
-                if self._backend in {"pyav", "raw"}:
-                    if self._bitstream_file is None:
-                        raise RuntimeError(
-                            "Bitstream backend is selected but bitstream file is not open."
-                        )
-                    self._bitstream_file.write(bytearray(bitstream))
-                elif self._backend == "callback":
-                    if self._bitstream_handler is None:
-                        raise RuntimeError(
-                            "Callback backend is selected but bitstream handler is not set."
-                        )
-                    self._bitstream_handler(bytes(bitstream))
-                else:
-                    raise RuntimeError(f"Unsupported NVENC encoder backend: {self._backend}")
+        try:
+            if self._encoder is not None:
+                # Flush encoder
+                bitstream = self._encoder.EndEncode()  # type: ignore[union-attr]
+                if bitstream:
+                    if self._backend in {"pyav", "raw"}:
+                        if self._bitstream_file is None:
+                            raise RuntimeError(
+                                "Bitstream backend is selected but bitstream file is not open."
+                            )
+                        self._bitstream_file.write(bytearray(bitstream))
+                    elif self._backend == "callback":
+                        if self._bitstream_handler is None:
+                            raise RuntimeError(
+                                "Callback backend is selected but bitstream handler is not set."
+                            )
+                        self._bitstream_handler(bytes(bitstream))
+                    else:
+                        raise RuntimeError(f"Unsupported NVENC encoder backend: {self._backend}")
 
-        if self._backend in {"pyav", "raw"}:
-            bitstream_path = self._bitstream_path
-            bitstream_file = self._bitstream_file
-            self._bitstream_file = None
-            # Close the sidecar bitstream file before remuxing so ffmpeg/PyAV
-            # sees a fully flushed file on disk.
-            if bitstream_file is not None:
-                try:
-                    bitstream_file.flush()
-                finally:
-                    bitstream_file.close()
-            if bitstream_path is not None:
-                if self._backend == "pyav":
-                    if self._mux_audio_file:
-                        # PyAV remuxer currently does not support adding a second
-                        # audio input; fall back to the ffmpeg muxer when audio is requested.
+            if self._backend in {"pyav", "raw"}:
+                bitstream_path = self._bitstream_path
+                bitstream_file = self._bitstream_file
+                self._bitstream_file = None
+                # Close the sidecar bitstream file before remuxing so ffmpeg/PyAV
+                # sees a fully flushed file on disk.
+                if bitstream_file is not None:
+                    finalize_resources(
+                        [
+                            ("NVENC bitstream flush", bitstream_file.flush),
+                            ("NVENC bitstream close", bitstream_file.close),
+                        ]
+                    )
+                if bitstream_path is not None:
+                    if self._backend == "pyav":
+                        if self._mux_audio_file:
+                            # PyAV remuxer currently does not support adding a second
+                            # audio input; fall back to the ffmpeg muxer when audio is requested.
+                            self._mux_bitstream_file_with_ffmpeg(bitstream_path)
+                        else:
+                            self._mux_bitstream_file_with_pyav(bitstream_path)
+                    elif self._backend == "raw":
                         self._mux_bitstream_file_with_ffmpeg(bitstream_path)
                     else:
-                        self._mux_bitstream_file_with_pyav(bitstream_path)
-                elif self._backend == "raw":
-                    self._mux_bitstream_file_with_ffmpeg(bitstream_path)
-                else:
-                    raise RuntimeError(f"Unsupported NVENC encoder backend: {self._backend}")
-        elif self._backend == "callback":
-            pass
-        else:
-            assert self._bitstream_file is None
+                        raise RuntimeError(f"Unsupported NVENC encoder backend: {self._backend}")
+            elif self._backend == "callback":
+                pass
+            else:
+                assert self._bitstream_file is None
 
-        self._encoder = None
-        self._av_container = None
-        self._av_stream = None
-        self._bitstream_path = None
-        self._opened = False
+            self._encoder = None
+            self._av_container = None
+            self._av_stream = None
+            self._bitstream_path = None
+            self._opened = False
+        finally:
+            bitstream_file = self._bitstream_file
+            self._bitstream_file = None
+            self._encoder = None
+            self._opened = False
+            if bitstream_file is not None:
+                finalize_resources(
+                    [
+                        ("NVENC bitstream flush", bitstream_file.flush),
+                        ("NVENC bitstream close", bitstream_file.close),
+                    ],
+                    primary_error=sys.exc_info()[1],
+                )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -561,16 +579,25 @@ class PyNvVideoEncoder:
 
             def _reader(stream, stream_name: str, sink: deque) -> None:
                 try:
+                    handle_progress = True
                     for line in iter_ffmpeg_output_lines(stream):
                         sink.append(line)
-                        output_handler.handle_line(line, stream_name)
+                        if handle_progress:
+                            try:
+                                output_handler.handle_line(line, stream_name)
+                            except Exception:
+                                logger.exception(
+                                    "Failed handling ffmpeg %s progress; continuing to drain output",
+                                    stream_name,
+                                )
+                                handle_progress = False
                 except Exception:
-                    pass
+                    logger.exception("Failed reading ffmpeg %s progress output", stream_name)
                 finally:
                     try:
                         stream.close()
                     except Exception:
-                        pass
+                        logger.exception("Failed closing ffmpeg %s progress stream", stream_name)
 
             proc = None
             returncode: Optional[int] = None
@@ -612,32 +639,24 @@ class PyNvVideoEncoder:
                         f"(returncode={returncode}, stderr={stderr_output!r}, stdout={stdout_output!r})"
                     )
             finally:
-                output_handler.close(returncode)
-                if proc is not None and proc.poll() is None:
-                    try:
+
+                def close_process():
+                    if proc is not None and proc.poll() is None:
                         proc.kill()
                         proc.wait(timeout=1.0)
-                    except Exception:
-                        pass
 
-        if mux_audio_file:
-            try:
-                _run(_build_cmd(with_audio=True), label="ffmpeg mux (video+audio)")
-                return
-            except Exception:
-                if self.output_path.stem.endswith("-with-audio"):
-                    logger.exception(
-                        "ffmpeg mux with audio failed; refusing to fall back to video-only mux "
-                        "because output_path implies audio. (audio_file=%s)",
-                        mux_audio_file,
-                    )
-                    raise
-                logger.exception(
-                    "ffmpeg mux with audio failed; falling back to video-only mux. (audio_file=%s)",
-                    mux_audio_file,
+                finalize_resources(
+                    [
+                        ("ffmpeg process", close_process),
+                        ("ffmpeg progress output", lambda: output_handler.close(returncode)),
+                    ],
+                    primary_error=sys.exc_info()[1],
                 )
 
-        _run(_build_cmd(with_audio=False), label="ffmpeg mux (video-only)")
+        if mux_audio_file:
+            _run(_build_cmd(with_audio=True), label="ffmpeg mux (video+audio)")
+        else:
+            _run(_build_cmd(with_audio=False), label="ffmpeg mux (video-only)")
 
     def _mux_bitstream_file_with_pyav(self, bitstream_path: Path) -> None:
         """

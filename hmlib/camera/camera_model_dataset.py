@@ -16,6 +16,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from hmlib.camera.camera_policy import read_camera_policy_boundaries
 from hmlib.camera.camera_transformer import CameraNorm, build_frame_features
 
 
@@ -88,7 +89,17 @@ class CameraPanZoomDataset(Dataset):
             set(self.tracks["Frame"].unique()).intersection(set(self.cams["Frame"].unique()))
         )
         self.frames: List[int] = [int(f) for f in frames]
-        self.valid_indices: List[int] = [i for i in range(self.window, len(self.frames))]
+        self.frame_set = set(self.frames)
+        self.policy_boundaries = read_camera_policy_boundaries(camera_csv, self.cams["Frame"])
+        self.valid_indices: List[int] = [
+            i
+            for i in range(self.window, len(self.frames))
+            if all(
+                self.frames[j + 1] == self.frames[j] + 1
+                and self.frames[j + 1] not in self.policy_boundaries
+                for j in range(i - self.window, i)
+            )
+        ]
 
     def __len__(self) -> int:
         return len(self.valid_indices)
@@ -117,14 +128,16 @@ class CameraPanZoomDataset(Dataset):
         prev_cx, prev_cy, prev_h = None, None, None
         for f in ts:
             if prev_cx is None:
-                # use previous camera center from camera csv if available
-                pcx, pcy, ph = self._get_cam(max(self.frames[0], f - 1))
-                prev_cx, prev_cy, prev_h = pcx, pcy, ph
+                # Never bridge a missing numeric frame with stale camera state.
+                previous_frame = f - 1
+                if previous_frame in self.frame_set and f not in self.policy_boundaries:
+                    pcx, pcy, ph = self._get_cam(previous_frame)
+                    prev_cx, prev_cy, prev_h = pcx, pcy, ph
             tlwh = self._get_tlwh(f)
             feat = build_frame_features(
                 tlwh=tlwh,
                 norm=self.norm,
-                prev_cam_center=(prev_cx, prev_cy),
+                prev_cam_center=None if prev_cx is None else (prev_cx, prev_cy),
                 prev_cam_h=prev_h,
             )
             feats.append(feat)

@@ -188,12 +188,12 @@ pytest_test(
     ],
 )
 
-py_test(
-    name="test_create_control_points_scale",
-    srcs=["test_create_control_points_scale.py"],
-    data=[
-        "//hmlib:cli/create_control_points.py",
-    ],
+sh_test(
+    name = "test_create_control_points_scale",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_create_control_points_scale.py", "cv2", "ffmpegio", "numpy", "pytest", "scipy", "tifffile", "torch", "yaml"],
+    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_create_control_points_scale.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
 
 sh_test(
@@ -234,6 +234,102 @@ sh_test(
         "//hmlib:hmlib.lib",
         "python_runtime.sh",
         "test_stitching_feature_backends.py",
+        "stitching_fixtures.py",
+    ],
+    env_inherit = [
+        "CONDA_PREFIX",
+        "PYTHON_BIN_PATH",
+    ],
+)
+
+sh_test(
+    name = "test_stitching_settings",
+    srcs = ["runtime_pytest.sh"],
+    args = [
+        "tests/test_stitching_settings.py",
+        "cv2",
+        "numpy",
+        "pytest",
+        "tifffile",
+        "torch",
+        "yaml",
+    ],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_stitching_settings.py",
+        "stitching_fixtures.py",
+    ],
+    env_inherit = [
+        "CONDA_PREFIX",
+        "PYTHON_BIN_PATH",
+    ],
+)
+
+sh_test(
+    name = "test_rink_leveling",
+    srcs = ["runtime_pytest.sh"],
+    args = [
+        "tests/test_rink_leveling.py",
+        "cv2",
+        "numpy",
+        "PIL",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_rink_leveling.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_stitching_calibration_frames",
+    srcs = ["runtime_pytest.sh"],
+    args = [
+        "tests/test_stitching_calibration_frames.py",
+        "cv2",
+        "numpy",
+        "pytest",
+        "tifffile",
+        "torch",
+        "yaml",
+    ],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_stitching_calibration_frames.py",
+    ],
+    env_inherit = [
+        "CONDA_PREFIX",
+        "PYTHON_BIN_PATH",
+    ],
+)
+
+sh_test(
+    name = "test_stitching_akaze",
+    srcs = ["runtime_pytest.sh"],
+    args = [
+        "tests/test_stitching_akaze.py",
+        "cv2",
+        "numpy",
+        "pytest",
+        "tifffile",
+        "torch",
+        "yaml",
+    ],
+    data = [
+        "//hockeymon/csrc/stitcher:_akaze_test_native.so",
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_stitching_akaze.py",
     ],
     env_inherit = [
         "CONDA_PREFIX",
@@ -362,6 +458,29 @@ sh_test(
 )
 
 sh_test(
+    name="test_scoreboard_selector_web",
+    srcs=["runtime_pytest.sh"],
+    args=[
+        "tests/test_scoreboard_selector_web.py",
+        "cv2",
+        "mmengine",
+        "numpy",
+        "PIL",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data=[
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "//hmlib:scoreboard_selector_assets",
+        "python_runtime.sh",
+        "test_scoreboard_selector_web.py",
+    ],
+    env_inherit=["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
     name="test_shower_rocm_preview",
     srcs=["test_shower_rocm_preview.sh"],
     data=[
@@ -372,17 +491,52 @@ sh_test(
     ],
 )
 
-pytest_test(
-    name="test_camera_gpt",
-    srcs=["test_camera_gpt.py"],
-    args=[
-        "-c",
-        "$(location //:pyproject.toml)",
-    ],
-    deps=[
+sh_test(
+    name = "test_camera_gpt",
+    srcs = ["test_camera_datasets.sh"],
+    args = ["test_camera_gpt.py"],
+    data = [
+        "//:pyproject.toml",
         "//hmlib:hmlib.lib",
-        requirement("pytest"),
+        "python_runtime.sh",
+        "test_camera_gpt.py",
     ],
+)
+
+sh_test(
+    name = "test_camera_transformer",
+    srcs = ["test_camera_datasets.sh"],
+    args = ["test_camera_transformer.py"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_camera_transformer.py",
+    ],
+)
+
+sh_test(
+    name = "test_camera_policy",
+    srcs = ["runtime_pytest.sh"],
+    args = [
+        "tests/test_camera_policy.py",
+        "cv2",
+        "mmengine",
+        "numpy",
+        "pandas",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_camera_policy.py",
+        "//hockeymon:hockeymon",
+        "test_play_tracker_parity.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
 
 pytest_test(
@@ -438,6 +592,19 @@ sh_test(
 )
 
 sh_test(
+    name="test_camera_zoom",
+    srcs=["runtime_pytest.sh"],
+    args=["tests/test_camera_zoom.py", "cv2", "mmengine", "numpy", "pytest", "torch"],
+    data=[
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_camera_zoom.py",
+    ],
+    env_inherit=["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
     name="test_hm_ui_bridge",
     srcs=["runtime_pytest.sh"],
     args=[
@@ -484,6 +651,28 @@ sh_test(
 )
 
 sh_test(
+    name = "test_shadow_lift",
+    srcs = ["runtime_pytest.sh"],
+    args = [
+        "tests/test_shadow_lift.py",
+        "cv2",
+        "mmcv",
+        "mmengine",
+        "mmpose",
+        "numpy",
+        "pytest",
+        "torch",
+    ],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_shadow_lift.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
     name="test_stitch_aspen_pipeline",
     srcs=["runtime_pytest.sh"],
     args=[
@@ -520,6 +709,97 @@ sh_test(
         "//hmlib:hmlib.lib",
         "python_runtime.sh",
         "test_apply_camera_plugin_dimensions.py",
+    ],
+    env_inherit=[
+        "CONDA_PREFIX",
+        "PYTHON_BIN_PATH",
+    ],
+)
+
+sh_test(
+    name = "test_stitching_artifacts",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_stitching_artifacts.py", "cv2", "numpy", "pytest", "tifffile", "torch"],
+    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_stitching_artifacts.py", "stitching_fixtures.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_capture_stitching_projection_frames",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_capture_stitching_projection_frames.py", "cv2", "numpy", "pytest", "tifffile", "torch", "yaml"],
+    data = ["//:pyproject.toml", "//:scripts/capture_stitching_projection_frames.py", "//hmlib:config_data_files", "//hmlib:hmlib.lib", "python_runtime.sh", "test_capture_stitching_projection_frames.py", "stitching_fixtures.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name="test_output_finalization",
+    srcs=["runtime_pytest.sh"],
+    args=[
+        "tests/test_output_finalization.py",
+        "cv2",
+        "mmcv",
+        "mmengine",
+        "networkx",
+        "numpy",
+        "pandas",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data=[
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_output_finalization.py",
+    ],
+    env_inherit=[
+        "CONDA_PREFIX",
+        "PYTHON_BIN_PATH",
+    ],
+)
+
+sh_test(
+    name="test_output_publication",
+    srcs=["runtime_pytest.sh"],
+    args=[
+        "tests/test_output_publication.py",
+        "cv2",
+        "mmengine",
+        "numpy",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data=[
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_output_publication.py",
+    ],
+    env_inherit=[
+        "CONDA_PREFIX",
+        "PYTHON_BIN_PATH",
+    ],
+)
+
+sh_test(
+    name="test_video_bitrate",
+    srcs=["runtime_pytest.sh"],
+    args=[
+        "tests/test_video_bitrate.py",
+        "cv2",
+        "mmengine",
+        "numpy",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data=[
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_video_bitrate.py",
     ],
     env_inherit=[
         "CONDA_PREFIX",

@@ -4,7 +4,6 @@ import datetime
 import math
 import os
 import re
-import shutil
 import sys
 import time
 import traceback
@@ -34,6 +33,8 @@ from hmlib.config import (
 )
 from hmlib.hm_opts import _get_baseline_runtime_config, copy_opts, hm_opts
 from hmlib.log import get_root_logger, logger
+from hmlib.utils.finalization import finalize_resources
+from hmlib.utils.output_publication import artifact_name, publish_artifacts
 from hmlib.utils.path import (
     add_game_id_prefix_to_filename,
     add_prefix_to_filename,
@@ -1515,6 +1516,7 @@ def _main(args, num_gpu):
     dataloader = None
     postprocessor = None
     mux_audio_temp_file = None
+    source_video_paths: List[str] = []
     opts = copy_opts(src=args, dest=argparse.Namespace(), parser=hm_opts.parser())
     try:
 
@@ -1941,6 +1943,7 @@ def _main(args, num_gpu):
         postprocessor = None
         if args.input_video:
             input_video_files = args.input_video.split(",")
+            source_video_paths = input_video_files
             aspen_stitching_cli = getattr(args, "aspen_stitching", None)
             if aspen_stitching_cli is None:
                 use_aspen_stitching = bool(
@@ -1972,6 +1975,7 @@ def _main(args, num_gpu):
                     assert dir_name
                     input_video_files = game_videos
 
+                source_video_paths = list(game_videos["left"]) + list(game_videos["right"])
                 left_vid = BasicVideoInfo(",".join(game_videos["left"]))
                 right_vid = BasicVideoInfo(",".join(game_videos["right"]))
 
@@ -2334,9 +2338,6 @@ def _main(args, num_gpu):
 
         if not args.audio_only:
 
-            if not args.output_video_bit_rate:
-                args.output_video_bit_rate = dataloader.get_max_attribute("bit_rate")
-
             if not args.no_play_tracking:
 
                 #
@@ -2361,6 +2362,7 @@ def _main(args, num_gpu):
             other_kwargs = {
                 "dataloader": dataloader,
                 "postprocessor": postprocessor,
+                "source_video_paths": source_video_paths,
             }
 
             run_mmtrack(
@@ -2379,137 +2381,78 @@ def _main(args, num_gpu):
         # Deploy output video and CSV artifacts to --deploy-dir (explicit) or the
         # game directory (full run).
         #
-        dest_path = None
-        deploy_dir = args.deploy_dir
-        target_deploy_dir = None
-        if deploy_dir:
-            target_deploy_dir = deploy_dir
-        elif not is_truncated_run:
+        target_deploy_dir = args.deploy_dir
+        if not target_deploy_dir and not is_truncated_run:
             target_deploy_dir = (
                 args.game_dir if args.game_dir and os.path.isdir(args.game_dir) else None
             )
-
-        if output_video_path and os.path.exists(output_video_path):
-            try:
-                if args.output_video:
-                    output_av_path = str(args.output_video)
-                    parent = os.path.dirname(output_av_path)
-                    if parent:
-                        os.makedirs(parent, exist_ok=True)
-                    if os.path.abspath(output_video_path) != os.path.abspath(output_av_path):
-                        shutil.copy2(output_video_path, output_av_path)
-                    dest_path = Path(output_av_path)
-                elif target_deploy_dir:
-                    os.makedirs(target_deploy_dir, exist_ok=True)
-                    file_name = os.path.basename(output_video_path)
-                    file_name = str(
-                        add_game_id_prefix_to_filename(file_name, args.game_id, sep="-")
-                    )
-                    base_name, extension = os.path.splitext(file_name)
-                    output_av_path = None
-                    for i in range(1000):
-                        if i:
-                            fname = f"{base_name}-{i}{extension}"
-                        else:
-                            fname = f"{base_name}{extension}"
-                        candidate = os.path.join(target_deploy_dir, fname)
-                        if not os.path.exists(candidate):
-                            output_av_path = candidate
-                            break
-                    if output_av_path is None:
-                        raise RuntimeError("Could not find a free deploy filename for output video")
-                    if os.path.abspath(output_video_path) != os.path.abspath(output_av_path):
-                        shutil.copy2(output_video_path, output_av_path)
-                    dest_path = Path(output_av_path)
-            except Exception:
-                logger.exception("Failed to deploy output video; continuing.")
-                dest_path = None
-
-        if target_deploy_dir:
-            os.makedirs(target_deploy_dir, exist_ok=True)
-            csv_names = []
-            try:
-                for name in os.listdir(results_folder):
-                    if not name.endswith(".csv"):
-                        continue
-                    src_path = os.path.join(results_folder, name)
-                    if os.path.isfile(src_path):
-                        csv_names.append(name)
-            except Exception:
-                traceback.print_exc()
-                csv_names = []
-
-            def extract_suffix_num(path: Optional[os.PathLike | str]) -> Optional[int]:
-                if not path:
-                    return None
-                base = os.path.splitext(os.path.basename(str(path)))[0]
-                dash_idx = base.rfind("-")
-                if dash_idx == -1:
-                    return None
-                tail = base[dash_idx + 1 :]
-                if tail.isdigit():
-                    return int(tail)
-                return None
-
-            def with_index(name: str, suffix_num: int) -> str:
-                root, ext = os.path.splitext(name)
-                if suffix_num <= 0:
-                    return f"{root}{ext}"
-                return f"{root}-{suffix_num}{ext}"
-
-            def choose_free_suffix(names: List[str]) -> int:
-                for i in range(0, 1000):
-                    collision = False
-                    for name in names:
-                        if os.path.exists(os.path.join(target_deploy_dir, with_index(name, i))):
-                            collision = True
-                            break
-                    if not collision:
-                        return i
-                raise RuntimeError("Could not find a free suffix for CSV deployment")
-
-            suffix_num = extract_suffix_num(dest_path)
-            if suffix_num is not None and csv_names:
-                for name in csv_names:
-                    if os.path.exists(
-                        os.path.join(target_deploy_dir, with_index(name, suffix_num))
-                    ):
-                        suffix_num = None
-                        break
-            if suffix_num is None and csv_names:
-                suffix_num = choose_free_suffix(csv_names)
-
-            for name in csv_names:
-                src_path = os.path.join(results_folder, name)
-                dst_path = os.path.join(target_deploy_dir, with_index(name, int(suffix_num or 0)))
-                try:
-                    shutil.copy2(src_path, dst_path)
-                except Exception:
-                    traceback.print_exc()
-        logger.info("Completed")
+        _deploy_output_artifacts(
+            output_video_path=output_video_path,
+            output_video=args.output_video,
+            results_folder=results_folder,
+            target_deploy_dir=target_deploy_dir,
+            game_id=args.game_id,
+        )
     except Exception as ex:
         print(ex)
         traceback.print_exc()
         raise
     finally:
-        try:
-            if postprocessor is not None:
-                try:
-                    postprocessor.stop()
-                except Exception:
-                    traceback.print_exc()
-            if dataloader is not None and hasattr(dataloader, "close"):
-                try:
-                    dataloader.close()
-                except Exception:
-                    traceback.print_exc()
-            if mux_audio_temp_file is not None:
-                try:
-                    mux_audio_temp_file.close()
-                except Exception:
-                    traceback.print_exc()
-        except Exception as ex:
-            print(f"Exception while shutting down: {ex}")
+        actions = []
+        if postprocessor is not None:
+            actions.append(("tracking postprocessor", postprocessor.stop))
+        if dataloader is not None:
+            actions.append(("tracking dataloader", dataloader.close))
+        if mux_audio_temp_file is not None:
+            actions.append(("temporary mux audio", mux_audio_temp_file.close))
+        finalize_resources(actions, primary_error=sys.exc_info()[1])
+    logger.info("Completed")
+
+
+def _deploy_output_artifacts(
+    *,
+    output_video_path: Optional[str],
+    output_video: Optional[str],
+    results_folder: str,
+    target_deploy_dir: Optional[str],
+    game_id: Optional[str],
+) -> Optional[Path]:
+    """Publish a completed run, reserving one generation for its video and CSVs."""
+    sources = {}
+    if target_deploy_dir:
+        sources = {
+            path.name: path
+            for path in sorted(Path(results_folder).iterdir())
+            if path.suffix == ".csv" and path.is_file()
+        }
+    source_video = Path(output_video_path) if output_video_path else None
+    if source_video is not None and not source_video.is_file():
+        source_video = None
+    if source_video is not None and output_video:
+        destination = Path(output_video)
+        match = re.search(r"-(\d+)$", destination.stem)
+        suffix = int(match.group(1)) if match else 0
+        # An explicit archive filename fixes the CSV generation as well. A
+        # collision must be resolved by the caller, never by overwriting data.
+        csv_sources = {artifact_name(name, suffix): path for name, path in sources.items()}
+        if target_deploy_dir and destination.parent.resolve() == Path(target_deploy_dir).resolve():
+            if destination.resolve() != source_video.resolve():
+                csv_sources[destination.name] = source_video
+            publish_artifacts(csv_sources, target_deploy_dir, exact=True)
+        else:
+            if destination.resolve() != source_video.resolve():
+                publish_artifacts({destination.name: source_video}, destination.parent, exact=True)
+            if target_deploy_dir:
+                publish_artifacts(csv_sources, target_deploy_dir, exact=True)
+        return destination
+    if target_deploy_dir:
+        video_name = None
+        if source_video is not None:
+            video_name = str(add_game_id_prefix_to_filename(source_video.name, game_id, sep="-"))
+            sources[video_name] = source_video
+        result = publish_artifacts(sources, target_deploy_dir)
+        return result.files.get(video_name)
+    return None
 
 
 def setup_logging():

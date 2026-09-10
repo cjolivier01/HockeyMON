@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import html
 import io
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -17,6 +19,7 @@ import uuid
 import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from numbers import Integral
 from pathlib import Path
 from typing import Any, List, Optional, Tuple, Union
 from urllib.parse import urlparse
@@ -33,11 +36,72 @@ from hmlib.config import (
     set_nested_value,
 )
 from hmlib.hm_opts import hm_opts
-from hmlib.utils.image import make_visible_image
+from hmlib.utils.image import image_height, image_width, make_visible_image, resize_image
 
 _DONE_BACKGROUND_PATH = (
     Path(__file__).resolve().parents[1] / "images" / "scoreboard_selector_thank_you.svg"
 )
+
+# Match HStream's display proxy limits. Full PNG source decoding still belongs
+# to Pillow and remains subject to its decompression-bomb limits.
+_MAXIMUM_PREVIEW_DIMENSION = 8192
+_MAXIMUM_PREVIEW_PIXELS = 96 * 1024 * 1024 // 4
+_MAXIMUM_SOURCE_DIMENSION = 65535
+_MAXIMUM_SOURCE_PIXELS = 256 * 1024 * 1024
+
+
+def _bounded_preview_size(
+    source_size: Tuple[int, int], max_display_height: Optional[int] = None
+) -> Tuple[int, int]:
+    width, height = source_size
+    if (
+        width <= 0
+        or height <= 0
+        or max(width, height) > _MAXIMUM_SOURCE_DIMENSION
+        or width * height > _MAXIMUM_SOURCE_PIXELS
+    ):
+        raise ValueError(f"Scoreboard source image exceeds supported dimensions: {width}x{height}")
+    if max_display_height is not None and (
+        isinstance(max_display_height, bool)
+        or not isinstance(max_display_height, Integral)
+        or max_display_height <= 0
+    ):
+        raise ValueError("max_display_height must be a positive integer")
+    scale = min(
+        1.0,
+        _MAXIMUM_PREVIEW_DIMENSION / width,
+        _MAXIMUM_PREVIEW_DIMENSION / height,
+        math.sqrt(_MAXIMUM_PREVIEW_PIXELS / (width * height)),
+        max_display_height / height if max_display_height is not None else 1.0,
+    )
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
+
+def _prepare_selector_image(
+    image: Union[Image.Image, np.ndarray, torch.Tensor],
+    max_display_height: Optional[int],
+) -> Tuple[Image.Image, Tuple[int, int]]:
+    """Make a bounded display proxy and retain original selection coordinates."""
+    if isinstance(image, torch.Tensor) and image.ndim == 4:
+        image = image[0]
+    source_size = (
+        image.size
+        if isinstance(image, Image.Image)
+        else (int(image_width(image)), int(image_height(image)))
+    )
+    preview_size = _bounded_preview_size(source_size, max_display_height)
+    if isinstance(image, torch.Tensor):
+        # Reduce GPU tensors before copying a preview to the host.
+        if preview_size != source_size:
+            image = resize_image(image, new_width=preview_size[0], new_height=preview_size[1])
+        image = Image.fromarray(make_visible_image(image, force_numpy=True))
+    elif not isinstance(image, Image.Image):
+        image = Image.fromarray(image)
+    if image.size != preview_size:
+        # Pillow may fully decode a PNG here; only the proxy is retained and
+        # encoded for the browser, never a second full-size RGB panorama.
+        image = image.resize(preview_size, resample=Image.Resampling.LANCZOS)
+    return image.convert("RGB"), source_size
 
 
 def _has_local_display() -> bool:
@@ -167,20 +231,9 @@ class ScoreboardSelector:
         port: int = 0,
         open_browser: Optional[bool] = None,
     ) -> None:
-        del max_display_height
-
-        try:
-            if isinstance(image, Image.Image):
-                self.image = image.convert("RGB")
-            else:
-                if isinstance(image, torch.Tensor):
-                    if image.ndim == 4:
-                        image = image[0]
-                    image = make_visible_image(image.cpu())
-                self.image = Image.fromarray(image).convert("RGB")
-        except Exception:
-            traceback.print_exc()
-            raise
+        self.image, (self._image_width, self._image_height) = _prepare_selector_image(
+            image, max_display_height
+        )
 
         self._game_id = game_id or "unknown-game"
         self._session_id = uuid.uuid4().hex[:12]
@@ -194,7 +247,6 @@ class ScoreboardSelector:
         self._server_lock = threading.Lock()
         self._completed = False
 
-        self._image_width, self._image_height = self.image.size
         image_buffer = io.BytesIO()
         self.image.save(image_buffer, format="PNG")
         self._image_bytes = image_buffer.getvalue()
@@ -1630,16 +1682,19 @@ def configure_scoreboard(
         image_file = os.path.join(game_dir, "s.png")
         if not os.path.exists(image_file):
             raise FileNotFoundError(f"Could not find image file: {image_file}")
-        image = Image.open(image_file)
-    selector = ScoreboardSelector(
-        image=image,
-        initial_points=current_scoreboard,
-        max_display_height=max_display_height,
-        game_id=game_id,
-        bind_host=bind_host,
-        port=port,
-        open_browser=open_browser,
-    )
+        image_context = Image.open(image_file)
+    else:
+        image_context = contextlib.nullcontext(image)
+    with image_context as source:
+        selector = ScoreboardSelector(
+            image=source,
+            initial_points=current_scoreboard,
+            max_display_height=max_display_height,
+            game_id=game_id,
+            bind_host=bind_host,
+            port=port,
+            open_browser=open_browser,
+        )
     selector.run()
     current_scoreboard = selector.points
     current_scoreboard = _untuple_points(current_scoreboard)

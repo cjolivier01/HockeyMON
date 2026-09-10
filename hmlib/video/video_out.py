@@ -12,6 +12,7 @@ import contextlib
 import math
 import os
 from collections import OrderedDict
+from fractions import Fraction
 from typing import Any, Dict, Optional, Set, Tuple, Union
 
 import cv2
@@ -23,6 +24,7 @@ from hmlib.log import logger
 from hmlib.ui.shower import Shower
 from hmlib.utils import MeanTracker
 from hmlib.utils.cuda_graph import CudaGraphCallable
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.gpu import get_gpu_capabilities, unwrap_tensor, wrap_tensor
 from hmlib.utils.image import (
     image_height,
@@ -35,6 +37,7 @@ from hmlib.utils.image import (
 from hmlib.utils.path import add_suffix_to_filename
 from hmlib.utils.progress_bar import ProgressBar
 from hmlib.utils.torch_backend import is_rocm_backend
+from hmlib.video.bitrate import resolve_output_bitrate
 from hmlib.video.video_stream import MAX_NEVC_VIDEO_WIDTH
 
 from .py_amd_codec import PyAmdVideoCodec
@@ -188,7 +191,7 @@ class VideoOutput(torch.nn.ModuleDict):
         output_video_path: str,
         fps: float,
         fourcc: str = "auto",
-        bit_rate: int = int(55e6),
+        bit_rate: Optional[int] = None,
         mux_audio_file: Optional[str] = None,
         mux_audio_stream: int = 0,
         mux_audio_offset_seconds: float = 0.0,
@@ -216,6 +219,7 @@ class VideoOutput(torch.nn.ModuleDict):
         profiler: Any = None,
         enable_end_zones: bool = False,
         encoder_backend: Optional[str] = None,
+        source_bitrate_density: Optional[Fraction] = None,
     ):
         """Construct a synchronous video writer.
 
@@ -312,6 +316,7 @@ class VideoOutput(torch.nn.ModuleDict):
         self._output_videos: Dict[str, VideoStreamWriterInterface] = {}
 
         self._bit_rate = bit_rate
+        self._source_bitrate_density = source_bitrate_density
         self._enable_end_zones: bool = bool(enable_end_zones)
         self._last_frame_id: Optional[torch.Tensor] = None
         self._cuda_graph_enabled: bool = False
@@ -725,12 +730,14 @@ class VideoOutput(torch.nn.ModuleDict):
 
     def stop(self):
         """Close any interactive UI resources (e.g., OpenCV shower)."""
-        for stream in self._output_videos.values():
-            stream.close()
+        actions = [
+            (f"video stream {name}", stream.close) for name, stream in self._output_videos.items()
+        ]
         self._output_videos.clear()
         if self._shower is not None:
-            self._shower.close()
+            actions.append(("video preview", self._shower.close))
             self._shower = None
+        finalize_resources(actions)
 
     def create_output_videos(self, context: Dict[str, Any]) -> None:
         """Create underlying VideoStreamWriter instances if not already open."""
@@ -738,6 +745,12 @@ class VideoOutput(torch.nn.ModuleDict):
             video_frame_cfg = context["video_frame_cfg"]
             output_frame_width = int(video_frame_cfg["output_frame_width"])
             output_frame_height = int(video_frame_cfg["output_frame_height"])
+            bit_rate = resolve_output_bitrate(
+                self._bit_rate,
+                self._source_bitrate_density,
+                output_frame_width,
+                output_frame_height,
+            )
             if self.VIDEO_DEFAULT not in self._output_videos:
                 self._output_videos[self.VIDEO_DEFAULT] = create_output_video_stream(
                     filename=self._output_video_path,
@@ -745,7 +758,7 @@ class VideoOutput(torch.nn.ModuleDict):
                     height=output_frame_height,
                     width=output_frame_width,
                     codec=self._fourcc,
-                    bit_rate=self._bit_rate,
+                    bit_rate=bit_rate,
                     device=self._device,
                     batch_size=1,
                     profiler=self._prof,
@@ -764,7 +777,7 @@ class VideoOutput(torch.nn.ModuleDict):
                     height=output_frame_height,
                     width=output_frame_width,
                     codec=self._fourcc,
-                    bit_rate=self._bit_rate,
+                    bit_rate=bit_rate,
                     device=self._device,
                     batch_size=1,
                     profiler=self._prof,

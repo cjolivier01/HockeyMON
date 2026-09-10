@@ -154,6 +154,7 @@ class EnBlender(ImageBlender): ...  # may be None at runtime
 def compute_kmeans_clusters(
     data: torch.Tensor, k: int, max_iter: int = ...
 ) -> Tuple[torch.Tensor, torch.Tensor]: ...
+def detect_akaze_features(gray: Any, mask: Any) -> Tuple[Any, Any]: ...
 def create_homography_maps(
     left_points: Sequence[Tuple[float, float]],
     right_points: Sequence[Tuple[float, float]],
@@ -165,6 +166,8 @@ def create_homography_maps(
     confidence: float = ...,
     max_iterations: int = ...,
     max_output_dimension: int = ...,
+    max_output_width: int = ...,
+    lens_calibration: Optional[list[list[float]]] = ...,
 ) -> dict[str, Any]: ...
 def create_affine_ransac_maps(
     left_points: Sequence[Tuple[float, float]],
@@ -178,6 +181,8 @@ def create_affine_ransac_maps(
     max_iterations: int = ...,
     refine_iterations: int = ...,
     max_output_dimension: int = ...,
+    max_output_width: int = ...,
+    lens_calibration: Optional[list[list[float]]] = ...,
 ) -> dict[str, Any]: ...
 def show_cuda_tensor(
     label: str, img_cuda: torch.Tensor, wait: bool = ..., stream: Optional[int] = ...
@@ -217,6 +222,7 @@ __all__ = [
     "compute_kmeans_clusters",
     "create_affine_ransac_maps",
     "create_homography_maps",
+    "detect_akaze_features",
     "bgr_to_i420_cuda",
     "show_cuda_tensor",
 ]

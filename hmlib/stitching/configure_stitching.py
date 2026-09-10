@@ -7,15 +7,21 @@ estimation and per-game synchronization into reusable functions.
 @see @ref hmlib.stitching.hugin.configure_control_points "configure_control_points"
 """
 
+import hashlib
 import json
 import logging
 import os
+import re
+import shlex
 import shutil
+import stat
 import subprocess
-from contextlib import contextmanager
-import fcntl
+import tempfile
+from contextvars import ContextVar
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import cv2
 import numpy as np
@@ -30,16 +36,37 @@ from hmlib.config import (
     save_private_config,
     set_nested_value,
 )
-from hmlib.stitching.control_points import (
-    calculate_control_points,
-    normalize_control_point_matcher,
+from hmlib.stitching.artifact_validation import (
+    MAX_PLACEMENT_BYTES,
+    bounded_file,
+    read_mapping_arrays,
+    validate_artifact_generation,
+    validate_mapping_tiff,
 )
-from hmlib.stitching.hugin import configure_control_points
+from hmlib.stitching.akaze import LensCalibrationPair, load_lens_calibration
+from hmlib.stitching.artifacts import artifact_stage, publish_artifacts, stitching_lock
+from hmlib.stitching.calibration import (
+    CalibrationAlignmentError,
+    calibration_candidates,
+    sample_frame_indices,
+)
+from hmlib.stitching.control_points import calculate_control_points
 from hmlib.stitching.homography_maps import (
-    MAXIMUM_MAP_DIMENSION,
     create_opencv_affine_ransac_mapping_files,
     create_opencv_magsac_mapping_files,
 )
+from hmlib.stitching.hugin import configure_control_points, write_control_points
+from hmlib.stitching.projections import apply_projection, set_source_horizontal_fov
+from hmlib.stitching.settings import (
+    MAPPING_BACKENDS as MAPPING_BACKENDS,
+    OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS,
+    StitchingSettings,
+    normalize_mapping_backend as normalize_mapping_backend,
+    normalize_max_output_dimension,
+    read_stitching_settings,
+    validate_output_scale,
+)
+from hmlib.video.ffmpeg import BasicVideoInfo
 from hmlib.video.video_stream import extract_frame_image
 
 from .synchronize import configure_synchronization
@@ -48,41 +75,13 @@ logger = logging.getLogger(__name__)
 
 _STITCH_FRAME_TIME_PATH = ("stitching", "stitch_frame_time")
 _STITCH_FRAME_TIME_ALT_PATH = ("stitching", "stitch-frame-time")
-OPENCV_MAPPING_BACKENDS = ("opencv-magsac", "opencv-affine-ransac")
-MAPPING_BACKENDS = ("nona", *OPENCV_MAPPING_BACKENDS)
 _STITCH_ARTIFACT_MANIFEST = ".stitching_artifacts.json"
 
 
-def normalize_mapping_backend(mapping_backend: str) -> str:
-    """Return a canonical mapping backend name or raise."""
-    normalized = str(mapping_backend).strip().lower().replace("_", "-")
-    if normalized not in MAPPING_BACKENDS:
-        choices = ", ".join(MAPPING_BACKENDS)
-        raise ValueError(f"Unsupported mapping backend {normalized!r}; choose one of: {choices}")
-    return normalized
-
-
-def normalize_max_output_dimension(max_output_dimension: Optional[int]) -> Optional[int]:
-    """Validate and normalize an optional native coordinate-map dimension cap."""
-    if max_output_dimension is None:
-        return None
-    normalized = int(max_output_dimension)
-    if not 0 < normalized <= MAXIMUM_MAP_DIMENSION:
-        raise ValueError(f"max_output_dimension must be between 1 and {MAXIMUM_MAP_DIMENSION}")
-    return normalized
-
-
-@contextmanager
-def _stitch_game_lock(game_dir: Union[str, Path]) -> Iterator[None]:
-    """Serialize mutation of shared stitching artifacts for one game."""
-    lock_path = Path(game_dir) / ".stitching.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+_stitch_game_lock = stitching_lock
+_command_directory: ContextVar[Optional[Path]] = ContextVar(
+    "stitching_command_directory", default=None
+)
 
 
 def _resolve_local_binary(executable: str) -> Optional[str]:
@@ -110,15 +109,14 @@ def _save_stitched_reference_frame(dir_name: Union[str, Path]) -> None:
     panorama_file = Path(dir_name) / "panorama.tif"
     if not panorama_file.exists():
         return
+    validate_mapping_tiff(panorama_file)
     frame_file = panorama_file.with_name("s.png")
     try:
-        panorama = np.asarray(tifffile.imread(str(panorama_file)))
-        if panorama.ndim == 4:
-            panorama = panorama[0]
-        if panorama.ndim == 3 and panorama.shape[0] in (3, 4) and panorama.shape[-1] not in (3, 4):
-            panorama = np.moveaxis(panorama, 0, -1)
-        if panorama.ndim == 3 and panorama.shape[-1] > 3:
-            panorama = panorama[:, :, :3]
+        panorama = cv2.imread(str(panorama_file), cv2.IMREAD_UNCHANGED)
+        if panorama is None:
+            raise ValueError(f"Could not decode stitched panorama: {panorama_file}")
+        if panorama.ndim == 3:
+            panorama = cv2.cvtColor(panorama[:, :, :3], cv2.COLOR_BGR2RGB)
         if panorama.dtype != np.uint8:
             panorama = np.clip(panorama, 0, 255).astype(np.uint8)
         image = Image.fromarray(panorama)
@@ -126,7 +124,7 @@ def _save_stitched_reference_frame(dir_name: Union[str, Path]) -> None:
             image = image.convert("RGB")
         image.save(frame_file)
     except Exception:
-        logger.debug("Failed to refresh stitched reference frame under %s", dir_name, exc_info=True)
+        raise RuntimeError(f"Failed to refresh stitched reference frame under {dir_name}")
 
 
 def get_multiblend_bin() -> str:
@@ -145,10 +143,23 @@ def get_enblend_bin() -> str:
     return "enblend"
 
 
-def _run_stitching_command(cmd: Sequence[str]) -> None:
+def _run_stitching_command(cmd: Sequence[str]) -> str:
     """Run an external stitching command and fail if it does not complete."""
     logger.info("Running stitching command: %s", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            cwd=_command_directory.get(),
+        )
+    except subprocess.CalledProcessError as exc:
+        logger.error("Stitching command failed: %s\n%s", " ".join(cmd), exc.stdout)
+        raise
+    logger.info("%s", result.stdout)
+    return result.stdout
 
 
 def get_tiff_tag_value(tiff_tag):
@@ -176,6 +187,8 @@ def _stitch_project_is_complete(
     control_point_matcher: Optional[str] = None,
     mapping_backend: Optional[str] = None,
     max_output_dimension: Optional[int] = None,
+    settings: Optional[StitchingSettings] = None,
+    provenance: Optional[Dict[str, str]] = None,
 ) -> bool:
     """Return whether every artifact required to initialize stitching exists."""
     project_path = Path(project_file_path)
@@ -191,19 +204,36 @@ def _stitch_project_is_complete(
         game_dir / "mapping_0001_y.tif",
         game_dir / "seam_file.png",
     )
-    if not all(path.is_file() for path in required_paths):
+    if not all(path.is_file() and path.stat().st_size > 0 for path in required_paths):
         return False
-    if control_point_matcher is None and mapping_backend is None and max_output_dimension is None:
+    try:
+        validate_artifact_generation(game_dir, project_name=project_path.name)
+    except (OSError, ValueError, OverflowError, ZeroDivisionError) as error:
+        logger.warning("Invalid cached stitching generation in %s: %s", game_dir, error)
+        return False
+    if (
+        settings is None
+        and control_point_matcher is None
+        and mapping_backend is None
+        and max_output_dimension is None
+    ):
         return True
 
     manifest = _read_stitch_artifact_manifest(game_dir)
-    if manifest is None:
+    if manifest is None or not _reference_images_match(game_dir, manifest):
         return False
-    return manifest == {
-        "control_point_matcher": control_point_matcher,
-        "mapping_backend": mapping_backend,
-        "max_output_dimension": str(max_output_dimension or 0),
-    }
+    if settings is not None:
+        expected = {**settings.manifest(), **(provenance or {})}
+        return all(manifest.get(key) == value for key, value in expected.items())
+    # Compatibility for callers checking only the legacy backend choices.
+    return all(
+        manifest.get(key) == value
+        for key, value in {
+            "control_point_matcher": control_point_matcher,
+            "mapping_backend": mapping_backend,
+            "max_output_dimension": str(max_output_dimension or 0),
+        }.items()
+    )
 
 
 def _read_stitch_artifact_manifest(game_dir: Union[str, Path]) -> Optional[Dict[str, str]]:
@@ -212,8 +242,10 @@ def _read_stitch_artifact_manifest(game_dir: Union[str, Path]) -> Optional[Dict[
     if not manifest_path.is_file():
         return None
     try:
+        bounded_file(manifest_path, 1024 * 1024)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError) as error:
+        logger.warning("Cannot read stitching provenance %s: %s", manifest_path, error)
         return None
     if not isinstance(manifest, dict) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in manifest.items()
@@ -547,6 +579,12 @@ def sync_stitch_frame_time_state(
 
 
 def clean_stitch_game_artifacts(game_id: str, game_dir: Union[str, Path]) -> int:
+    """Clean rebuildable artifacts while excluding readers and publishers."""
+    with stitching_lock(game_dir):
+        return _clean_stitch_game_artifacts_locked(game_id, game_dir)
+
+
+def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: Union[str, Path]) -> int:
     """Delete rebuildable stitching / seam / mask outputs for a game.
 
     Does not delete config.yaml, but removes cached stitching/rink entries
@@ -603,18 +641,293 @@ def clean_stitch_game_artifacts(game_id: str, game_dir: Union[str, Path]) -> int
     return removed_files
 
 
+def invalidate_stitching_geometry(
+    game_dir: Union[str, Path],
+    *,
+    game_id: Optional[str] = None,
+    game_config: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Drop derived panorama caches only after a replacement has been validated."""
+    paths = (
+        ("stitching", "control_points"),
+        ("rink", "scoreboard", "perspective_polygon"),
+        ("rink", "ice_contours_mask_count"),
+        ("rink", "ice_contours_mask_centroid"),
+        ("rink", "ice_contours_combined_bbox"),
+    )
+    with stitching_lock(game_dir):
+        if game_id is not None:
+            config = get_game_config_private(game_id=game_id) or {}
+            normalize_runtime_config(config)
+            changed = False
+            for path in paths:
+                changed |= _delete_nested_key(config, path)
+            if changed:
+                save_private_config(game_id=game_id, data=config, verbose=True)
+        if game_config is not None:
+            for path in paths:
+                _delete_nested_key(game_config, path)
+        for path in [*Path(game_dir).glob("rink_mask_*.png"), Path(game_dir) / "xor_file.png"]:
+            path.unlink(missing_ok=True)
+
+
+def _rewrite_pto_sources(
+    project: Path,
+    *,
+    images: Optional[Sequence[str]] = None,
+    source_directory: Optional[Path] = None,
+    target_directory: Optional[Path] = None,
+) -> None:
+    """Rebind quoted image tokens without matching their escaped text as paths."""
+    lines = project.read_text(encoding="utf-8").splitlines()
+    image_index = 0
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith(("i ", "i\t")):
+            continue
+        tokens = list(re.finditer(r'(?<!\S)n"(?:\\.|[^"\\])*"', line))
+        if len(tokens) != 1:
+            raise ValueError("Cached PTO does not contain one filename per input image")
+        token = tokens[0]
+        if images is not None:
+            if image_index >= len(images):
+                raise ValueError("Cached PTO contains more than two input images")
+            filename = images[image_index]
+        else:
+            filename = shlex.split(token.group())[0][1:]
+            path = Path(filename)
+            if not path.is_absolute():
+                path = project.parent / path
+            if path.is_relative_to(source_directory):
+                filename = str(target_directory / path.relative_to(source_directory))
+        lines[index] = (
+            line[: token.start()]
+            + "n"
+            + json.dumps(filename, ensure_ascii=False)
+            + line[token.end() :]
+        )
+        image_index += 1
+    project.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _file_provenance(paths: Sequence[Union[str, Path]]) -> str:
+    records = []
+    for value in paths:
+        path = Path(value).resolve()
+        info = path.stat()
+        records.append({"path": str(path), "size": info.st_size, "mtime_ns": info.st_mtime_ns})
+    return json.dumps(records, sort_keys=True)
+
+
+def _image_content_provenance(paths: Sequence[Union[str, Path]]) -> str:
+    """Identify saved input images independently of temporary names and mtimes."""
+    records = []
+    for path in paths:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= MAX_PLACEMENT_BYTES:
+                raise ValueError(f"Invalid or oversized calibration image: {path}")
+            digest = hashlib.sha256()
+            remaining = before.st_size
+            while remaining:
+                chunk = stream.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    raise OSError(f"Calibration image changed while reading: {path}")
+                digest.update(chunk)
+                remaining -= len(chunk)
+            after = os.fstat(stream.fileno())
+        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise OSError(f"Calibration image changed while reading: {path}")
+        records.append({"size": before.st_size, "sha256": digest.hexdigest()})
+    return json.dumps(records, sort_keys=True)
+
+
+def _manifest_matches(
+    manifest: Optional[Dict[str, str]], settings: StitchingSettings, provenance: Dict[str, str]
+) -> bool:
+    return manifest is not None and all(
+        manifest.get(key) == value for key, value in {**settings.manifest(), **provenance}.items()
+    )
+
+
+def _reference_images_match(directory: Path, manifest: Optional[Dict[str, str]]) -> bool:
+    if manifest is None or "reference_images" not in manifest:
+        return True
+    try:
+        return manifest["reference_images"] == _image_content_provenance(
+            [directory / "left.png", directory / "right.png"]
+        )
+    except (OSError, ValueError) as error:
+        logger.warning("Invalid stitching reference images in %s: %s", directory, error)
+        return False
+
+
+def _output_scale_provenance(scale: Optional[float]) -> str:
+    return format(1.0 if scale is None else float(scale), ".17g")
+
+
 def build_stitching_project(
     project_file_path: str,
     image_files: List[str],
     max_control_points: int,
     skip_if_exists: bool = True,
     test_blend: bool = True,
-    fov: int = 108,
+    fov: Optional[float] = None,
     scale: Optional[float] = None,
     force: bool = False,
-    control_point_matcher: str = "superpoint-lightglue",
-    mapping_backend: str = "nona",
+    control_point_matcher: Optional[str] = None,
+    mapping_backend: Optional[str] = None,
     max_output_dimension: Optional[int] = None,
+    settings: Optional[StitchingSettings] = None,
+    lens_calibration: Optional[LensCalibrationPair] = None,
+    lens_calibration_resolved: bool = False,
+    control_points: Optional[Dict[str, torch.Tensor]] = None,
+    provenance: Optional[Dict[str, str]] = None,
+    game_id: Optional[str] = None,
+    game_config: Optional[Dict[str, Any]] = None,
+    control_points_factory: Optional[Callable[[], Dict[str, torch.Tensor]]] = None,
+):
+    """Build privately and publish a validated generation without losing the old one."""
+    settings = settings or read_stitching_settings(
+        game_config,
+        control_point_matcher=control_point_matcher,
+        mapping_backend=mapping_backend,
+        max_output_dimension=max_output_dimension,
+        camera_fov={"horizontal_fov": fov} if fov is not None else None,
+    )
+    if (
+        isinstance(max_control_points, bool)
+        or not isinstance(max_control_points, int)
+        or max_control_points < 4
+    ):
+        raise ValueError("max_control_points must be an integer of at least four")
+    if settings.control_point_matcher == "akaze-hamming" and max_control_points < 6:
+        raise ValueError("AKAZE max_control_points must be at least six")
+    if control_points is not None and control_points_factory is not None:
+        raise ValueError("Supply control points or a control-point factory, not both")
+    settings = replace(settings, max_control_points=max_control_points)
+    validate_output_scale(scale, settings.mapping_backend)
+    project = Path(project_file_path).resolve()
+    if len(image_files) != 2:
+        raise ValueError("Stitching requires exactly two input images")
+    if settings.control_point_matcher == "akaze-hamming":
+        if lens_calibration is None and not lens_calibration_resolved:
+            lens_calibration = load_lens_calibration(project.parent)
+        if lens_calibration is not None and settings.mapping_backend == "nona":
+            raise ValueError(
+                "Calibrated AKAZE points require an OpenCV mapping backend; NONA does not consume KB4 lenses"
+            )
+    elif lens_calibration is not None:
+        raise ValueError("KB4 lens calibration is supported only by AKAZE")
+    settings = replace(
+        settings,
+        lens_profile_fingerprint=lens_calibration.fingerprint if lens_calibration else None,
+    )
+    input_images = _image_content_provenance(image_files)
+    provenance = {
+        **(provenance if provenance is not None else {"input_images": input_images}),
+        "output_scale": _output_scale_provenance(scale),
+    }
+    with artifact_stage(project.parent) as stage:
+        if (
+            skip_if_exists
+            and not force
+            and _stitch_project_is_complete(
+                project,
+                project.parent / "autooptimiser_out.pto",
+                settings=settings,
+                provenance=provenance,
+            )
+            and not is_older_than(project, project.parent / "autooptimiser_out.pto")
+        ):
+            return True
+        staged_images = []
+        for source, name in zip(image_files, ("left.png", "right.png"), strict=True):
+            destination = stage / name
+            shutil.copy2(source, destination)
+            staged_images.append(str(destination))
+        if _image_content_provenance(staged_images) != input_images:
+            raise OSError("Calibration input images changed while staging")
+        # Retain user points only for the same effective settings and source content.
+        previous = _read_stitch_artifact_manifest(project.parent)
+        if (
+            not force
+            and project.is_file()
+            and _manifest_matches(previous, settings, provenance)
+            and _reference_images_match(project.parent, previous)
+        ):
+            shutil.copyfile(project, stage / project.name)
+            _rewrite_pto_sources(stage / project.name, images=staged_images)
+            (stage / _STITCH_ARTIFACT_MANIFEST).write_text(json.dumps(previous), encoding="utf-8")
+        if control_points_factory is not None:
+            control_points = control_points_factory()
+        result = _build_stitching_project_in_place(
+            project_file_path=str(stage / project.name),
+            image_files=staged_images,
+            max_control_points=max_control_points,
+            skip_if_exists=False,
+            test_blend=test_blend,
+            fov=fov,
+            scale=scale,
+            force=force,
+            settings=settings,
+            lens_calibration=lens_calibration,
+            lens_calibration_resolved=True,
+            control_points=control_points,
+        )
+        if not result:
+            raise RuntimeError("Failed to build staged stitching project")
+        validate_artifact_generation(stage, project_name=project.name)
+        for basename in ("mapping_0000", "mapping_0001"):
+            read_mapping_arrays(stage, basename)
+        validate_mapping_tiff(stage / "panorama.tif")
+        _save_stitched_reference_frame(stage)
+        for pto in stage.glob("*.pto"):
+            _rewrite_pto_sources(pto, source_directory=stage, target_directory=project.parent)
+        (stage / _STITCH_ARTIFACT_MANIFEST).write_text(
+            json.dumps(
+                {**settings.manifest(), **provenance, "reference_images": input_images},
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        names = sorted(
+            path.name
+            for path in stage.iterdir()
+            if path.is_file() and path.name != ".stitching.lock"
+        )
+        # Make the provenance file the last replacement for tools that inspect it.
+        names.remove(_STITCH_ARTIFACT_MANIFEST)
+        names.append(_STITCH_ARTIFACT_MANIFEST)
+        # Derived masks are safe to recompute if publication later rolls back.
+        # Clear them only after every replacement artifact has passed validation.
+        invalidate_stitching_geometry(project.parent, game_id=game_id, game_config=game_config)
+        publish_artifacts(project.parent, stage, names)
+        return True
+
+
+def _build_stitching_project_in_place(
+    project_file_path: str,
+    image_files: List[str],
+    max_control_points: int,
+    skip_if_exists: bool = True,
+    test_blend: bool = True,
+    fov: Optional[float] = None,
+    scale: Optional[float] = None,
+    force: bool = False,
+    control_point_matcher: Optional[str] = None,
+    mapping_backend: Optional[str] = None,
+    max_output_dimension: Optional[int] = None,
+    settings: Optional[StitchingSettings] = None,
+    lens_calibration: Optional[LensCalibrationPair] = None,
+    lens_calibration_resolved: bool = False,
+    control_points: Optional[Dict[str, torch.Tensor]] = None,
 ):
     """Create or update a Hugin PTO project and seam masks for two images.
 
@@ -624,21 +937,44 @@ def build_stitching_project(
     @param skip_if_exists: If True, reuse existing project when up-to-date.
     @param test_blend: Whether to create/test seam masks using `enblend`.
     @param fov: Horizontal field-of-view in degrees.
-    @param scale: Optional scale factor passed to `autooptimiser`.
+    @param scale: Optional relative scale applied after projection framing.
     @param force: If True, always rebuild, ignoring mtimes.
     @param control_point_matcher: Feature matcher used to find control points.
     @param mapping_backend: ``nona`` or a native OpenCV remapping backend.
     @param max_output_dimension: Optional maximum mapping canvas dimension.
     @return: True on success, False if seam quality tests fail.
     """
-    pto_path = Path(project_file_path)
-    control_point_matcher = normalize_control_point_matcher(control_point_matcher)
-    mapping_backend = normalize_mapping_backend(mapping_backend)
-    if mapping_backend in OPENCV_MAPPING_BACKENDS and scale not in (None, 1.0):
-        raise ValueError(
-            f"The {mapping_backend} backend does not accept Hugin's relative scale; "
-            "use max_output_dimension instead"
+    pto_path = Path(project_file_path).resolve()
+    project_file_path = str(pto_path)
+    image_files = [str(Path(image).resolve()) for image in image_files]
+    settings = settings or read_stitching_settings(
+        control_point_matcher=control_point_matcher,
+        mapping_backend=mapping_backend,
+        max_output_dimension=max_output_dimension,
+        camera_fov={"horizontal_fov": fov} if fov is not None else None,
+    )
+    if (
+        isinstance(max_control_points, bool)
+        or not isinstance(max_control_points, int)
+        or max_control_points < 4
+    ):
+        raise ValueError("max_control_points must be an integer of at least four")
+    settings = replace(settings, max_control_points=max_control_points)
+    control_point_matcher = settings.control_point_matcher
+    mapping_backend = settings.mapping_backend
+    max_output_dimension = settings.max_output_dimension
+    if control_point_matcher == "akaze-hamming":
+        if lens_calibration is None and not lens_calibration_resolved:
+            lens_calibration = load_lens_calibration(pto_path.parent)
+        if lens_calibration is not None and mapping_backend == "nona":
+            raise ValueError(
+                "Calibrated AKAZE points require an OpenCV mapping backend; NONA does not consume KB4 lenses"
+            )
+        settings = replace(
+            settings,
+            lens_profile_fingerprint=lens_calibration.fingerprint if lens_calibration else None,
         )
+    validate_output_scale(scale, mapping_backend)
     max_output_dimension = normalize_max_output_dimension(max_output_dimension)
     dir_name = pto_path.parent
     previous_manifest = _read_stitch_artifact_manifest(dir_name)
@@ -658,6 +994,7 @@ def build_stitching_project(
             control_point_matcher=control_point_matcher,
             mapping_backend=mapping_backend,
             max_output_dimension=max_output_dimension,
+            settings=settings,
         )
         and not is_older_than(project_file_path, autooptimiser_out)
     ):
@@ -667,8 +1004,7 @@ def build_stitching_project(
     left_image_file = image_files[0]
     right_image_file = image_files[1]
 
-    curr_dir = os.getcwd()
-    os.chdir(dir_name)
+    command_token = _command_directory.set(dir_name)
     try:
 
         def generate_pto() -> None:
@@ -679,7 +1015,7 @@ def build_stitching_project(
                 "-o",
                 hm_project,
                 "-f",
-                str(fov),
+                str(settings.horizontal_fov),
                 left_image_file,
                 right_image_file,
             ]
@@ -710,13 +1046,26 @@ def build_stitching_project(
                     autooptimiser_out,
                     hm_project,
                 ]
-                if scale and scale != 1.0:
-                    cmd += [
-                        "-x",
-                        str(scale),
-                    ]
-                _run_stitching_command(cmd)
+                output = _run_stitching_command(cmd)
+                rms_values = re.findall(
+                    r"([0-9]+(?:[.][0-9]+)?(?:[eE][+-]?[0-9]+)?)\s+units", output
+                )
+                if (
+                    not rms_values
+                    or not np.isfinite(float(rms_values[-1]))
+                    or float(rms_values[-1]) > 50
+                ):
+                    raise CalibrationAlignmentError(
+                        "Hugin optimization did not produce a finite RMS below 50 pixels"
+                    )
                 _set_hugin_optimization_variables(autooptimiser_out, ("r1", "p1", "y1"))
+                apply_projection(
+                    autooptimiser_out,
+                    settings,
+                    _run_stitching_command,
+                    _resolve_local_binary("pano_modify") or "pano_modify",
+                    scale=scale,
+                )
 
                 cmd = [
                     "nona",
@@ -743,6 +1092,8 @@ def build_stitching_project(
                     control_points,
                     dir_name,
                     max_output_dimension=max_output_dimension,
+                    max_output_width=settings.max_output_width,
+                    lens_calibration=lens_calibration,
                 )
             else:
                 shutil.copyfile(hm_project, autooptimiser_out)
@@ -751,6 +1102,8 @@ def build_stitching_project(
                     control_points,
                     dir_name,
                     max_output_dimension=max_output_dimension,
+                    max_output_width=settings.max_output_width,
+                    lens_calibration=lens_calibration,
                 )
 
             seam_file: str = os.path.join(dir_name, "seam_file.png")
@@ -810,33 +1163,28 @@ def build_stitching_project(
         elif previous_control_point_matcher == control_point_matcher:
             use_hugin = True
 
-        control_points = configure_control_points(
-            output_directory=str(dir_name),
-            project_file_path=hm_project,
-            image0=left_image_file,
-            image1=right_image_file,
-            max_control_points=max_control_points,
-            force=True,
-            use_hugin=use_hugin,
-            matcher=control_point_matcher,
-        )
+        set_source_horizontal_fov(hm_project, settings.horizontal_fov)
+        if control_points is None:
+            control_points = configure_control_points(
+                output_directory=str(dir_name),
+                project_file_path=hm_project,
+                image0=left_image_file,
+                image1=right_image_file,
+                max_control_points=max_control_points,
+                force=True,
+                use_hugin=use_hugin,
+                matcher=control_point_matcher,
+                lens_calibration=lens_calibration,
+            )
+        else:
+            write_control_points(hm_project, control_points)
         _set_hugin_optimization_variables(hm_project, ("r1", "p1", "y1"))
-        try:
-            remap_ok = run_remap_pipeline(control_points)
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            raise RuntimeError(
-                f"{control_point_matcher} control points did not produce "
-                f"remappable {mapping_backend} outputs"
-            ) from exc
+        remap_ok = run_remap_pipeline(control_points)
         if not remap_ok:
             raise RuntimeError(
                 f"{control_point_matcher} control points produced low-quality seam masks"
             )
-        manifest = {
-            "control_point_matcher": control_point_matcher,
-            "mapping_backend": mapping_backend,
-            "max_output_dimension": str(max_output_dimension or 0),
-        }
+        manifest = settings.manifest()
         (Path(dir_name) / _STITCH_ARTIFACT_MANIFEST).write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
@@ -844,7 +1192,7 @@ def build_stitching_project(
         return True
 
     finally:
-        os.chdir(curr_dir)
+        _command_directory.reset(command_token)
 
 
 def get_pixel_value_percentages(image_path: str) -> Dict[int, float]:
@@ -928,14 +1276,42 @@ def configure_video_stitching(
     stitch_frame_time: Optional[str] = None,
     ignore_private_config: bool = False,
     game_config: Optional[Dict[str, Any]] = None,
-    control_point_matcher: str = "superpoint-lightglue",
-    mapping_backend: str = "nona",
+    control_point_matcher: Optional[str] = None,
+    mapping_backend: Optional[str] = None,
     max_output_dimension: Optional[int] = None,
+    settings: Optional[StitchingSettings] = None,
+    scale: Optional[float] = None,
+    device: Optional[torch.device] = None,
 ):
     """Configure stitching while serializing shared artifacts per game."""
-    control_point_matcher = normalize_control_point_matcher(control_point_matcher)
-    mapping_backend = normalize_mapping_backend(mapping_backend)
-    max_output_dimension = normalize_max_output_dimension(max_output_dimension)
+    settings = settings or read_stitching_settings(
+        game_config,
+        control_point_matcher=control_point_matcher,
+        mapping_backend=mapping_backend,
+        max_output_dimension=max_output_dimension,
+    )
+    if (
+        isinstance(max_control_points, bool)
+        or not isinstance(max_control_points, int)
+        or max_control_points < 4
+    ):
+        raise ValueError("max_control_points must be an integer of at least four")
+    settings = replace(settings, max_control_points=max_control_points)
+    validate_output_scale(scale, settings.mapping_backend)
+    control_point_matcher = settings.control_point_matcher
+    mapping_backend = settings.mapping_backend
+    max_output_dimension = settings.max_output_dimension
+    lens_calibration = (
+        load_lens_calibration(dir_name) if control_point_matcher == "akaze-hamming" else None
+    )
+    if lens_calibration is not None and mapping_backend == "nona":
+        raise ValueError(
+            "Calibrated AKAZE points require an OpenCV mapping backend; NONA does not consume KB4 lenses"
+        )
+    settings = replace(
+        settings,
+        lens_profile_fingerprint=lens_calibration.fingerprint if lens_calibration else None,
+    )
     with _stitch_game_lock(dir_name):
         return _configure_video_stitching_locked(
             dir_name=dir_name,
@@ -955,6 +1331,10 @@ def configure_video_stitching(
             control_point_matcher=control_point_matcher,
             mapping_backend=mapping_backend,
             max_output_dimension=max_output_dimension,
+            settings=settings,
+            lens_calibration=lens_calibration,
+            scale=scale,
+            device=device,
         )
 
 
@@ -976,6 +1356,10 @@ def _configure_video_stitching_locked(
     control_point_matcher: str = "superpoint-lightglue",
     mapping_backend: str = "nona",
     max_output_dimension: Optional[int] = None,
+    settings: Optional[StitchingSettings] = None,
+    lens_calibration: Optional[LensCalibrationPair] = None,
+    scale: Optional[float] = None,
+    device: Optional[torch.device] = None,
 ):
     """Configure a two-camera stitching project from game videos.
 
@@ -1002,13 +1386,17 @@ def _configure_video_stitching_locked(
     @param max_output_dimension: Optional maximum native OpenCV mapping dimension.
     @return: Tuple ``(pto_project_file, left_frame_offset, right_frame_offset)``.
     """
-    stitch_frame_time_changed = sync_stitch_frame_time_state(
-        game_id=game_id,
-        game_dir=dir_name,
-        stitch_frame_time=stitch_frame_time,
-        force=force,
-        ignore_private_config=ignore_private_config,
-        game_config=game_config,
+    settings = settings or read_stitching_settings(
+        game_config,
+        control_point_matcher=control_point_matcher,
+        mapping_backend=mapping_backend,
+        max_output_dimension=max_output_dimension,
+    )
+    previous_time = _get_stitch_frame_time_stamp(game_config)
+    if game_id and not ignore_private_config:
+        previous_time = _get_stitch_frame_time_stamp(get_game_config_private(game_id=game_id) or {})
+    stitch_frame_time_changed = not _stitch_frame_time_values_equal(
+        previous_time, stitch_frame_time
     )
     force = bool(force or stitch_frame_time_changed)
 
@@ -1023,10 +1411,42 @@ def _configure_video_stitching_locked(
         left_frame_offset = float(frame_offsets["left"])
         right_frame_offset = float(frame_offsets["right"])
 
+    provenance = {
+        "source_videos": _file_provenance([video_left, video_right]),
+        "output_scale": _output_scale_provenance(scale),
+        "source_frame_offsets": json.dumps(
+            [base_frame_offset + left_frame_offset, base_frame_offset + right_frame_offset]
+        ),
+        "stitch_frame_time": _normalize_stitch_frame_time_value(stitch_frame_time) or "",
+    }
     # PTO Project File
     pto_project_file: str = os.path.join(dir_name, project_file_name)
     autooptimiser_out: str = os.path.join(dir_name, "autooptimiser_out.pto")
-    if (
+    reference_images = [str(Path(dir_name) / name) for name in ("left.png", "right.png")]
+    retain_edited_project = (
+        not force
+        and bool(is_older_than(pto_project_file, autooptimiser_out))
+        and all(Path(image).is_file() for image in reference_images)
+        and _manifest_matches(_read_stitch_artifact_manifest(dir_name), settings, provenance)
+        and _reference_images_match(Path(dir_name), _read_stitch_artifact_manifest(dir_name))
+    )
+    if retain_edited_project:
+        if not build_stitching_project(
+            project_file_path=pto_project_file,
+            image_files=reference_images,
+            max_control_points=max_control_points,
+            force=False,
+            skip_if_exists=False,
+            settings=settings,
+            scale=scale,
+            lens_calibration=lens_calibration,
+            lens_calibration_resolved=True,
+            provenance=provenance,
+            game_id=game_id if not ignore_private_config else None,
+            game_config=game_config,
+        ):
+            raise RuntimeError("Failed to rebuild edited stitching project")
+    elif (
         force
         or not _stitch_project_is_complete(
             pto_project_file,
@@ -1034,30 +1454,71 @@ def _configure_video_stitching_locked(
             control_point_matcher=control_point_matcher,
             mapping_backend=mapping_backend,
             max_output_dimension=max_output_dimension,
+            settings=settings,
+            provenance=provenance,
         )
         or (os.path.exists(pto_project_file) and is_older_than(pto_project_file, autooptimiser_out))
     ):
-        left_image_file, right_image_file = extract_frames(
-            video_left,
-            base_frame_offset + left_frame_offset,
-            video_right,
-            base_frame_offset + right_frame_offset,
-            force=True,
+        left_info, right_info = BasicVideoInfo(video_left), BasicVideoInfo(video_right)
+        indices = sample_frame_indices(
+            int(round(base_frame_offset + left_frame_offset)),
+            int(round(base_frame_offset + right_frame_offset)),
+            settings.calibration_frame_count,
+            left_info.frame_count,
+            right_info.frame_count,
         )
+        with tempfile.TemporaryDirectory(prefix="hm-calibration-input-", dir=dir_name) as sampled:
+            pairs = []
+            for index, (left_frame, right_frame) in enumerate(indices):
+                images = (Path(sampled) / f"left-{index}.png", Path(sampled) / f"right-{index}.png")
+                extract_frame_image(video_left, frame_number=left_frame, dest_image=str(images[0]))
+                extract_frame_image(
+                    video_right, frame_number=right_frame, dest_image=str(images[1])
+                )
+                pairs.append(images)
+            last_alignment_error = None
+            for candidate in calibration_candidates(
+                pairs,
+                max_control_points,
+                partial(calculate_control_points, lens_calibration=lens_calibration, device=device),
+                settings.control_point_matcher,
+            ):
+                logger.info("Trying stitching calibration using %s", candidate.label)
+                try:
+                    project_built = build_stitching_project(
+                        project_file_path=pto_project_file,
+                        image_files=[str(path) for path in candidate.images],
+                        max_control_points=max_control_points,
+                        force=True,
+                        skip_if_exists=False,
+                        settings=settings,
+                        scale=scale,
+                        lens_calibration=lens_calibration,
+                        lens_calibration_resolved=True,
+                        control_points=dict(candidate.points),
+                        provenance=provenance,
+                        game_id=game_id if not ignore_private_config else None,
+                        game_config=game_config,
+                    )
+                except CalibrationAlignmentError as exc:
+                    last_alignment_error = exc
+                    logger.warning("Skipping %s: %s", candidate.label, exc)
+                    continue
+                if not project_built:
+                    raise RuntimeError("Failed to build stitching project")
+                break
+            else:
+                raise CalibrationAlignmentError(
+                    "No calibration candidate produced usable geometry"
+                ) from last_alignment_error
 
-        project_built = build_stitching_project(
-            project_file_path=pto_project_file,
-            image_files=[left_image_file, right_image_file],
-            max_control_points=max_control_points,
-            force=force,
-            skip_if_exists=not force,
-            control_point_matcher=control_point_matcher,
-            mapping_backend=mapping_backend,
-            max_output_dimension=max_output_dimension,
-        )
-        if not project_built:
-            raise RuntimeError("Failed to build stitching project")
-
-    _save_stitched_reference_frame(dir_name)
+    sync_stitch_frame_time_state(
+        game_id=game_id,
+        game_dir=dir_name,
+        stitch_frame_time=stitch_frame_time,
+        force=True,
+        ignore_private_config=ignore_private_config,
+        game_config=game_config,
+    )
 
     return pto_project_file, left_frame_offset, right_frame_offset

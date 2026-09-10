@@ -40,6 +40,30 @@ struct UiSpec {
 struct PreviewSpec {
     name: String,
     path: PathBuf,
+    #[serde(default)]
+    metadata_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct PreviewDimensions {
+    width: u32,
+    height: u32,
+}
+
+fn preview_label(name: &str, dimensions: Option<&PreviewDimensions>) -> String {
+    match dimensions {
+        Some(size) => format!("{name} ({} × {})", size.width, size.height),
+        None => name.to_string(),
+    }
+}
+
+fn parse_preview_dimensions(data: &str) -> Result<PreviewDimensions> {
+    let size: PreviewDimensions = serde_json::from_str(data).context("parse preview dimensions")?;
+    anyhow::ensure!(
+        size.width > 0 && size.height > 0,
+        "preview dimensions must be positive"
+    );
+    Ok(size)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -110,6 +134,7 @@ struct HmUiApp {
     last_preview_poll: SystemTime,
     preview_textures: BTreeMap<String, egui::TextureHandle>,
     preview_status: BTreeMap<String, String>,
+    preview_dimensions: BTreeMap<String, PreviewDimensions>,
     action_seq: u64,
     actions: Vec<UiAction>,
     last_action: Option<UiAction>,
@@ -140,6 +165,7 @@ impl HmUiApp {
             last_preview_poll: UNIX_EPOCH,
             preview_textures: BTreeMap::new(),
             preview_status: BTreeMap::new(),
+            preview_dimensions: BTreeMap::new(),
             action_seq: 0,
             actions: Vec::new(),
             last_action: None,
@@ -170,6 +196,7 @@ impl HmUiApp {
                 spec.previews.push(PreviewSpec {
                     name: "Preview".to_string(),
                     path,
+                    metadata_path: None,
                 });
             }
         }
@@ -211,6 +238,8 @@ impl HmUiApp {
         self.preview_textures
             .retain(|name, _| preview_names.contains(name));
         self.preview_status
+            .retain(|name, _| preview_names.contains(name));
+        self.preview_dimensions
             .retain(|name, _| preview_names.contains(name));
         self.last_spec_modified = modified;
         self.spec = spec;
@@ -288,6 +317,33 @@ impl HmUiApp {
             return;
         }
         self.last_preview_poll = now;
+        for preview in &self.spec.previews {
+            let Some(path) = &preview.metadata_path else {
+                self.preview_dimensions.remove(&preview.name);
+                continue;
+            };
+            let data = match fs::read_to_string(path) {
+                Ok(data) => data,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    self.preview_dimensions.remove(&preview.name);
+                    continue;
+                }
+                Err(err) => {
+                    self.preview_dimensions.remove(&preview.name);
+                    self.status = format!("{} preview dimensions unavailable: {err}", preview.name);
+                    continue;
+                }
+            };
+            match parse_preview_dimensions(&data) {
+                Ok(size) => {
+                    self.preview_dimensions.insert(preview.name.clone(), size);
+                }
+                Err(err) => {
+                    self.preview_dimensions.remove(&preview.name);
+                    self.status = format!("{} preview dimensions invalid: {err}", preview.name);
+                }
+            }
+        }
         let Some(preview) = self.spec.previews.get(self.selected_preview).cloned() else {
             return;
         };
@@ -573,7 +629,13 @@ impl HmUiApp {
                 ui.label("View:");
                 for (idx, preview) in previews.iter().enumerate() {
                     if ui
-                        .selectable_label(self.selected_preview == idx, &preview.name)
+                        .selectable_label(
+                            self.selected_preview == idx,
+                            preview_label(
+                                &preview.name,
+                                self.preview_dimensions.get(&preview.name),
+                            ),
+                        )
                         .clicked()
                     {
                         self.selected_preview = idx;
@@ -584,6 +646,12 @@ impl HmUiApp {
                     }
                 }
             });
+            ui.add_space(4.0);
+        } else if let Some(preview) = previews.first() {
+            ui.label(preview_label(
+                &preview.name,
+                self.preview_dimensions.get(&preview.name),
+            ));
             ui.add_space(4.0);
         }
         let available = ui.available_size_before_wrap();
@@ -635,6 +703,8 @@ impl HmUiApp {
         ui.label("Common local commands");
         ui.monospace("hmtrack --game-id <game> --camera-ui=1");
         ui.monospace("hmstitch --game-id <game> --camera-ui=1");
+        ui.monospace("hmlevel --game-id <game>");
+        ui.label("Level vertical posts and crop a calibrated NONA panorama in the browser.");
         ui.monospace("bazelisk build //hm-ui:hm-ui");
         ui.add_space(14.0);
         ui.label("This panel is intentionally a launcher guide for now. The tracking process remains the owner of video, detector, and stitch runtime state.");
@@ -812,4 +882,38 @@ fn main() -> Result<()> {
         }),
     )
     .map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preview_labels_use_source_dimensions_and_keep_stream_names_stable() {
+        let dimensions = parse_preview_dimensions(r#"{"width":8192,"height":3052}"#).unwrap();
+        assert_eq!(
+            preview_label("Stitched", Some(&dimensions)),
+            "Stitched (8192 × 3052)"
+        );
+        assert_eq!(preview_label("Final", None), "Final");
+    }
+
+    #[test]
+    fn preview_dimensions_reject_invalid_metadata() {
+        for invalid in [
+            r#"{"width":0,"height":1080}"#,
+            r#"{"width":1920,"height":-1}"#,
+            "{}",
+            "bad",
+        ] {
+            assert!(parse_preview_dimensions(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_preview_specs_do_not_require_metadata() {
+        let preview: PreviewSpec =
+            serde_json::from_str(r#"{"name":"Stitched","path":"preview.jpg"}"#).unwrap();
+        assert!(preview.metadata_path.is_none());
+    }
 }

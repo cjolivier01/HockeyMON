@@ -14,17 +14,21 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from hmlib.stitching.calibration import CalibrationAlignmentError
+from hmlib.stitching.akaze import LensCalibrationPair, match_akaze
 from hmlib.utils.image import image_height, image_width
 
 CONTROL_POINT_MATCHERS = (
     "superpoint-lightglue",
     "dedode-lightglue",
     "loftr",
+    "akaze-hamming",
 )
 _MATCHER_ALIASES = {
     "superpoint": "superpoint-lightglue",
     "lightglue": "superpoint-lightglue",
     "dedode": "dedode-lightglue",
+    "akaze": "akaze-hamming",
 }
 _DEDODE_MAX_IMAGE_DIMENSION = 1920
 _LOFTR_MAX_IMAGE_DIMENSION = 1600
@@ -403,6 +407,7 @@ def calculate_control_points(
     max_num_keypoints: int = 2048,
     output_directory: Optional[str] = None,
     matcher: str = "superpoint-lightglue",
+    lens_calibration: Optional[LensCalibrationPair] = None,
 ) -> Dict[str, torch.Tensor]:
     """Compute control points for a pair of images with a selected matcher.
 
@@ -415,12 +420,18 @@ def calculate_control_points(
     @param matcher: ``superpoint-lightglue``, ``dedode-lightglue``, or ``loftr``.
     @return: Dict containing tensors ``m_kpts0`` and ``m_kpts1`` (Nx2).
     """
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     matcher = normalize_control_point_matcher(matcher)
+    if matcher == "akaze-hamming":
+        device = torch.device("cpu")  # OpenCV AKAZE runs once per calibration frame on the CPU.
+    elif lens_calibration is not None:
+        raise ValueError("KB4 lens calibration is supported only by AKAZE")
+    elif device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     max_control_points = int(max_control_points)
     if max_control_points < 4:
         raise ValueError("max_control_points must be at least four")
+    if matcher == "akaze-hamming" and max_control_points < 6:
+        raise ValueError("AKAZE max_control_points must be at least six")
     image0_tensor = _image_to_rgb_tensor(image0).to(device)
     image1_tensor = _image_to_rgb_tensor(image1).to(device)
 
@@ -433,11 +444,13 @@ def calculate_control_points(
             m_kpts0, m_kpts1 = _match_dedode_lightglue(
                 image0_tensor, image1_tensor, device, max_num_keypoints
             )
-        else:
+        elif matcher == "loftr":
             m_kpts0, m_kpts1 = _match_loftr(image0_tensor, image1_tensor, device)
+        else:
+            m_kpts0, m_kpts1 = match_akaze(image0_tensor, image1_tensor, lens_calibration)
 
     if m_kpts0.shape[0] < 4:
-        raise RuntimeError(
+        raise CalibrationAlignmentError(
             f"{matcher} found {m_kpts0.shape[0]} matches; at least four are required"
         )
     indices = select_evenly_spaced(m_kpts0, max_control_points)
