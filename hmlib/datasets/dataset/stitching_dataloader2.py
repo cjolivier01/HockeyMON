@@ -379,6 +379,8 @@ class StitchDataset(PersistCacheMixin, torch.utils.data.IterableDataset):
                 video_right=self._videos["right"]["files"][0],
                 left_frame_offset=self._video_left_offset_frame,
                 right_frame_offset=self._video_right_offset_frame,
+                max_control_points=1500,
+                game_config=self._config_ref,
             )
             self._video_left_offset_frame = lfo
             self._video_right_offset_frame = rfo

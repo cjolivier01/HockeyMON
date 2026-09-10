@@ -1,0 +1,56 @@
+# Stitching calibration
+
+`hmstitch` and two-camera `hmtrack` resolve the effective `stitching` configuration
+before extracting frames or changing a cached calibration. The dataset calibration
+path uses the same settings. Invalid combinations raise an error before cleanup.
+
+The bundled default uses `opencv-magsac`, rectilinear output, and no Hugin
+optimizer. `opencv-affine-ransac` also supports rectilinear output. Other
+projections require NONA and explicit optimizer opt-in:
+
+```yaml
+stitching:
+  mapping_backend: nona
+  run_autooptimizer: true
+  projection: general-panini
+  projection_parameters:
+    general-panini: [100, 0, 0]
+  camera_config: gopro-mission-1
+  rink_config: vallco
+  projection_framing:
+    auto_fov: false
+    horizontal_fov: 180
+    auto_canvas: true
+    auto_crop: false
+    crop: [0, 1, 0, 1]
+  max_output_width: 7680
+```
+
+All 22 Hugin projections are supported. Parameterized projections are
+`albers-equal-area-conic`, `biplane`, `triplane`, and `general-panini`; values
+must respect Hugin's ranges and use increments of 0.01. Unsupported FOVs are
+rejected, including rectilinear FOVs above 179 degrees. The generated PTO is
+checked to detect Hugin clamping a requested value.
+
+Camera presets select source-image FOVs. Override either axis with
+`camera_fov.horizontal_fov` or `camera_fov.vertical_fov`. A custom camera identifier
+requires a definition under `camera_configs` or both explicit FOVs.
+
+A selected rink supplies shared camera-space yaw, pitch, and roll before NONA
+projection. Omitted or null `projection_framing.rotation_degrees` inherits those
+angles; `[0, 0, 0]` explicitly disables the inherited rotation. Reading settings
+does not modify this inheritance. This is separate from rotating the stitched
+bitmap after calibration.
+
+NONA framing supports Auto FOV/canvas/crop and a manual crop expressed as
+`[left, right, top, bottom]` fractions of the full projected canvas. A custom crop
+and Auto crop cannot be active together. OpenCV mapping is determined by the fitted rectilinear transform. Non-default
+projection framing, including a selected rink with nonzero rotation, requires
+NONA; unsupported framing is rejected before calibration.
+
+`max_output_dimension` caps both canvas dimensions. `max_output_width` caps width.
+NONA caps the full projected canvas before remapping (including any crop), so
+cropping may produce a smaller width. Native OpenCV applies caps during map
+construction. Width-cap support requires rebuilding the HockeyMON native
+extension. Both calibration and cache reuse record the complete resolved settings;
+changing FOV, projection, framing, optimizer choice or caps invalidates old maps.

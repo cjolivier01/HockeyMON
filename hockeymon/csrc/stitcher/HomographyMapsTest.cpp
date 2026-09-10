@@ -48,6 +48,13 @@ int main() {
   assert(scaled.canvas_height == 45);
   assert(std::abs(scaled.output_scale - 0.5) < 1e-6);
 
+  // A width cap does not constrain a taller canvas's height.
+  const auto width_capped = hm::stitcher::create_homography_maps(
+      left_points, right_points, 100, 240, 100, 240, 1.0, 0.999, 10000, 0, 60);
+  assert(width_capped.canvas_width == 60);
+  assert(width_capped.canvas_height == 125);
+  assert(std::abs(width_capped.output_scale - 0.5) < 1e-6);
+
   std::vector<std::array<double, 2>> affine_left_points;
   affine_left_points.reserve(right_points.size());
   for (const auto& point : right_points) {

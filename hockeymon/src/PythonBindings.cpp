@@ -661,7 +661,8 @@ void init_stitching(::pybind11::module_& m) {
           double reprojection_threshold,
           double confidence,
           int max_iterations,
-          int max_output_dimension) {
+          int max_output_dimension,
+          int max_output_width) {
         hm::stitcher::HomographyMapResult result;
         {
           py::gil_scoped_release release;
@@ -675,7 +676,8 @@ void init_stitching(::pybind11::module_& m) {
               reprojection_threshold,
               confidence,
               max_iterations,
-              max_output_dimension);
+              max_output_dimension,
+              max_output_width);
         }
         return homography_result_to_dict(result);
       },
@@ -688,7 +690,8 @@ void init_stitching(::pybind11::module_& m) {
       py::arg("reprojection_threshold") = 3.0,
       py::arg("confidence") = 0.999,
       py::arg("max_iterations") = 10000,
-      py::arg("max_output_dimension") = 0);
+      py::arg("max_output_dimension") = 0,
+      py::arg("max_output_width") = 0);
 
   m.def(
       "create_affine_ransac_maps",
@@ -703,7 +706,8 @@ void init_stitching(::pybind11::module_& m) {
           double confidence,
           int max_iterations,
           int refine_iterations,
-          int max_output_dimension) {
+          int max_output_dimension,
+          int max_output_width) {
         hm::stitcher::HomographyMapResult result;
         {
           py::gil_scoped_release release;
@@ -718,7 +722,8 @@ void init_stitching(::pybind11::module_& m) {
               confidence,
               max_iterations,
               refine_iterations,
-              max_output_dimension);
+              max_output_dimension,
+              max_output_width);
         }
         return homography_result_to_dict(result);
       },
@@ -732,7 +737,8 @@ void init_stitching(::pybind11::module_& m) {
       py::arg("confidence") = 0.999,
       py::arg("max_iterations") = 10000,
       py::arg("refine_iterations") = 10,
-      py::arg("max_output_dimension") = 0);
+      py::arg("max_output_dimension") = 0,
+      py::arg("max_output_width") = 0);
 
   py::class_<hm::BlenderConfig, std::shared_ptr<hm::BlenderConfig>>(
       m, "BlenderConfig")

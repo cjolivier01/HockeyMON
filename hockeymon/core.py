@@ -151,6 +151,7 @@ def create_homography_maps(
     confidence=0.999,
     max_iterations=10000,
     max_output_dimension=0,
+    max_output_width=0,
 ):
     """Call the native MAGSAC++ homography-map builder."""
     native_function = getattr(_native_hockeymon, "create_homography_maps", None)
@@ -170,6 +171,7 @@ def create_homography_maps(
         confidence,
         max_iterations,
         max_output_dimension,
+        *([max_output_width] if max_output_width else []),
     )
 
 
@@ -185,6 +187,7 @@ def create_affine_ransac_maps(
     max_iterations=10000,
     refine_iterations=10,
     max_output_dimension=0,
+    max_output_width=0,
 ):
     """Call the native affine RANSAC coordinate-map builder."""
     native_function = getattr(_native_hockeymon, "create_affine_ransac_maps", None)
@@ -205,6 +208,7 @@ def create_affine_ransac_maps(
         max_iterations,
         refine_iterations,
         max_output_dimension,
+        *([max_output_width] if max_output_width else []),
     )
 
 
