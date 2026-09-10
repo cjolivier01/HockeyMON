@@ -200,8 +200,14 @@ def _make_results_from_box_list(per_frame_boxes: Iterable[torch.Tensor]) -> Dict
 def _run_play_trackers(overrides: Dict | None = None) -> Tuple[Dict, Dict]:
     overrides = overrides or {}
     game_cfg = _base_game_config()
-    if "cam_ignore_largest" in overrides:
-        game_cfg["rink"]["tracking"]["cam_ignore_largest"] = overrides["cam_ignore_largest"]
+    for key in (
+        "cam_ignore_largest",
+        "cam_ignore_largest_count",
+        "cam_ignore_oversized",
+        "cam_oversized_percent",
+    ):
+        if key in overrides:
+            game_cfg["rink"]["tracking"][key] = overrides[key]
     ratio_keys = (
         "max_speed_ratio_x",
         "max_speed_ratio_y",
@@ -219,7 +225,22 @@ def _run_play_trackers(overrides: Dict | None = None) -> Tuple[Dict, Dict]:
     return python_results, cpp_results
 
 
-@pytest.mark.parametrize("overrides", [{}, {"cam_ignore_largest": True}])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"cam_ignore_largest": True},
+        {"cam_ignore_largest": True, "cam_ignore_largest_count": 2},
+        {"cam_ignore_largest": True, "cam_ignore_largest_count": 0},
+        {"cam_ignore_oversized": True, "cam_oversized_percent": 100},
+        {
+            "cam_ignore_largest": True,
+            "cam_ignore_largest_count": 2,
+            "cam_ignore_oversized": True,
+            "cam_oversized_percent": 50,
+        },
+    ],
+)
 def should_match_camera_boxes_between_cpp_and_python(overrides):
     py_results, cpp_results = _run_play_trackers(overrides)
     assert_close(py_results["current_box"], cpp_results["current_box"], atol=1e-4, rtol=0)
@@ -338,3 +359,46 @@ def should_match_when_speed_ratios_change():
     assert_close(
         py_results["current_fast_box_list"], cpp_results["current_fast_box_list"], atol=1e-4, rtol=0
     )
+
+
+@pytest.mark.parametrize(
+    "tlwhs,count,enabled,percent,expected",
+    [
+        ([[0, 0, 100, 1]] * 4 + [[0, 0, 300, 1], [0, 0, 1000, 1]], 2, False, 100, [4, 5]),
+        ([[0, 0, 100, 1]] * 4 + [[0, 0, 300, 1], [0, 0, 1000, 1]], 1, True, 100, [4, 5]),
+        ([[0, 0, 100, 1]] * 4 + [[0, 0, 300, 1], [0, 0, 300, 1]], 0, True, 100, [4, 5]),
+        (
+            [
+                [0, 0, 33.41304, 199.87642],
+                [0, 0, 33.413044, 199.8764],
+                [0, 0, 10, 10],
+                [0, 0, 10, 10],
+            ],
+            1,
+            False,
+            100,
+            [0],
+        ),
+        ([[0, 0, 33.41304, 199.87642]] * 3 + [[0, 0, 66.826088, 199.8764]], 0, True, 100, []),
+    ],
+)
+def should_match_native_excluded_player_ids(tlwhs, count, enabled, percent, expected):
+    from hockeymon import AllLivingBoxConfig, BBox, PlayTrackerConfig
+    from hockeymon import PlayTracker as NativePlayTracker
+
+    from hmlib.bbox.box_functions import player_size_exclusion_mask
+
+    boxes = torch.tensor(tlwhs, dtype=torch.float32)
+    keep = player_size_exclusion_mask(boxes, count, enabled, percent)
+    config = PlayTrackerConfig()
+    config.ignore_largest_bbox_count = count
+    config.ignore_oversized_bboxes = enabled
+    config.oversized_bbox_percent = percent
+    live = AllLivingBoxConfig()
+    live.arena_box = BBox(0, 0, 2000, 1000)
+    config.living_boxes = [live]
+    tracker = NativePlayTracker(live.arena_box, config)
+    native_boxes = [BBox(float(x), float(y), float(x + w), float(y + h)) for x, y, w, h in boxes]
+    result = tracker.forward(list(range(len(boxes))), native_boxes)
+    native_ids = sorted(track.tracking_id for track in result.size_ignored_tracking_boxes)
+    assert native_ids == (~keep).nonzero().flatten().tolist() == expected

@@ -1,3 +1,4 @@
+import math
 from typing import Union
 
 import numpy as np
@@ -178,6 +179,43 @@ def check_for_box_overshoot(
         any_on_edge[3] & (movement_directions[1] > -epsilon),
     )
     return torch.stack([x_on_edge, y_on_edge])
+
+
+def player_size_exclusion_mask(
+    batch_bboxes: torch.Tensor,
+    largest_count: int,
+    ignore_oversized: bool,
+    oversized_percent: float,
+) -> torch.Tensor:
+    """Keep TLWH player boxes using the same area filter as the native tracker.
+
+    Apply the largest count first, then compare against each player's peers in
+    the remaining snapshot. Keep at least three players. Ties use input order.
+    All tensor operations stay on the input device.
+    """
+    if isinstance(largest_count, bool) or not isinstance(largest_count, int) or largest_count < 0:
+        raise ValueError("cam_ignore_largest_count must be a nonnegative integer")
+    if not math.isfinite(oversized_percent) or oversized_percent < 0:
+        raise ValueError("cam_oversized_percent must be finite and nonnegative")
+    size = batch_bboxes.shape[0]
+    keep = torch.ones(size, dtype=torch.bool, device=batch_bboxes.device)
+    if size <= 3 or (largest_count == 0 and not ignore_oversized):
+        return keep
+    # BBox::area() uses float32 products. Promote the result for accumulation,
+    # preserving native ties and strict threshold boundaries on fractional boxes.
+    areas = (batch_bboxes[:, 2].float() * batch_bboxes[:, 3].float()).to(torch.float64)
+    order = torch.argsort(areas, descending=True, stable=True)
+    count = min(largest_count, size - 3)
+    keep[order[:count]] = False
+    if ignore_oversized and count < size - 3:
+        remaining = order[count:]
+        remaining_areas = areas[remaining]
+        other_average = (remaining_areas.sum() - remaining_areas) / (size - count - 1)
+        oversized = remaining_areas > (1.0 + oversized_percent / 100.0) * other_average
+        # Rank on device so the safeguard never needs scalar GPU readback.
+        selected = oversized & (oversized.to(torch.int64).cumsum(0) <= size - 3 - count)
+        keep[remaining] = ~selected
+    return keep
 
 
 def remove_largest_bbox(batch_bboxes: torch.Tensor, min_boxes: int):

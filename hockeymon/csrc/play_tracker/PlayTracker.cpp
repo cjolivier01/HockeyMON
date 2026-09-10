@@ -1,6 +1,7 @@
 #include "hockeymon/csrc/play_tracker/PlayTracker.h"
 #include "hockeymon/csrc//kmeans/kmeans.h"
 #include "hockeymon/csrc/play_tracker/LivingBoxImpl.h"
+#include "hockeymon/csrc/play_tracker/PlayerSizeFilter.h"
 
 #include <algorithm>
 #include <cassert>
@@ -16,32 +17,7 @@ namespace {
 constexpr size_t kMinTracksBeforePruning = 3;
 // Arbitrarily large jump in bbox center that would be a bug
 constexpr size_t kMaxJumpAssertionValue = 300;
-#if 0
-std::tuple</*index_removed=*/size_t, std::vector<size_t>, std::vector<BBox>>
-remove_largest(std::vector<size_t> ids, std::vector<BBox> bboxes) {
-  double largest_area = 0.0;
-  size_t largest_index = kBadIdOrIndex;
-  for (size_t i = 0, n = ids.size(); i < n; ++i) {
-    double this_area = bboxes[i].area();
-    if (this_area > largest_area) {
-      largest_area = this_area;
-      largest_index = i;
-    }
-  }
-  // Making a new vector will be more expensive than just removing a vector item
-  // because to create a new vector, you are guaranteed to traverse the entire
-  // vector except one item, plus construction and allocation overhead, etc.
-  // So, simply erase the element.
-  if (largest_index != kBadIdOrIndex) {
-    ids.erase(ids.begin() + largest_index);
-    bboxes.erase(bboxes.begin() + largest_index);
-  }
-  return std::make_tuple(largest_index, std::move(ids), std::move(bboxes));
-}
-#endif
-
 struct PruneResults {
-  size_t largest_area_index{kBadIdOrIndex};
   size_t leftmost_index{kBadIdOrIndex};
   size_t rightmost_index{kBadIdOrIndex};
 };
@@ -49,14 +25,12 @@ struct PruneResults {
 PruneResults remove_extremes(
     const std::vector<size_t>& ids,
     const std::vector<BBox>& bboxes,
-    bool ignore_largest,
     bool ignore_lr_extremes,
     const size_t min_boxes = 10) {
-  if (!ignore_largest && !ignore_lr_extremes) {
+  if (!ignore_lr_extremes) {
     return PruneResults();
   }
   PruneResults results;
-  double largest_area = 0.0;
 
   // size_t leftmost_index = kBadIdOrIndex;
   int64_t leftmost_x = std::numeric_limits<int64_t>::max();
@@ -66,19 +40,10 @@ PruneResults remove_extremes(
 
   const bool remove_lr = (bboxes.size() >= min_boxes) && ignore_lr_extremes;
 
-  // Single loop: compute largest area as well as leftmost/rightmost center x.
+  // Compute leftmost/rightmost center x.
   const size_t n = ids.size();
   for (size_t i = 0; i < n; ++i) {
     const auto& box = bboxes[i];
-
-    if (ignore_largest) {
-      // Compute area.
-      double area = box.area();
-      if (area > largest_area) {
-        largest_area = area;
-        results.largest_area_index = i;
-      }
-    }
 
     if (remove_lr) {
       // Compute center x.
@@ -290,6 +255,8 @@ PlayTracker::PlayTracker(
     const BBox& initial_box,
     const PlayTrackerConfig& config)
     : config_(config), play_detector_(config.play_detector, this) {
+  validate_player_size_filter(
+      config.ignore_largest_bbox_count, config.oversized_bbox_percent);
   create_boxes(initial_box);
 }
 
@@ -325,6 +292,11 @@ PlayTracker::ClusterBoxes PlayTracker::get_cluster_boxes(
   }
 
   const size_t cluster_count = cluster_sizes.size();
+  if (cluster_count == 0) {
+    cluster_boxes_result.final_cluster_box =
+        get_union_bounding_box(tracking_boxes);
+    return cluster_boxes_result;
+  }
   std::vector<std::vector<size_t>> cluster_item_indexes(cluster_count);
   std::vector<BBox> cluster_bboxes(cluster_count);
 
@@ -366,6 +338,17 @@ PlayTracker::ClusterBoxes PlayTracker::get_cluster_boxes(
       get_union_bounding_box(cluster_bboxes);
 
   return cluster_boxes_result;
+}
+
+void PlayTracker::set_player_size_filter(
+    int largest_count,
+    bool ignore_oversized,
+    double oversized_percent) {
+  validate_player_size_filter(largest_count, oversized_percent);
+  config_.ignore_largest_bbox = largest_count != 0;
+  config_.ignore_largest_bbox_count = largest_count;
+  config_.ignore_oversized_bboxes = ignore_oversized;
+  config_.oversized_bbox_percent = oversized_percent;
 }
 
 void PlayTracker::set_bboxes(const std::vector<BBox>& bboxes) {
@@ -418,22 +401,25 @@ PlayTrackerResults PlayTracker::forward(
   PruneResults prune_results;
   std::vector<BBox>* p_cluster_bboxes = &tracking_boxes;
   std::vector<BBox> repl_bboxes;
-  if ((config_.ignore_largest_bbox || config_.ignore_left_and_right_extremes) &&
-      tracking_ids.size() > kMinTracksBeforePruning) {
-    // prune_results = remove_largest(tracking_ids, tracking_boxes);
+  const auto size_exclusions = player_size_exclusions(
+      tracking_boxes,
+      config_.ignore_largest_bbox ? config_.ignore_largest_bbox_count : 0,
+      config_.ignore_oversized_bboxes,
+      config_.oversized_bbox_percent);
+  for (size_t index : size_exclusions) {
+    ignore_tracking_ids.emplace(tracking_ids.at(index));
+    results.size_ignored_tracking_boxes.push_back(
+        Track{tracking_ids.at(index), tracking_boxes.at(index)});
+  }
+  if (!results.size_ignored_tracking_boxes.empty())
+    results.largest_tracking_bbox = results.size_ignored_tracking_boxes.front();
+  if (!size_exclusions.empty() ||
+      (config_.ignore_left_and_right_extremes &&
+       tracking_ids.size() > kMinTracksBeforePruning)) {
     prune_results = remove_extremes(
         tracking_ids,
         *p_cluster_bboxes,
-        config_.ignore_largest_bbox,
         config_.ignore_left_and_right_extremes);
-    if (prune_results.largest_area_index != kBadIdOrIndex) {
-      ignore_tracking_ids.emplace(
-          tracking_ids.at(prune_results.largest_area_index));
-      results.largest_tracking_bbox = Track{
-          .tracking_id = tracking_ids.at(prune_results.largest_area_index),
-          .bbox = tracking_boxes.at(prune_results.largest_area_index),
-      };
-    }
     if (prune_results.leftmost_index != kBadIdOrIndex) {
       ignore_tracking_ids.emplace(
           tracking_ids.at(prune_results.leftmost_index));
@@ -451,10 +437,9 @@ PlayTrackerResults PlayTracker::forward(
       };
     }
     std::set<size_t> remove_indices{
-        prune_results.largest_area_index,
-        prune_results.leftmost_index,
-        prune_results.rightmost_index};
+        prune_results.leftmost_index, prune_results.rightmost_index};
     remove_indices.erase(kBadIdOrIndex);
+    remove_indices.insert(size_exclusions.begin(), size_exclusions.end());
     if (!remove_indices.empty()) {
       repl_bboxes = prune_bboxes(*p_cluster_bboxes, remove_indices);
       p_cluster_bboxes = &repl_bboxes;
@@ -477,9 +462,9 @@ PlayTrackerResults PlayTracker::forward(
   // Special cases
   if (start_bbox.empty()) {
     // probably not enough tracks
-    if (!tracking_boxes.empty()) {
-      // Just union all tracking boxes
-      start_bbox = get_union_bounding_box(tracking_boxes);
+    if (!p_cluster_bboxes->empty()) {
+      // Preserve player exclusions even when too few remain for clustering.
+      start_bbox = get_union_bounding_box(*p_cluster_bboxes);
     } else {
       // Last resort, the entire arena area
       start_bbox = arena_box;

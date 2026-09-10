@@ -1912,6 +1912,14 @@ void init_play_tracker(::pybind11::module_& m) {
       .def_readwrite(
           "ignore_largest_bbox", &PlayTrackerConfig::ignore_largest_bbox)
       .def_readwrite(
+          "ignore_largest_bbox_count",
+          &PlayTrackerConfig::ignore_largest_bbox_count)
+      .def_readwrite(
+          "ignore_oversized_bboxes",
+          &PlayTrackerConfig::ignore_oversized_bboxes)
+      .def_readwrite(
+          "oversized_bbox_percent", &PlayTrackerConfig::oversized_bbox_percent)
+      .def_readwrite(
           "ignore_left_and_right_extremes",
           &PlayTrackerConfig::ignore_left_and_right_extremes)
 
@@ -1933,6 +1941,9 @@ void init_play_tracker(::pybind11::module_& m) {
       .def_readonly("final_cluster_box", &PlayTrackerResults::final_cluster_box)
       .def_readonly("tracking_boxes", &PlayTrackerResults::tracking_boxes)
       .def_readonly("play_detection", &PlayTrackerResults::play_detection)
+      .def_readonly(
+          "size_ignored_tracking_boxes",
+          &PlayTrackerResults::size_ignored_tracking_boxes)
       .def_readonly(
           "largest_tracking_bbox", &PlayTrackerResults::largest_tracking_bbox)
       .def_readonly(
@@ -1962,6 +1973,7 @@ void init_play_tracker(::pybind11::module_& m) {
           &PlayTracker::set_bboxes_scaled,
           py::arg("bbox"),
           py::arg("scale_step"))
+      .def("set_player_size_filter", &PlayTracker::set_player_size_filter)
       .def(
           "set_breakaway_braking",
           &PlayTracker::set_breakaway_braking,
