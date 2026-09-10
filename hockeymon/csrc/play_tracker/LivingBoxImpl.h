@@ -16,6 +16,8 @@ class LivingBox : public ILivingBox,
                   public BoundingBox,
                   public ResizingBox,
                   public TranslatingBox {
+  friend class PlayTracker;
+
  public:
   LivingBox(std::string label, BBox bbox, const AllLivingBoxConfig& config);
 

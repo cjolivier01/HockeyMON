@@ -9,6 +9,8 @@ namespace hm {
 namespace play_tracker {
 
 class PlayerSTrack {
+  friend class PlayTracker;
+
  public:
   PlayerSTrack(
       size_t max_positions,

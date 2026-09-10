@@ -36,3 +36,16 @@ cc_test(
     srcs = ["PlayerSizeFilterTest.cpp"],
     deps = [":play_tracker"],
 )
+
+cc_test(
+    name = "play_tracker_snapshot_test",
+    srcs = ["PlayTrackerSnapshotTest.cpp"],
+    deps = [":play_tracker"],
+)
+
+cc_test(
+    name = "play_tracker_snapshot_offset_test",
+    srcs = ["PlayTrackerSnapshotTest.cpp"],
+    args = ["--offset-arena"],
+    deps = [":play_tracker"],
+)

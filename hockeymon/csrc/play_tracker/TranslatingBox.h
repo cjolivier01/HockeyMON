@@ -38,6 +38,8 @@ struct TranslationState {
 };
 
 class TranslatingBox : virtual public IBasicLivingBox {
+  friend class PlayTracker;
+
  public:
   TranslatingBox(const TranslatingBoxConfig& config);
 
@@ -114,7 +116,6 @@ class TranslatingBox : virtual public IBasicLivingBox {
   void on_new_position();
 
  private:
-  void test_arena_edge_position_scale();
 
   bool is_nonstop() const;
 

@@ -15,6 +15,8 @@ namespace play_tracker {
 
 constexpr size_t kBadIdOrIndex = std::numeric_limits<size_t>::max();
 
+struct PlayTrackerSnapshot;
+
 struct PlayTrackerConfig {
   int no_wide_start{false};
   // For less than this, we just move towards the arena box
@@ -72,6 +74,16 @@ class PlayTracker : public IBreakawayAdjuster {
  public:
   PlayTracker(const BBox& initial_box, const PlayTrackerConfig& config);
   virtual ~PlayTracker() = default;
+
+  // Include PlayTrackerSnapshot.h when using these value-based state APIs.
+  PlayTrackerSnapshot snapshot() const;
+  static std::unique_ptr<PlayTracker> from_snapshot(
+      const PlayTrackerSnapshot& snapshot);
+
+  PlayTracker(const PlayTracker&) = delete;
+  PlayTracker& operator=(const PlayTracker&) = delete;
+  PlayTracker(PlayTracker&&) = delete;
+  PlayTracker& operator=(PlayTracker&&) = delete;
 
   PlayTrackerResults forward(
       std::vector<size_t>& tracking_ids,

@@ -74,6 +74,7 @@ void compute_kmeans(
       break;
   }
   if (results) {
+    ::free(results[0]);
     ::free(results);
   }
 }

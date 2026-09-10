@@ -31,6 +31,8 @@ struct ResizingState {
 };
 
 class ResizingBox : virtual public IBasicLivingBox {
+  friend class PlayTracker;
+
  public:
   ResizingBox(ResizingBox&&) = delete;
   ResizingBox(const ResizingConfig& config);
