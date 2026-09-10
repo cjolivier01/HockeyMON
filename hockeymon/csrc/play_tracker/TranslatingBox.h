@@ -38,6 +38,8 @@ struct TranslationState {
 };
 
 class TranslatingBox : virtual public IBasicLivingBox {
+  friend class PlayTracker;
+
  public:
   TranslatingBox(const TranslatingBoxConfig& config);
 

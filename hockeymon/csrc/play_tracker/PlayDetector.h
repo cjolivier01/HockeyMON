@@ -78,6 +78,8 @@ struct PlayDetectorResults {
 };
 
 class PlayDetector {
+  friend class PlayTracker;
+
   using Velocity = PointDiff;
 
  public:

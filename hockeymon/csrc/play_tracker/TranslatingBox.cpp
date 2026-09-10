@@ -2,6 +2,7 @@
 #include "hockeymon/csrc/play_tracker/LogCapture.h"
 
 #include <cassert>
+#include <atomic>
 #include <csignal>
 #include <iostream>
 
@@ -64,8 +65,8 @@ void TranslatingBox::set_destination(const BBox& dest_box) {
   std::optional<FloatValue> x_gaussian;
   if (!is_zero(config_.dynamic_acceleration_scaling)) {
     assert(config_.sticky_translation);
-    static size_t test_pass_counter = 0;
-    if (!test_pass_counter++) {
+    static std::atomic<size_t> test_pass_counter{0};
+    if (!test_pass_counter.fetch_add(1, std::memory_order_relaxed)) {
       test_arena_edge_position_scale();
     }
     // Only do this if we aren't super off so that massive movements are still
@@ -77,10 +78,10 @@ void TranslatingBox::set_destination(const BBox& dest_box) {
           std::abs(config_.dynamic_acceleration_scaling *
                    get_arena_edge_center_position_scale());
     } else {
-      static size_t wayoff_count = 0;
-      ++wayoff_count;
+      static std::atomic<size_t> wayoff_count{0};
+      const auto count = wayoff_count.fetch_add(1, std::memory_order_relaxed) + 1;
       hm_log_warning(
-          std::to_string(wayoff_count) +
+          std::to_string(count) +
           ": We are way off, ignoring any position scale");
       constexpr FloatValue kEmergencyPanFixScaleConstraintRatio = 4.0;
       x_gaussian = kEmergencyPanFixScaleConstraintRatio;

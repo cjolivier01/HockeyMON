@@ -299,6 +299,7 @@ PlayTracker::ClusterBoxes PlayTracker::get_cluster_boxes(
   }
   std::vector<std::vector<size_t>> cluster_item_indexes(cluster_count);
   std::vector<BBox> cluster_bboxes(cluster_count);
+  std::vector<std::optional<BBox>> removed_outliers(cluster_count);
 
 #pragma omp parallel for num_threads(cluster_count)
   for (size_t cluster_id = 0; cluster_id < cluster_count; ++cluster_id) {
@@ -321,8 +322,7 @@ PlayTracker::ClusterBoxes PlayTracker::get_cluster_boxes(
         auto outlier_iter = bboxes.begin() + outlier_index;
         // FIXME(maybe): Removing this is slow :(
         // std::cout << "Removing outlier box: " << *outlier_iter << std::endl;
-        cluster_boxes_result.removed_cluster_outlier_box.emplace(
-            cluster_sizes.at(cluster_id), bboxes[outlier_index]);
+        removed_outliers.at(cluster_id) = bboxes[outlier_index];
         bboxes.erase(outlier_iter);
       }
     }
@@ -332,6 +332,10 @@ PlayTracker::ClusterBoxes PlayTracker::get_cluster_boxes(
   for (size_t i = 0; i < cluster_sizes.size(); ++i) {
     const auto& this_cluster_box = cluster_bboxes.at(i);
     cluster_boxes_result.cluster_boxes[cluster_sizes[i]] = this_cluster_box;
+    if (removed_outliers[i]) {
+      cluster_boxes_result.removed_cluster_outlier_box.emplace(
+          cluster_sizes[i], *removed_outliers[i]);
+    }
   }
 
   cluster_boxes_result.final_cluster_box =
