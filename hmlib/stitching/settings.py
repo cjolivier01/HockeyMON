@@ -213,6 +213,7 @@ class StitchingSettings:
     max_output_width: int | None = None
     calibration_frame_count: int = 4
     max_control_points: int = 1500
+    lens_profile_fingerprint: str | None = None
 
     def manifest(self) -> dict[str, str]:
         """Stable resolved provenance, independent of config spelling/inheritance."""

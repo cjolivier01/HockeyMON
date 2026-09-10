@@ -140,6 +140,17 @@ except Exception:
 #     pass
 
 
+def detect_akaze_features(gray, mask):
+    """Detect at most 2000 AKAZE M-LDB features using native OpenCV."""
+    native_function = getattr(_native_hockeymon, "detect_akaze_features", None)
+    if native_function is None:
+        raise RuntimeError(
+            "The installed HockeyMON extension does not provide "
+            "detect_akaze_features; rebuild the native extension"
+        )
+    return native_function(gray, mask)
+
+
 def create_homography_maps(
     left_points,
     right_points,
@@ -152,6 +163,7 @@ def create_homography_maps(
     max_iterations=10000,
     max_output_dimension=0,
     max_output_width=0,
+    lens_calibration=None,
 ):
     """Call the native MAGSAC++ homography-map builder."""
     native_function = getattr(_native_hockeymon, "create_homography_maps", None)
@@ -171,7 +183,11 @@ def create_homography_maps(
         confidence,
         max_iterations,
         max_output_dimension,
-        *([max_output_width] if max_output_width else []),
+        *(
+            [max_output_width, lens_calibration]
+            if lens_calibration
+            else ([max_output_width] if max_output_width else [])
+        ),
     )
 
 
@@ -188,6 +204,7 @@ def create_affine_ransac_maps(
     refine_iterations=10,
     max_output_dimension=0,
     max_output_width=0,
+    lens_calibration=None,
 ):
     """Call the native affine RANSAC coordinate-map builder."""
     native_function = getattr(_native_hockeymon, "create_affine_ransac_maps", None)
@@ -208,7 +225,11 @@ def create_affine_ransac_maps(
         max_iterations,
         refine_iterations,
         max_output_dimension,
-        *([max_output_width] if max_output_width else []),
+        *(
+            [max_output_width, lens_calibration]
+            if lens_calibration
+            else ([max_output_width] if max_output_width else [])
+        ),
     )
 
 
@@ -248,6 +269,7 @@ __all__ = [
     "compute_kmeans_clusters",
     "create_affine_ransac_maps",
     "create_homography_maps",
+    "detect_akaze_features",
     "bgr_to_i420_cuda",
     "show_cuda_tensor",
 ]

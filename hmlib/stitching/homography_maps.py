@@ -11,6 +11,7 @@ import tifffile
 import torch
 
 from hmlib.stitching.calibration import CalibrationAlignmentError
+from hmlib.stitching.akaze import LensCalibrationPair
 
 INVALID_MAP_COORDINATE = np.iinfo(np.uint16).max
 MAXIMUM_MAP_DIMENSION = int(INVALID_MAP_COORDINATE) - 1
@@ -26,6 +27,7 @@ def _native_create_homography_maps(
     right_height: int,
     max_output_dimension: int,
     max_output_width: int = 0,
+    lens_calibration: list[list[float]] | None = None,
 ) -> Mapping[str, Any]:
     try:
         from hockeymon.core import create_homography_maps
@@ -47,6 +49,7 @@ def _native_create_homography_maps(
         max_iterations=10000,
         max_output_dimension=max_output_dimension,
         max_output_width=max_output_width,
+        lens_calibration=lens_calibration,
     )
 
 
@@ -59,6 +62,7 @@ def _native_create_affine_ransac_maps(
     right_height: int,
     max_output_dimension: int,
     max_output_width: int = 0,
+    lens_calibration: list[list[float]] | None = None,
 ) -> Mapping[str, Any]:
     try:
         from hockeymon.core import create_affine_ransac_maps
@@ -81,6 +85,7 @@ def _native_create_affine_ransac_maps(
         refine_iterations=10,
         max_output_dimension=max_output_dimension,
         max_output_width=max_output_width,
+        lens_calibration=lens_calibration,
     )
 
 
@@ -169,6 +174,7 @@ def _create_opencv_mapping_files(
     minimum_points: int,
     estimator_name: str,
     max_output_width: int | None = None,
+    lens_calibration: LensCalibrationPair | None = None,
 ) -> list[str]:
     if len(image_files) != 2:
         raise ValueError("Exactly two input images are required")
@@ -212,6 +218,11 @@ def _create_opencv_mapping_files(
             right_height,
             int(max_output_dimension or 0),
             int(max_output_width or 0),
+            (
+                [lens_calibration.left.native_values(), lens_calibration.right.native_values()]
+                if lens_calibration
+                else None
+            ),
         )
     except RuntimeError as exc:
         # The rebuilt extension distinguishes rejected geometry from allocation,
@@ -256,6 +267,7 @@ def create_opencv_magsac_mapping_files(
     output_directory: str | Path,
     max_output_dimension: int | None = None,
     max_output_width: int | None = None,
+    lens_calibration: LensCalibrationPair | None = None,
 ) -> list[str]:
     """Create nona-compatible TIFF maps from a native MAGSAC++ homography."""
     return _create_opencv_mapping_files(
@@ -267,6 +279,7 @@ def create_opencv_magsac_mapping_files(
         minimum_points=4,
         estimator_name="a homography",
         max_output_width=max_output_width,
+        lens_calibration=lens_calibration,
     )
 
 
@@ -276,6 +289,7 @@ def create_opencv_affine_ransac_mapping_files(
     output_directory: str | Path,
     max_output_dimension: int | None = None,
     max_output_width: int | None = None,
+    lens_calibration: LensCalibrationPair | None = None,
 ) -> list[str]:
     """Create nona-compatible TIFF maps from a native affine RANSAC fit."""
     return _create_opencv_mapping_files(
@@ -287,4 +301,5 @@ def create_opencv_affine_ransac_mapping_files(
         minimum_points=3,
         estimator_name="an affine transform",
         max_output_width=max_output_width,
+        lens_calibration=lens_calibration,
     )

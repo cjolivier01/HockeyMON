@@ -1,11 +1,21 @@
 load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@pybind11_bazel//:build_defs.bzl", "pybind_extension")
 
 cc_library(
     name = "homography_maps",
     srcs = ["HomographyMaps.cpp"],
-    hdrs = ["HomographyMaps.h"],
+    hdrs = ["HomographyMaps.h", "AkazeBindings.h"],
     visibility = ["//visibility:public"],
     deps = ["@opencv_linux//:opencv"],
+)
+
+# Exercise the production binding without requiring the CUDA/Torch extension.
+pybind_extension(
+    name = "_akaze_test_native",
+    testonly = True,
+    srcs = ["AkazeBindingsTestModule.cpp"],
+    deps = [":homography_maps"],
+    visibility = ["//tests:__pkg__"],
 )
 
 cc_test(

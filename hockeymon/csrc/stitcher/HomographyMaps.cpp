@@ -2,6 +2,8 @@
 
 #include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
+#include <opencv2/features2d.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -134,7 +136,8 @@ HomographyImageMap make_image_map(
     int source_width,
     int source_height,
     int canvas_width,
-    int canvas_height) {
+    int canvas_height,
+    const std::vector<double>& calibration) {
   const auto corners =
       transformed_corners(image_to_canvas, source_width, source_height);
   Bounds bounds;
@@ -192,8 +195,32 @@ HomographyImageMap make_image_map(
         if (std::abs(source_h[2]) < 1e-12) {
           continue;
         }
-        const double source_x = source_h[0] / source_h[2];
-        const double source_y = source_h[1] / source_h[2];
+        double source_x = source_h[0] / source_h[2];
+        double source_y = source_h[1] / source_h[2];
+        if (!calibration.empty()) {
+          const double fx = calibration[2] * source_width / calibration[0];
+          const double fy = calibration[3] * source_height / calibration[1];
+          const double cx = calibration[4] * source_width / calibration[0];
+          const double cy = calibration[5] * source_height / calibration[1];
+          const double nx = (source_x - cx) / fx;
+          const double ny = (source_y - cy) / fy;
+          const double radius = std::hypot(nx, ny);
+          double radial = 1.0;
+          if (radius > 1e-12) {
+            const double theta = std::atan(radius);
+            const double t2 = theta * theta;
+            radial = theta *
+                (1.0 +
+                 t2 *
+                     (calibration[6] +
+                      t2 *
+                          (calibration[7] +
+                           t2 * (calibration[8] + t2 * calibration[9])))) /
+                radius;
+          }
+          source_x = fx * nx * radial + cx;
+          source_y = fy * ny * radial + cy;
+        }
         if (!std::isfinite(source_x) || !std::isfinite(source_y) ||
             source_x <= -0.5 ||
             source_x >= static_cast<double>(source_width) - 0.5 ||
@@ -262,7 +289,8 @@ HomographyMapResult build_map_result(
     int max_output_dimension,
     int max_output_width,
     size_t minimum_inliers,
-    const char* estimator_name) {
+    const char* estimator_name,
+    const std::vector<std::vector<double>>& lens_calibration) {
   HomographyMapResult result;
   result.inlier_mask.reserve(inlier_mask.total());
   for (size_t index = 0; index < inlier_mask.total(); ++index) {
@@ -339,13 +367,199 @@ HomographyMapResult build_map_result(
   result.left_to_canvas_homography = to_array(left_to_canvas);
   result.right_to_canvas_homography = to_array(right_to_canvas);
   result.image_maps[0] = make_image_map(
-      left_to_canvas, left_width, left_height, canvas_width, canvas_height);
+      left_to_canvas,
+      left_width,
+      left_height,
+      canvas_width,
+      canvas_height,
+      lens_calibration.empty() ? std::vector<double>{} : lens_calibration[0]);
   result.image_maps[1] = make_image_map(
-      right_to_canvas, right_width, right_height, canvas_width, canvas_height);
+      right_to_canvas,
+      right_width,
+      right_height,
+      canvas_width,
+      canvas_height,
+      lens_calibration.empty() ? std::vector<double>{} : lens_calibration[1]);
   return result;
 }
 
+void validate_lens_calibration(
+    const std::vector<std::vector<double>>& calibration) {
+  if (calibration.empty())
+    return;
+  if (calibration.size() != 2) {
+    throw std::invalid_argument(
+        "Lens calibration requires both camera profiles");
+  }
+  for (const auto& camera : calibration) {
+    if (camera.size() != 10 ||
+        !std::all_of(
+            camera.begin(),
+            camera.end(),
+            [](double value) { return std::isfinite(value); }) ||
+        camera[0] <= 0 || camera[1] <= 0 || camera[2] <= 0 || camera[3] <= 0 ||
+        std::floor(camera[0]) != camera[0] ||
+        std::floor(camera[1]) != camera[1]) {
+      throw std::invalid_argument("Invalid KB4 lens calibration values");
+    }
+  }
+}
+
+size_t required_calibrated_inliers(size_t count) {
+  return count < 32 ? std::max<size_t>(4, std::ceil(count * 0.5))
+                    : std::max<size_t>(16, std::ceil(count * 0.15));
+}
+
+bool calibrated_consensus_valid(
+    const std::vector<cv::Point2d>& left,
+    const std::vector<cv::Point2d>& right,
+    const cv::Mat& mask,
+    int left_width,
+    int left_height,
+    int right_width,
+    int right_height) {
+  std::vector<cv::Point2f> left_inliers, right_inliers;
+  for (size_t index = 0; index < left.size(); ++index) {
+    if (mask.ptr<uint8_t>()[index]) {
+      left_inliers.emplace_back(left[index]);
+      right_inliers.emplace_back(right[index]);
+    }
+  }
+  if (left_inliers.size() < required_calibrated_inliers(left.size()))
+    return false;
+  auto covered =
+      [](const std::vector<cv::Point2f>& points, int width, int height) {
+        float min_x = points.front().x, max_x = min_x;
+        float min_y = points.front().y, max_y = min_y;
+        for (const auto& point : points) {
+          min_x = std::min(min_x, point.x);
+          max_x = std::max(max_x, point.x);
+          min_y = std::min(min_y, point.y);
+          max_y = std::max(max_y, point.y);
+        }
+        std::vector<cv::Point2f> hull;
+        cv::convexHull(points, hull);
+        return (max_x - min_x) / width >= 0.04 &&
+            (max_y - min_y) / height >= 0.04 &&
+            std::abs(cv::contourArea(hull)) /
+                (static_cast<double>(width) * height) >=
+            0.0025;
+      };
+  return covered(left_inliers, left_width, left_height) &&
+      covered(right_inliers, right_width, right_height);
+}
+
+cv::Mat calibrated_homography(
+    const std::vector<cv::Point2d>& left,
+    const std::vector<cv::Point2d>& right,
+    int left_width,
+    int left_height,
+    int right_width,
+    int right_height,
+    double threshold,
+    int max_iterations,
+    double confidence,
+    cv::Mat* inliers) {
+  std::vector<size_t> remaining;
+  for (size_t index = 0; index < left.size(); ++index)
+    remaining.push_back(index);
+  for (size_t attempt = 0; attempt < 12 && remaining.size() >= 4; ++attempt) {
+    std::vector<cv::Point2d> sample_left, sample_right;
+    for (size_t index : remaining) {
+      sample_left.push_back(left[index]);
+      sample_right.push_back(right[index]);
+    }
+    cv::Mat sample_mask;
+    cv::Mat candidate = cv::findHomography(
+        sample_right,
+        sample_left,
+        cv::USAC_MAGSAC,
+        threshold,
+        sample_mask,
+        max_iterations,
+        confidence);
+    if (candidate.empty() || sample_mask.total() != remaining.size())
+      break;
+    cv::Mat full_mask = cv::Mat::zeros(static_cast<int>(left.size()), 1, CV_8U);
+    size_t inlier_count = 0;
+    for (size_t index = 0; index < remaining.size(); ++index) {
+      if (sample_mask.ptr<uint8_t>()[index]) {
+        full_mask.ptr<uint8_t>()[remaining[index]] = 1;
+        ++inlier_count;
+      }
+    }
+    bool valid = calibrated_consensus_valid(
+        left,
+        right,
+        full_mask,
+        left_width,
+        left_height,
+        right_width,
+        right_height);
+    if (valid) {
+      cv::Matx33d transform;
+      std::copy(
+          candidate.ptr<double>(), candidate.ptr<double>() + 9, transform.val);
+      try {
+        transformed_corners(transform, right_width, right_height);
+      } catch (const CalibrationAlignmentError&) {
+        valid = false;
+      }
+    }
+    if (valid) {
+      *inliers = full_mask;
+      return candidate;
+    }
+    if (inlier_count < required_calibrated_inliers(left.size()))
+      break;
+    std::vector<size_t> next;
+    for (size_t index = 0; index < remaining.size(); ++index) {
+      if (!sample_mask.ptr<uint8_t>()[index])
+        next.push_back(remaining[index]);
+    }
+    if (next.size() == remaining.size())
+      break;
+    remaining = std::move(next);
+  }
+  throw CalibrationAlignmentError(
+      "Calibrated MAGSAC could not find spatially supported projective consensus");
+}
+
 } // namespace
+
+AkazeFeatures detect_akaze_features(
+    const uint8_t* gray,
+    const uint8_t* mask,
+    int width,
+    int height) {
+  if (!gray || !mask || width <= 0 || height <= 0 || width > 1920 ||
+      height > 1920) {
+    throw std::invalid_argument(
+        "AKAZE requires grayscale images and masks at most 1920 pixels per axis");
+  }
+  const cv::Mat image(height, width, CV_8UC1, const_cast<uint8_t*>(gray));
+  const cv::Mat selection(height, width, CV_8UC1, const_cast<uint8_t*>(mask));
+  auto detector = cv::AKAZE::create(cv::AKAZE::DESCRIPTOR_MLDB, 0, 3, 0.0001f);
+  std::vector<cv::KeyPoint> keypoints;
+  detector->detect(image, keypoints, selection);
+  std::stable_sort(
+      keypoints.begin(), keypoints.end(), [](const auto& a, const auto& b) {
+        return a.response > b.response;
+      });
+  if (keypoints.size() > 2000)
+    keypoints.resize(2000);
+  cv::Mat descriptors;
+  detector->compute(image, keypoints, descriptors);
+  AkazeFeatures result;
+  result.descriptor_size = descriptors.cols;
+  for (size_t index = 0; index < keypoints.size(); ++index) {
+    result.points.push_back({keypoints[index].pt.x, keypoints[index].pt.y});
+    const auto* row = descriptors.ptr<uint8_t>(static_cast<int>(index));
+    result.descriptors.insert(
+        result.descriptors.end(), row, row + descriptors.cols);
+  }
+  return result;
+}
 
 HomographyMapResult create_homography_maps(
     const std::vector<std::array<double, 2>>& left_points,
@@ -358,7 +572,9 @@ HomographyMapResult create_homography_maps(
     double confidence,
     int max_iterations,
     int max_output_dimension,
-    int max_output_width) {
+    int max_output_width,
+    const std::vector<std::vector<double>>& lens_calibration) {
+  validate_lens_calibration(lens_calibration);
   validate_max_output_dimension(max_output_dimension);
   validate_max_output_dimension(max_output_width);
   validate_estimation_inputs(
@@ -377,14 +593,30 @@ HomographyMapResult create_homography_maps(
   const auto left_cv = to_cv_points(left_points, "Left");
   const auto right_cv = to_cv_points(right_points, "Right");
   cv::Mat inlier_mask;
-  const cv::Mat homography = cv::findHomography(
-      right_cv,
-      left_cv,
-      cv::USAC_MAGSAC,
-      reprojection_threshold,
-      inlier_mask,
-      max_iterations,
-      confidence);
+  const cv::Mat homography = lens_calibration.empty()
+      ? cv::findHomography(
+            right_cv,
+            left_cv,
+            cv::USAC_MAGSAC,
+            reprojection_threshold,
+            inlier_mask,
+            max_iterations,
+            confidence)
+      : calibrated_homography(
+            left_cv,
+            right_cv,
+            left_width,
+            left_height,
+            right_width,
+            right_height,
+            std::max(
+                reprojection_threshold,
+                static_cast<double>(std::max(
+                    {left_width, left_height, right_width, right_height})) /
+                    1920.0),
+            max_iterations,
+            confidence,
+            &inlier_mask);
   if (homography.empty()) {
     throw CalibrationAlignmentError(
         "OpenCV MAGSAC++ failed to estimate a homography");
@@ -406,7 +638,8 @@ HomographyMapResult create_homography_maps(
       max_output_dimension,
       max_output_width,
       4,
-      "MAGSAC++ homography");
+      "MAGSAC++ homography",
+      lens_calibration);
 }
 
 HomographyMapResult create_affine_ransac_maps(
@@ -421,7 +654,9 @@ HomographyMapResult create_affine_ransac_maps(
     int max_iterations,
     int refine_iterations,
     int max_output_dimension,
-    int max_output_width) {
+    int max_output_width,
+    const std::vector<std::vector<double>>& lens_calibration) {
+  validate_lens_calibration(lens_calibration);
   validate_max_output_dimension(max_output_dimension);
   validate_max_output_dimension(max_output_width);
   validate_estimation_inputs(
@@ -475,7 +710,8 @@ HomographyMapResult create_affine_ransac_maps(
       max_output_dimension,
       max_output_width,
       3,
-      "affine RANSAC");
+      "affine RANSAC",
+      lens_calibration);
 }
 
 } // namespace hm::stitcher

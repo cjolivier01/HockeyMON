@@ -70,3 +70,25 @@ cause. NONA alignment requires a reported optimization RMS at most 50 pixels;
 OpenCV distinguishes geometric rejection in the rebuilt native extension.
 Older native extensions retain terminal behavior for untyped mapping errors.
 Frame count and the control-point limit are recorded in calibration provenance.
+
+## AKAZE and GoPro KB4 profiles
+
+Select `stitching.control_point_matcher: akaze-hamming` (`akaze` is an alias) for
+OpenCV M-LDB detection and mutual Hamming matching without model downloads.
+Rebuild the native extension to expose its CPU AKAZE detector; this does not
+depend on the Python OpenCV package exporting AKAZE.
+Detection is limited to 1920 pixels and 2000 keypoints per camera, using the
+facing camera halves and epipolar filtering. At least six matches are required.
+
+When present, game-local `left_calibration.json` must contain both
+`left_uniforms` and `right_uniforms` objects with `width`, `height`, `fx`, `fy`,
+`cx`, `cy`, and four KB4 coefficients in `d`. Missing profiles are reported and
+use original image coordinates. Existing malformed or incomplete profiles fail.
+
+Calibrated AKAZE detects on rectified images and composes the inverse projective
+or affine transform with KB4 distortion when generating original-camera remap
+coordinates. It requires an OpenCV backend and a rebuilt native extension; NONA
+rejects calibrated points. MAGSAC validates spatial consensus and can search up
+to twelve projective hypotheses without lowering consensus requirements when
+removing a rejected hypothesis. Profile contents are pinned and fingerprinted
+for the generation so profile edits invalidate cached maps.
