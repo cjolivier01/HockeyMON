@@ -25,6 +25,7 @@ from hmlib.aspen.plugins.base import Plugin
 from hmlib.log import get_logger
 from hmlib.utils.containers import SidebandQueue as Queue
 from hmlib.utils.containers import create_queue
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.gpu import stream_tensor_tracking
 
 logger = get_logger(__name__)
@@ -878,19 +879,15 @@ class AspenNet(torch.nn.Module):
         stop/join worker threads here to avoid leaving CUDA work running during
         interpreter shutdown.
         """
+        actions = []
         if self.threaded_trunks and getattr(self, "threads", None):
-            try:
-                self.stop(wait=True)
-            except Exception:
-                logger.exception("AspenNet stop failed during finalize")
+            actions.append(("Aspen workers", lambda: self.stop(wait=True)))
         for node in self.nodes:
             finalize_fn = getattr(node.module, "finalize", None)
             if callable(finalize_fn):
-                try:
-                    finalize_fn()
-                except Exception:
-                    logger.exception("Aspen plugin %s finalize failed", node.name)
-        self.stop_progress_graph()
+                actions.append((f"Aspen plugin {node.name}", finalize_fn))
+        actions.append(("Aspen progress graph", self.stop_progress_graph))
+        finalize_resources(actions)
 
     # endregion
 

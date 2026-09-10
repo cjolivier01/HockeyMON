@@ -34,6 +34,7 @@ from hmlib.config import (
 )
 from hmlib.hm_opts import _get_baseline_runtime_config, copy_opts, hm_opts
 from hmlib.log import get_root_logger, logger
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.path import (
     add_game_id_prefix_to_filename,
     add_prefix_to_filename,
@@ -2486,30 +2487,20 @@ def _main(args, num_gpu):
                     shutil.copy2(src_path, dst_path)
                 except Exception:
                     traceback.print_exc()
-        logger.info("Completed")
     except Exception as ex:
         print(ex)
         traceback.print_exc()
         raise
     finally:
-        try:
-            if postprocessor is not None:
-                try:
-                    postprocessor.stop()
-                except Exception:
-                    traceback.print_exc()
-            if dataloader is not None and hasattr(dataloader, "close"):
-                try:
-                    dataloader.close()
-                except Exception:
-                    traceback.print_exc()
-            if mux_audio_temp_file is not None:
-                try:
-                    mux_audio_temp_file.close()
-                except Exception:
-                    traceback.print_exc()
-        except Exception as ex:
-            print(f"Exception while shutting down: {ex}")
+        actions = []
+        if postprocessor is not None:
+            actions.append(("tracking postprocessor", postprocessor.stop))
+        if dataloader is not None:
+            actions.append(("tracking dataloader", dataloader.close))
+        if mux_audio_temp_file is not None:
+            actions.append(("temporary mux audio", mux_audio_temp_file.close))
+        finalize_resources(actions, primary_error=sys.exc_info()[1])
+    logger.info("Completed")
 
 
 def setup_logging():

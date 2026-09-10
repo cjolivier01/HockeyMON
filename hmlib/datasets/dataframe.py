@@ -34,6 +34,7 @@ class HmDataFrameBase:
         self.output_file = output_file
         self.write_interval = write_interval
         self.first_write = True
+        self._write_error: Optional[Exception] = None
         self._dataframe_list: List[pd.DataFrame] = []
         self.counter = 0  # Counter to track number of records since the last write
         self.data: Optional[pd.DataFrame] = None
@@ -102,17 +103,33 @@ class HmDataFrameBase:
         return self.input_file is not None
 
     def write_data(self, output_path=None, header=False):
+        """Write buffered rows durably, without retrying an uncertain append."""
+        if self._write_error is not None:
+            raise RuntimeError(
+                f"CSV output previously failed: {self.output_file}"
+            ) from self._write_error
         if not output_path:
             output_path = self.output_file
         else:
             self.output_file = output_path
 
-        """Write MOT tracking data to a CSV file incrementally."""
         if self.output_file:
-            if self._dataframe_list:
-                data = pd.concat(self._dataframe_list, ignore_index=True)
+            if self._dataframe_list or self.first_write:
+                data = (
+                    pd.concat(self._dataframe_list, ignore_index=True)
+                    if self._dataframe_list
+                    else pd.DataFrame(columns=self._fields)
+                )
                 mode = "a" if not self.first_write else "w"
-                data.to_csv(output_path, mode=mode, header=header, index=False)
+                try:
+                    with open(output_path, mode, encoding="utf-8", newline="") as output:
+                        data.to_csv(output, header=header, index=False)
+                        output.flush()
+                        os.fsync(output.fileno())
+                except Exception as error:
+                    self._write_error = error
+                    raise
+                self.first_write = False
                 self._dataframe_list = []
                 logger.info("Data saved successfully to %s.", output_path)
             else:

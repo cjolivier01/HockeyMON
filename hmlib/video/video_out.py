@@ -23,6 +23,7 @@ from hmlib.log import logger
 from hmlib.ui.shower import Shower
 from hmlib.utils import MeanTracker
 from hmlib.utils.cuda_graph import CudaGraphCallable
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.gpu import get_gpu_capabilities, unwrap_tensor, wrap_tensor
 from hmlib.utils.image import (
     image_height,
@@ -725,12 +726,14 @@ class VideoOutput(torch.nn.ModuleDict):
 
     def stop(self):
         """Close any interactive UI resources (e.g., OpenCV shower)."""
-        for stream in self._output_videos.values():
-            stream.close()
+        actions = [
+            (f"video stream {name}", stream.close) for name, stream in self._output_videos.items()
+        ]
         self._output_videos.clear()
         if self._shower is not None:
-            self._shower.close()
+            actions.append(("video preview", self._shower.close))
             self._shower = None
+        finalize_resources(actions)
 
     def create_output_videos(self, context: Dict[str, Any]) -> None:
         """Create underlying VideoStreamWriter instances if not already open."""
