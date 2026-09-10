@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import sys
@@ -7,6 +8,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 from urllib import request
+
+import pytest
 
 if ("TEST_SRCDIR" in os.environ or "RUNFILES_DIR" in os.environ) and "hmlib" not in sys.modules:
     hmlib_root = Path(__file__).resolve().parents[1] / "hmlib"
@@ -142,3 +145,84 @@ def should_mark_missing_scoreboard_from_web_submission():
         assert selector.points == selector_module.ScoreboardSelector.NULL_POINTS
     finally:
         selector.close()
+
+
+def should_serve_bounded_proxy_and_save_points_in_original_coordinates():
+    module = _selector_module()
+    selector = module.ScoreboardSelector(
+        image=module.Image.new("RGB", (640, 240), color=(17, 43, 71)),
+        max_display_height=48,
+        game_id="large-game",
+        bind_host="127.0.0.1",
+        open_browser=False,
+    )
+    assert selector.image.size == (128, 48)
+    selector._start_server()
+    try:
+        html = _read_text(selector.primary_url)
+        assert '"imageWidth": 640' in html
+        assert '"imageHeight": 240' in html
+        with request.urlopen(f"{selector.primary_url}image", timeout=3) as response:
+            with module.Image.open(io.BytesIO(response.read())) as preview:
+                assert preview.size == (128, 48)
+        _post_json(
+            f"{selector.primary_url}api/complete",
+            {"action": "save", "points": [[20, 40], [600, 40], [600, 200], [20, 200]]},
+        )
+        assert selector.points == [(20, 40), (600, 40), (600, 200), (20, 200)]
+    finally:
+        selector.close()
+
+
+@pytest.mark.parametrize("size", [(16000, 8000), (64000, 100), (1, 64000)])
+def should_bound_proxy_dimensions_and_memory(size):
+    module = _selector_module()
+    width, height = module._bounded_preview_size(size)
+    assert 0 < width <= 8192
+    assert 0 < height <= 8192
+    assert width * height * 4 <= 96 * 1024 * 1024
+    assert width <= size[0] and height <= size[1]
+
+
+@pytest.mark.parametrize("size", [(0, 10), (65536, 10), (65000, 65000)])
+def should_reject_unsupported_source_geometry(size):
+    with pytest.raises(ValueError, match="Scoreboard source image"):
+        _selector_module()._bounded_preview_size(size)
+
+
+@pytest.mark.parametrize("limit", [0, -1, 3.5, True])
+def should_reject_invalid_display_height(limit):
+    module = _selector_module()
+    with pytest.raises(ValueError, match="max_display_height"):
+        module._prepare_selector_image(module.Image.new("RGB", (64, 48)), limit)
+
+
+def should_resize_tensor_before_host_conversion_and_keep_caller_image(monkeypatch):
+    module = _selector_module()
+    source = module.torch.zeros((1, 3, 240, 640), dtype=module.torch.uint8)
+    original_conversion = module.make_visible_image
+    converted_sizes = []
+
+    def visible(image, **kwargs):
+        converted_sizes.append((module.image_width(image), module.image_height(image)))
+        return original_conversion(image, **kwargs)
+
+    monkeypatch.setattr(module, "make_visible_image", visible)
+    proxy, source_size = module._prepare_selector_image(source, 48)
+    assert converted_sizes == [(128, 48)]
+    assert proxy.size == (128, 48)
+    assert source_size == (640, 240)
+    assert tuple(source.shape) == (1, 3, 240, 640)
+
+
+def should_validate_source_size_before_decoding(monkeypatch):
+    module = _selector_module()
+    source = module.Image.new("RGB", (64, 48))
+    monkeypatch.setattr(module, "_MAXIMUM_SOURCE_PIXELS", 100)
+
+    def fail_decode(*args, **kwargs):
+        raise AssertionError("unsupported source was decoded")
+
+    monkeypatch.setattr(source, "load", fail_decode)
+    with pytest.raises(ValueError, match="Scoreboard source image"):
+        module._prepare_selector_image(source, None)

@@ -30,6 +30,7 @@ from hmlib.builder import HM
 from hmlib.camera.camera import HockeyMON
 from hmlib.camera.clusters import ClusterMan
 from hmlib.camera.moving_box import MovingBox
+from hmlib.camera.zoom import zoom_in_shrink_thresholds
 from hmlib.config import (
     get_config,
     get_game_config_private,
@@ -772,6 +773,8 @@ class PlayTracker(torch.nn.Module):
                 ),
                 time_to_dest_stop_speed_threshold=ttg_stop_thresh,
             )
+
+        self._apply_zoom_in_aggressiveness(self._require_camera_value("zoom_in_aggressiveness"))
 
         if self._camera_ui_enabled:
             self._init_ui_controls()
@@ -1990,6 +1993,7 @@ class PlayTracker(torch.nn.Module):
             tb("Post_Nonstop_Stop_Delay_Frames", 60, postns)
             tb("Overshoot_Speed_Ratio_x100", 200, ov_scale)
             tb("Time_To_Dest_Speed_Limit_Frames", 120, ttg)
+            tb("Zoom_In_Aggressiveness", 100, self._require_camera_value("zoom_in_aggressiveness"))
             # Translation constraints and target selection
             # Apply to fast and/or follower boxes
             tb("Apply_To_Fast_Box", 1, 0)
@@ -2044,6 +2048,7 @@ class PlayTracker(torch.nn.Module):
                 Post_Nonstop_Stop_Delay_Frames=postns,
                 Overshoot_Speed_Ratio_x100=ov_scale,
                 Time_To_Dest_Speed_Limit_Frames=ttg,
+                Zoom_In_Aggressiveness=int(camera_cfg["zoom_in_aggressiveness"]),
                 Apply_To_Fast_Box=0,
                 Apply_To_Follower_Box=1,
                 Link_Fixed_Edge_Rotation_Left_Right=fixed_linked,
@@ -2237,6 +2242,7 @@ class PlayTracker(torch.nn.Module):
         )
         _replace("Stop_Cancel_Hysteresis_Frames", camera_cfg.get("stop_cancel_hysteresis_frames"))
         _replace("Stop_Delay_Cooldown_Frames", camera_cfg.get("stop_delay_cooldown_frames"))
+        _replace("Zoom_In_Aggressiveness", camera_cfg.get("zoom_in_aggressiveness"))
         _replace("Overshoot_Stop_Delay_Frames", breakaway_cfg.get("overshoot_stop_delay_count"))
         _replace(
             "Post_Nonstop_Stop_Delay_Frames",
@@ -2407,6 +2413,13 @@ class PlayTracker(torch.nn.Module):
             ttg = int(
                 self._ui_slider_value(self._ui_window_name, "Time_To_Dest_Speed_Limit_Frames")
             )
+            zoom_aggressiveness = self._ui_slider_value(
+                self._ui_window_name, "Zoom_In_Aggressiveness"
+            )
+            self._apply_zoom_in_aggressiveness(zoom_aggressiveness)
+            self._set_ui_config_value(
+                ("rink", "camera", "zoom_in_aggressiveness"), zoom_aggressiveness
+            )
 
             # Apply runtime scaling so frame-count settings are stable across FPS.
             dir_delay_scaled = self._scale_frames_for_fps(dir_delay)
@@ -2576,6 +2589,18 @@ class PlayTracker(torch.nn.Module):
             logger.warning("Failed to read/apply camera UI controls: %s", ex)
             return False
 
+    def _apply_zoom_in_aggressiveness(self, aggressiveness: int) -> None:
+        """Zoom always tunes the follower; motion-limit box selection is separate."""
+        thresholds = zoom_in_shrink_thresholds(aggressiveness)
+        follower = (
+            self._playtracker.get_live_box(1)
+            if self._playtracker is not None
+            else self._current_roi_aspect
+        )
+        if follower is None:
+            raise RuntimeError("Zoom tuning requires an initialized follower camera box")
+        follower.set_resizing_shrink_thresholds(*thresholds)
+
     def _draw_ui_overlay(self, img):
         if not self._camera_ui_enabled or not self._ui_inited:
             return img
@@ -2709,6 +2734,7 @@ class PlayTracker(torch.nn.Module):
         )
         for key in required_keys:
             self._require_camera_value(key)
+        zoom_in_shrink_thresholds(self._require_camera_value("zoom_in_aggressiveness"))
         breakaway_keys = (
             "overshoot_stop_delay_count",
             "post_nonstop_stop_delay_count",
@@ -2803,6 +2829,7 @@ class PlayTracker(torch.nn.Module):
                     ("rink", "camera", "stop_cancel_hysteresis_frames"),
                     ("rink", "camera", "stop_delay_cooldown_frames"),
                     ("rink", "camera", "time_to_dest_speed_limit_frames"),
+                    ("rink", "camera", "zoom_in_aggressiveness"),
                     ("rink", "camera", "max_speed_ratio_x"),
                     ("rink", "camera", "max_speed_ratio_y"),
                     ("rink", "camera", "max_accel_ratio_x"),
