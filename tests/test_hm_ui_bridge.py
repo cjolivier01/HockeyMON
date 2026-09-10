@@ -2,6 +2,7 @@ import importlib.util
 import json
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -260,6 +261,32 @@ def should_publish_named_preview_frames_independently(tmp_path):
     assert [preview["name"] for preview in spec["previews"]] == ["Stitched", "Final"]
     assert cv2.imread(str(ui.preview_paths["Stitched"])).shape[:2] == (24, 32)
     assert cv2.imread(str(ui.preview_paths["Final"])).shape[:2] == (18, 30)
+    metadata = {
+        preview["name"]: json.loads(Path(preview["metadata_path"]).read_text(encoding="utf-8"))
+        for preview in spec["previews"]
+    }
+    assert metadata == {
+        "Stitched": {"width": 32, "height": 24},
+        "Final": {"width": 30, "height": 18},
+    }
+
+
+@pytest.mark.parametrize("channels_first", [False, True])
+def should_report_source_resolution_before_preview_scaling_and_after_resize(
+    tmp_path, channels_first
+):
+    import torch
+
+    ui = HmUiProcess(title="test", tmpdir=tmp_path)
+    for height, width in [(240, 640), (180, 480)]:
+        frame = np.zeros((2, height, width, 3), dtype=np.uint8)
+        if channels_first:
+            frame = torch.from_numpy(frame).permute(0, 3, 1, 2)
+        ui.publish_preview(frame, show_scaled=0.5, max_width=128, min_interval_seconds=0)
+        assert ui.flush_previews()
+        assert cv2.imread(str(ui.preview_path)).shape[1] == 128
+        metadata = json.loads(ui.preview_path.with_suffix(".json").read_text())
+        assert metadata == {"width": width, "height": height}
 
 
 def should_throttle_inactive_preview_until_it_is_selected(tmp_path, monkeypatch):

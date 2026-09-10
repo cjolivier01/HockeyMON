@@ -20,7 +20,7 @@ import numpy as np
 
 from hmlib.log import logger
 from hmlib.utils.gpu import unwrap_tensor
-from hmlib.utils.image import image_width, make_visible_image, resize_image
+from hmlib.utils.image import image_height, image_width, make_visible_image, resize_image
 
 
 @dataclass
@@ -342,6 +342,8 @@ class HmUiProcess:
                 )
                 self._preview_batch_warned = True
             frame = frame[-1]
+        source_width = int(image_width(frame))
+        source_height = int(image_height(frame))
         # Resize before a CUDA-to-host transfer when the source is a GPU tensor.
         frame = make_visible_image(
             frame,
@@ -379,6 +381,12 @@ class HmUiProcess:
         tmp = preview_path.with_suffix(preview_path.suffix + ".tmp")
         tmp.write_bytes(encoded.tobytes())
         os.replace(tmp, preview_path)
+        # Publish separately from the control spec: the preview worker must not
+        # race the tracking thread's control/default updates to spec.json.
+        self._write_json_atomic(
+            preview_path.with_suffix(".json"),
+            {"width": source_width, "height": source_height},
+        )
 
     def ensure_started(self) -> None:
         if self._closed:
@@ -548,7 +556,12 @@ class HmUiProcess:
             "preview_path": str(self.preview_path),
             "action_ack_path": str(self.action_ack_path),
             "previews": [
-                {"name": name, "path": str(path)} for name, path in self.preview_paths.items()
+                {
+                    "name": name,
+                    "path": str(path),
+                    "metadata_path": str(path.with_suffix(".json")),
+                }
+                for name, path in self.preview_paths.items()
             ],
             "windows": [
                 {

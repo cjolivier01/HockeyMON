@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 from hmlib.builder import HM
 from hmlib.config import get_nested_value, normalize_runtime_config
 from hmlib.utils.path import add_prefix_to_filename
+from hmlib.video.bitrate import select_source_bitrate_density
 from hmlib.video.video_out import VideoOutput
 
 from .base import Plugin
@@ -173,8 +174,11 @@ class VideoOutPlugin(Plugin):
             bit_rate = get_nested_value(cfg, "video_out.bit_rate", default_value=None)
         if bit_rate is None:
             bit_rate = get_nested_value(cfg, "aspen.video_out.bit_rate", default_value=None)
-        if bit_rate is None:
-            bit_rate = int(55e6)
+        source_bitrate_density = None
+        if bit_rate is None and isinstance(shared, dict):
+            source_bitrate_density = select_source_bitrate_density(
+                shared.get("source_video_paths", ())
+            )
 
         mux_audio_file = self._mux_audio_file
         mux_audio_stream = self._mux_audio_stream
@@ -292,6 +296,7 @@ class VideoOutPlugin(Plugin):
             output_video_path=out_path,
             fps=fps,
             bit_rate=bit_rate,
+            source_bitrate_density=source_bitrate_density,
             mux_audio_file=mux_audio_file,
             mux_audio_stream=mux_audio_stream,
             mux_audio_offset_seconds=mux_audio_offset_seconds,
@@ -322,10 +327,7 @@ class VideoOutPlugin(Plugin):
     def finalize(self) -> None:
         if self._vo is not None:
             with self.profile_scope("video_out.finalize"):
-                try:
-                    self._vo.stop()
-                except Exception:
-                    pass
+                self._vo.stop()
 
     def input_keys(self):
         if not hasattr(self, "_input_keys"):

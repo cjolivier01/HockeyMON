@@ -1,4 +1,5 @@
 import contextlib
+import sys
 import time
 import traceback
 from collections import OrderedDict
@@ -14,6 +15,7 @@ from hmlib.datasets.dataframe import find_latest_dataframe_file
 from hmlib.log import logger
 from hmlib.tracking_utils.timer import Timer
 from hmlib.utils import MeanTracker
+from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.gpu import cuda_stream_scope
 from hmlib.utils.image import make_channels_first
 from hmlib.utils.iterators import CachedIterator
@@ -38,6 +40,7 @@ def run_mmtrack(
     track_mean_mode: Optional[str] = None,
     profiler: Any = None,
     pose_inferencer: Any = None,
+    source_video_paths: Optional[List[str]] = None,
 ):
     mean_tracker: Optional[MeanTracker] = None
     aspen_net: Optional[AspenNet] = None
@@ -338,6 +341,7 @@ def run_mmtrack(
                     bottom_border_lines=config.get("bottom_border_lines"),
                     # Full game config and CLI-derived initial args for plugins
                     game_config=config.get("game_config"),
+                    source_video_paths=source_video_paths or [],
                     initial_args=config.get("initial_args"),
                     # Runtime camera UI toggle for PlayTrackerPlugin
                     camera_ui=int(initial_args.get("camera_ui") or config.get("camera_ui") or 0),
@@ -628,36 +632,24 @@ def run_mmtrack(
         traceback.print_exc()
         raise
     finally:
+        actions = []
         if config.get("save_pose_data") and work_dir:
-            try:
+
+            def finalize_pose_file():
                 Path(work_dir).mkdir(parents=True, exist_ok=True)
                 pose_name = "pose.csv"
                 label = config.get("label") or config.get("output_label")
                 if label:
-                    try:
-                        pose_name = str(add_prefix_to_filename(pose_name, str(label)))
-                    except Exception:
-                        logger.exception(
-                            "Failed to add prefix '%s' to pose file name '%s'", label, pose_name
-                        )
+                    pose_name = str(add_prefix_to_filename(pose_name, str(label)))
                 (Path(work_dir) / pose_name).touch(exist_ok=True)
-            except Exception:
-                logger.exception(
-                    "Failed to create or update pose data file in work_dir '%s'", work_dir
-                )
+
+            actions.append(("pose output", finalize_pose_file))
         if aspen_net is not None:
-            try:
-                aspen_net.finalize()
-            except Exception:
-                logger.exception("AspenNet finalize failed")
-            audit_hook = (
-                aspen_net.shared.get("_aspen_audit") if hasattr(aspen_net, "shared") else None
-            )
+            actions.append(("Aspen pipeline", aspen_net.finalize))
+            audit_hook = aspen_net.shared.get("_aspen_audit")
             close_fn = getattr(audit_hook, "close", None)
             if callable(close_fn):
-                try:
-                    close_fn()
-                except Exception:
-                    logger.exception("Aspen audit hook close failed")
+                actions.append(("Aspen audit output", close_fn))
         if mean_tracker is not None:
-            mean_tracker.close()
+            actions.append(("mean tracker", mean_tracker.close))
+        finalize_resources(actions, primary_error=sys.exc_info()[1])

@@ -141,12 +141,18 @@ filegroup(
 )
 
 filegroup(
+    name = "scoreboard_selector_assets",
+    srcs = ["images/scoreboard_selector_thank_you.svg"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
     name = "wheel_data_files",
     srcs = [
         ":config_data_files",
         ":embed_enblend",
         ":embed_hm_ui",
-        "images/scoreboard_selector_thank_you.svg",
+        ":scoreboard_selector_assets",
         "images/sports_ai_watermark.png",
         "py.typed",
         # "@multiblend//:multiblend",

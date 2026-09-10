@@ -286,10 +286,11 @@ class StitchDataset(PersistCacheMixin, torch.utils.data.IterableDataset):
                 return None
             try:
                 pipeline = Compose(copy.deepcopy(spec))
-                if self._config_ref is not None:
-                    for tf in getattr(pipeline, "transforms", []):
+                for tf in pipeline:
+                    if tf.__class__.__name__ == "HmImageColorAdjust":
+                        tf.channel_order = "bgr"
                         # Bind live config so HmImageColorAdjust picks up runtime changes.
-                        if tf.__class__.__name__ == "HmImageColorAdjust":
+                        if self._config_ref is not None:
                             setattr(tf, "config_ref", self._config_ref)
                 return pipeline
             except Exception:

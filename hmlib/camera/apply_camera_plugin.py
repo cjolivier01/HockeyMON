@@ -159,6 +159,14 @@ class ApplyCameraPlugin(Plugin):
 
         if self._pipeline_cfg:
             pipeline = Compose(self._pipeline_cfg)
+            for transform in pipeline:
+                if transform.__class__.__name__ == "HmImageColorAdjust":
+                    transform.channel_order = "bgr"
+                    transform.config_ref = self._game_config
+                    if not transform._config_paths:
+                        transform._config_paths = transform._normalize_paths(
+                            [("rink", "camera", "color"), ("rink", "camera")]
+                        )
             for mod in pipeline:
                 if isinstance(mod, torch.nn.Module):
                     name = str(mod)
