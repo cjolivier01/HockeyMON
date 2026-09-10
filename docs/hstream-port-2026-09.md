@@ -19,6 +19,7 @@ the three stacks can be reviewed independently.
 | [#157](https://github.com/cjolivier01/HockeyMON/pull/157) | Durable camera-policy companions and training boundaries aligned with actual frames | #147 |
 | [#148](https://github.com/cjolivier01/HockeyMON/pull/148) | Zoom aggression, source preview dimensions, bounded scoreboard selection | master |
 | [#149](https://github.com/cjolivier01/HockeyMON/pull/149) | Reference shadow lift and alpha/high-bit-safe image grading | #148 |
+| [#158](https://github.com/cjolivier01/HockeyMON/pull/158) | Carry the reviewed #149 changes onto master | #147, #148 |
 | [#150](https://github.com/cjolivier01/HockeyMON/pull/150) | Validated projection, camera, rink, crop, canvas and scale settings | master |
 | [#151](https://github.com/cjolivier01/HockeyMON/pull/151) | Multi-frame calibration candidates and retained edited control points | #150 |
 | [#152](https://github.com/cjolivier01/HockeyMON/pull/152) | AKAZE matching with optional pinned KB4 lens profiles | #151 |
@@ -26,6 +27,9 @@ the three stacks can be reviewed independently.
 | [#154](https://github.com/cjolivier01/HockeyMON/pull/154) | Recoverable stitching artifact publication, bounded stable readers and cache provenance | #153 |
 | [#155](https://github.com/cjolivier01/HockeyMON/pull/155) | Reviewed Hugin previews, selected-post rink leveling and crop controls | #154 |
 | [#156](https://github.com/cjolivier01/HockeyMON/pull/156) | Resumable projection-comparison captures with isolated calibration and logs | #154 |
+
+PR #149 was merged into the camera branch after #148 had already landed on
+master. PR #158 carries that exact reviewed implementation onto master.
 
 ## Changes already present in master
 
