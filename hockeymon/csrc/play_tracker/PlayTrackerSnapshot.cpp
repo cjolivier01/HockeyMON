@@ -550,8 +550,9 @@ void validate_box_config(const AllLivingBoxConfig& c) {
       !c.sticky_translation || c.sticky_size_ratio_to_frame_width > 0,
       "invalid sticky translation divisor");
   require(
-      c.dynamic_acceleration_scaling == 0 || c.sticky_translation,
-      "dynamic acceleration requires sticky translation");
+      c.dynamic_acceleration_scaling == 0 ||
+          (c.sticky_translation && c.arena_angle_from_vertical != 0),
+      "dynamic acceleration requires sticky translation and a nonzero arena angle");
   require(
       safe_counter(c.stop_translation_on_dir_change_delay) &&
           safe_counter(c.cancel_stop_hysteresis_frames) &&

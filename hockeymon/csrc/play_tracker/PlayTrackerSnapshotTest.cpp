@@ -220,6 +220,14 @@ void rejects_malformed_state() {
   });
   check([](auto& s) { s.living_boxes[0].resizing.cooldown_w_counter = -1; });
   check([](auto& s) { s.config.play_detector.max_velocity_positions = 0; });
+  // Reject before forward, independently of whether the process-wide native
+  // arena diagnostic has already run in another tracker.
+  check([](auto& s) {
+    auto& c = s.living_boxes[0].config;
+    c.sticky_translation = true;
+    c.dynamic_acceleration_scaling = 0.5f;
+    c.arena_angle_from_vertical = 0;
+  });
   check([](auto& s) { s.config.play_detector.group_ratio_threshold = -1; });
   check([](auto& s) { s.config.play_detector.group_ratio_threshold = 0.49f; });
   check([](auto& s) { s.config.play_detector.group_ratio_threshold = 1.01f; });
