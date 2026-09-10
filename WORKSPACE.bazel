@@ -94,9 +94,10 @@ http_archive(
 http_archive(
   name = "pybind11",
   build_file = "@pybind11_bazel//:pybind11.BUILD",
-  strip_prefix = "pybind11-a54eab92d265337996b8e4b4149d9176c2d428a6",
-  urls = ["https://github.com/pybind/pybind11/archive/a54eab92d265337996b8e4b4149d9176c2d428a6.tar.gz"],
-  sha256 = "c9375b7453bef1ba0106849c83881e6b6882d892c9fae5b2572a2192100ffb8a",
+  # Python 3.14 support, including standalone bindings without Torch headers.
+  strip_prefix = "pybind11-3.0.1",
+  urls = ["https://github.com/pybind/pybind11/archive/refs/tags/v3.0.1.tar.gz"],
+  sha256 = "741633da746b7c738bb71f1854f957b9da660bcd2dce68d71949037f0969d0ca",
 )
 
 load("@pybind11_bazel//:python_configure.bzl", "python_configure")

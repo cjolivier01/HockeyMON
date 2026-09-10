@@ -10,8 +10,8 @@ import numpy as np
 import tifffile
 import torch
 
-from hmlib.stitching.calibration import CalibrationAlignmentError
 from hmlib.stitching.akaze import LensCalibrationPair
+from hmlib.stitching.calibration import CalibrationAlignmentError
 
 INVALID_MAP_COORDINATE = np.iinfo(np.uint16).max
 MAXIMUM_MAP_DIMENSION = int(INVALID_MAP_COORDINATE) - 1

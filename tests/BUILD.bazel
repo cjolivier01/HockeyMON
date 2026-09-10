@@ -32,10 +32,12 @@ sh_test(
     ],
 )
 
-py_test(
+pytest_test(
     name="test_unified_config",
     srcs=["test_unified_config.py"],
+    args=["-c", "$(location //:pyproject.toml)"],
     data=[
+        "//hmlib:config.py",
         "//hmlib:wheel_data_files",  # include YAMLs under hmlib/**
     ],
 )
@@ -51,15 +53,29 @@ py_test(
     ],
 )
 
-py_test(
+sh_test(
     name="test_tracking_pose_load_tracking",
-    srcs=["test_tracking_pose_load_tracking.py"],
+    srcs=["runtime_pytest.sh"],
+    args=[
+        "tests/test_tracking_pose_load_tracking.py",
+        "cv2",
+        "mmdet",
+        "mmengine",
+        "mmpose",
+        "numpy",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
     data=[
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
         "//hmlib:wheel_data_files",
+        "//hockeymon:hockeymon",
+        "python_runtime.sh",
+        "test_tracking_pose_load_tracking.py",
     ],
-    deps=[
-        requirement("pytest"),
-    ],
+    env_inherit=["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
 
 py_test(
@@ -105,6 +121,33 @@ py_test(
     data=[
         "//hmlib:wheel_data_files",
     ],
+)
+
+sh_test(
+    name = "test_bytetrack_python",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_bytetrack_python.py", "numpy", "pytest", "torch"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_bytetrack_python.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_ffmpeg_remux",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_ffmpeg_remux.py", "numpy", "pytest", "torch"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "//hockeymon:hockeymon",
+        "python_runtime.sh",
+        "test_ffmpeg_remux.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
 
 sh_test(

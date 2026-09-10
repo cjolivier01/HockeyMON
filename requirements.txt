@@ -1,6 +1,7 @@
 cython
 --extra-index-url https://download.pytorch.org/whl/cu130
 numpy
+einops>=0.8.1
 imgaug
 pymysql
 h5py

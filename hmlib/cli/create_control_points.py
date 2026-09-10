@@ -19,11 +19,12 @@ import ffmpegio
 import numpy as np
 import scipy.signal
 import torch
+
 from hmlib.config import get_game_config, get_game_dir
 from hmlib.stitching.akaze import LensCalibrationPair, load_lens_calibration
 from hmlib.stitching.configure_stitching import build_stitching_project, configure_video_stitching
+from hmlib.stitching.control_points import CONTROL_POINT_MATCHERS
 from hmlib.stitching.control_points import (
-    CONTROL_POINT_MATCHERS,
     calculate_control_points as calculate_stitching_control_points,
 )
 from hmlib.stitching.settings import (
@@ -32,8 +33,8 @@ from hmlib.stitching.settings import (
     read_stitching_settings,
     validate_output_scale,
 )
-from hmlib.video.video_stream import time_to_frame
 from hmlib.video.ffmpeg import BasicVideoInfo
+from hmlib.video.video_stream import time_to_frame
 
 # Constant marker used in PTO files to denote control points.
 _CONTROL_POINTS_LINE = "# control points"

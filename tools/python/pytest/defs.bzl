@@ -12,6 +12,7 @@ def pytest_test(
     **kwargs
 ):
     # Create the test target:
+    deps = list(deps)
     for req in [
         requirement("pytest"),
         requirement("coverage")

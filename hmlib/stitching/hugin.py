@@ -18,8 +18,8 @@ import numpy as np
 import torch
 
 from hmlib.log import get_logger
-from hmlib.stitching.control_points import calculate_control_points
 from hmlib.stitching.akaze import LensCalibrationPair
+from hmlib.stitching.control_points import calculate_control_points
 
 _CONTROL_POINTS_LINE = "# control points"
 

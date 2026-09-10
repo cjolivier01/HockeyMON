@@ -45,6 +45,10 @@ def should_remux_raw_bitstream_with_timestamps():
         enc.codec = "h264"
         enc._frames_in_current_bitstream = 5
         enc._ffmpeg_output_handler = None
+        enc._mux_audio_file = None
+        enc._mux_audio_stream = 0
+        enc._mux_audio_offset_seconds = 0.0
+        enc._mux_audio_aac_bitrate = "192k"
 
         enc.output_path = out_mkv
         enc._mux_bitstream_file_with_ffmpeg(raw)
