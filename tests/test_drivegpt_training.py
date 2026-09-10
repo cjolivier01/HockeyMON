@@ -1,0 +1,260 @@
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+import yaml
+
+from hmlib.camera.camera_gpt import CameraPanZoomGPT, unpack_gpt_checkpoint
+from hmlib.camera.camera_gpt_dataset import CameraPanZoomGPTIterableDataset, GameCsvPaths
+from hmlib.camera.camera_training_config import catalog_split, expand_training_config
+from hmlib.camera.camera_transformer import CameraNorm
+from hmlib.cli.camgpt_train import _maybe_resume, _target_met
+from hmlib.cli.drivegpt_dataset import choose_generation, publish_dataset
+
+
+def _game(directory: Path, suffix: str = "", frames: int = 12, offset: int = 0) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    part = f"-{suffix}" if suffix else ""
+    (directory / f"tracking{part}.csv").write_text(
+        "".join(f"{i},1,{i + offset},2,10,12,0.9,0,1,{{}}\n" for i in range(1, frames + 1))
+    )
+    (directory / f"camera{part}.csv").write_text(
+        "".join(f"{i},0,0,64,36\n" for i in range(1, frames + 1))
+    )
+    (directory / f"camera_fast{part}.csv").write_text(
+        "".join(f"{i},4,2,50,30\n" for i in range(1, frames + 1))
+    )
+
+
+def should_select_most_complete_matching_triple(tmp_path):
+    _game(tmp_path, "1", frames=12)
+    _game(tmp_path, "2", frames=8)
+    _game(tmp_path, "3", frames=14)
+    (tmp_path / "camera_fast-3.csv").unlink()
+    selected, rejected = choose_generation(tmp_path, min_frames=4)
+    assert selected["generation"] == "1"
+    assert selected["aligned_frames"] == 12
+    assert {r["generation"] for r in rejected} == {"2", "3"}
+
+
+def should_publish_provenance_and_exclude_duplicate_tracking(tmp_path):
+    source, destination = tmp_path / "source", tmp_path / "dataset"
+    _game(source / "season/a", "1")
+    _game(source / "season/b", "1")
+    policy = source / "season/a/camera_policy-1.csv"
+    policy.write_text(
+        '1,"{""schema"":""hm-camera-policy-v1"",""kind"":""startup"",""policy"":{}}"\n'
+    )
+    catalog = publish_dataset(source, destination, min_frames=4)
+    assert len(catalog["games"]) == 2
+    assert catalog["games"][1]["duplicate_of"] == "season/a"
+    assert (destination / "games/season/a/camera_policy-1.csv").read_bytes() == policy.read_bytes()
+    artifact = catalog["games"][0]["files"]["tracking"]
+    assert artifact["source"] == str(source / "season/a/tracking-1.csv")
+    assert len(artifact["sha256"]) == 64
+    config = yaml.safe_load((destination / "dataset.yaml").read_text())
+    config["split"] = {"validation_fraction": 0}
+    (destination / "dataset.yaml").write_text(yaml.safe_dump(config))
+    train, val, identity = catalog_split(str(destination / "dataset.yaml"))
+    assert [g.game_id for g in train] == ["season/a"]
+    assert not val
+    assert identity["catalog_sha256"]
+    config["exclude"] = []
+    (destination / "dataset.yaml").write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="Duplicate game/tracking identity"):
+        catalog_split(str(destination / "dataset.yaml"))
+    with pytest.raises(ValueError, match="nonempty"):
+        publish_dataset(source, destination, min_frames=4)
+
+
+def should_validate_yaml_and_allow_cli_overrides(tmp_path):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config")
+    parser.add_argument("--d-model", type=int, default=8)
+    parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--max-iters", type=int)
+    parser.add_argument("--game-id", action="append")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--no-resume", action="store_true")
+    parser.add_argument("--pose", dest="include_pose", action=argparse.BooleanOptionalAction)
+    path = tmp_path / "train.yaml"
+    path.write_text(
+        "schema: hockey-drivegpt-training-v1\nmodel:\n  d_model: 256\nfeatures:\n  include_pose: false\n"
+    )
+    argv = expand_training_config(parser, ["--config", str(path), "--d-model=16", "--pose"])
+    args = parser.parse_args(argv)
+    assert args.d_model == 16
+    assert args.include_pose is True
+    path.write_text(
+        "schema: hockey-drivegpt-training-v1\nsampling:\n  game_id: [yaml-game]\noptimization:\n  steps: 100\ncheckpoint:\n  no_resume: true\n"
+    )
+    args = parser.parse_args(
+        expand_training_config(
+            parser, ["--config", str(path), "--max-iters=7", "--game-id=cli-game", "--resume"]
+        )
+    )
+    assert args.steps == 10 and args.max_iters == 7
+    assert args.game_id == ["cli-game"]
+    assert args.resume and not args.no_resume
+    path.write_text("schema: hockey-drivegpt-training-v1\nmodel:\n  d_modle: 256\n")
+    with pytest.raises(ValueError, match="Unknown or repeated"):
+        expand_training_config(parser, ["--config", str(path)])
+
+
+def should_keep_source_game_groups_together_and_verify_artifacts(tmp_path):
+    source, dataset = tmp_path / "source", tmp_path / "dataset"
+    for i in range(3):
+        _game(source / f"game-{i}", offset=i)
+    publish_dataset(source, dataset, min_frames=4)
+    config = yaml.safe_load((dataset / "dataset.yaml").read_text())
+    config["split"] = {
+        "validation_games": ["game-1"],
+        "groups": {"same-match": ["game-1", "game-2"]},
+    }
+    (dataset / "dataset.yaml").write_text(yaml.safe_dump(config))
+    train, val, _ = catalog_split(str(dataset / "dataset.yaml"))
+    assert [g.game_id for g in train] == ["game-0"]
+    assert [g.game_id for g in val] == ["game-1", "game-2"]
+    with pytest.raises(ValueError, match="no contiguous run"):
+        catalog_split(str(dataset / "dataset.yaml"), min_val_frames=16)
+    artifact = dataset / "games/game-0/tracking.csv"
+    artifact.write_text(artifact.read_text().replace("0.9", "0.8"))
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        catalog_split(str(dataset / "dataset.yaml"))
+
+
+def should_use_distinct_rank_sample_streams(tmp_path):
+    _game(tmp_path, frames=40)
+    paths = GameCsvPaths(
+        "a",
+        str(tmp_path / "tracking.csv"),
+        str(tmp_path / "camera.csv"),
+        str(tmp_path / "camera_fast.csv"),
+    )
+    kwargs = dict(
+        games=[paths],
+        norm=CameraNorm(64, 36, 22),
+        seq_len=4,
+        target_mode="slow_fast_tlwh",
+        include_pose=False,
+        world_size=2,
+    )
+    samples = [
+        next(iter(CameraPanZoomGPTIterableDataset(**kwargs, rank=rank)))["base"]
+        for rank in range(2)
+    ]
+    assert not torch.equal(*samples)
+
+
+def should_require_both_box_metrics_to_meet_target():
+    assert not _target_met({"iou_slow": 0.98, "iou_fast": 0.969}, 0.97)
+    assert not _target_met({"iou_slow": 0.969, "iou_fast": 0.99}, 0.97)
+    assert _target_met({"iou_slow": 0.97, "iou_fast": 0.97}, 0.97)
+
+
+def should_train_stop_and_resume_with_two_cpu_ranks(tmp_path):
+    source, dataset = tmp_path / "source", tmp_path / "dataset"
+    for i in range(3):
+        _game(source / f"game-{i}", offset=i)
+    publish_dataset(source, dataset, min_frames=4)
+    config = yaml.safe_load((dataset / "dataset.yaml").read_text())
+    config["split"] = {"validation_games": ["game-2"]}
+    (dataset / "dataset.yaml").write_text(yaml.safe_dump(config))
+    output = tmp_path / "run/drivegpt_best.pt"
+    command = [
+        sys.executable,
+        "-m",
+        "torch.distributed.run",
+        "--standalone",
+        "--nproc-per-node=2",
+        "-m",
+        "hmlib.cli.camgpt_train",
+        "--model-kind=drivegpt",
+        "--drivegpt-init=none",
+        "--dataset-config",
+        str(dataset / "dataset.yaml"),
+        "--no-pose",
+        "--no-include-rink",
+        "--d-model=16",
+        "--nhead=4",
+        "--nlayers=1",
+        "--dim-feedforward=32",
+        "--seq-len=4",
+        "--val-seq-len=8",
+        "--batch-size=2",
+        "--steps=2",
+        "--lr=0.00001",
+        "--ss-prob-start=0.5",
+        "--ss-prob-end=0.5",
+        "--val-steps=1",
+        "--eval-every=1",
+        "--checkpoint-every=1",
+        "--target-iou=0.01",
+        "--device=cpu",
+        "--ddp-backend=gloo",
+        "--cpu-threads=1",
+        "--data-workers=1",
+        "--out",
+        str(output),
+    ]
+    environment = dict(os.environ)
+    for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT"):
+        environment.pop(key, None)
+    result = subprocess.run(
+        command,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout
+    checkpoint = torch.load(output, map_location="cpu", weights_only=False)
+    assert checkpoint["step"] == 1
+    state = checkpoint["training_state"]
+    assert state["target_met"]
+    assert state["evaluation"]["world_size"] == 2
+    assert state["data_identity"]["validation_games"] == ["game-2"]
+    assert not any(k.startswith("module.") for k in checkpoint["state_dict"])
+    lines = [
+        json.loads(line) for line in output.with_suffix(".metrics.jsonl").read_text().splitlines()
+    ]
+    assert [line["kind"] for line in lines] == ["run", "train", "validation", "finished"]
+    # A newer best checkpoint must win over an older numbered checkpoint.
+    checkpoint["step"] = 5
+    torch.save(checkpoint, output)
+    _, norm, _, cfg = unpack_gpt_checkpoint(checkpoint)
+    model = CameraPanZoomGPT(cfg)
+    optimizer = torch.optim.AdamW(model.parameters())
+    restored = {"data_identity": state["data_identity"], "evaluation": state["evaluation"]}
+    step = _maybe_resume(
+        best_path=output,
+        prefix="drivegpt",
+        ext=".pt",
+        resume_mode="force",
+        device=torch.device("cpu"),
+        model=model,
+        opt=optimizer,
+        cfg=cfg,
+        norm=norm,
+        training_state=restored,
+    )
+    assert step == 6
+    assert restored["best_val"] == state["best_val"]
+    # The step-5 weights have only step-1 validation: resuming must not certify them.
+    result = subprocess.run(
+        command + ["--resume"],
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=90,
+    )
+    assert result.returncode == 0, result.stdout
+    final_line = json.loads(output.with_suffix(".metrics.jsonl").read_text().splitlines()[-1])
+    assert final_line["kind"] == "finished" and not final_line["target_met"]

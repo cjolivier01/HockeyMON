@@ -535,6 +535,18 @@ sh_test(
 )
 
 sh_test(
+    name = "test_drivegpt_training",
+    srcs = ["test_camera_datasets.sh"],
+    args = ["test_drivegpt_training.py"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_drivegpt_training.py",
+    ],
+)
+
+sh_test(
     name = "test_camera_gpt",
     srcs = ["test_camera_datasets.sh"],
     args = ["test_camera_gpt.py"],

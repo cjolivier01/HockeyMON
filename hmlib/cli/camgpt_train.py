@@ -1,13 +1,17 @@
 import argparse
+import json
 import math
 import os
 import random
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 from torch import nn, optim
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from hmlib.camera.camera_gpt import (
@@ -26,6 +30,7 @@ from hmlib.camera.camera_gpt_dataset import (
     scan_game_max_xy,
     validate_csv_paths,
 )
+from hmlib.camera.camera_training_config import catalog_split, expand_training_config
 from hmlib.camera.camera_transformer import CameraNorm
 from hmlib.log import logger
 
@@ -294,8 +299,8 @@ def _load_game_ids(args: argparse.Namespace) -> List[str]:
     return dedup
 
 
-def _arg_in_argv(flag: str) -> bool:
-    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv)
+def _arg_in_argv(flag: str, argv: list[str]) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in argv)
 
 
 def _load_game_dirs_from_list(list_path: str) -> List[Path]:
@@ -438,19 +443,30 @@ def _maybe_resume(
     opt: optim.Optimizer,
     cfg: CameraGPTConfig,
     norm: CameraNorm,
+    training_state: Optional[dict] = None,
 ) -> int:
     if resume_mode == "none":
         return 1
 
     numbered = _list_numbered_checkpoints(best_path, prefix, ext)
-    latest = numbered[-1][1] if numbered else (best_path if best_path.is_file() else None)
+    candidates = [p for _, p in numbered]
+    if best_path.is_file():
+        candidates.append(best_path)
+    checkpoints = [
+        (p, torch.load(str(p), map_location="cpu", weights_only=False)) for p in candidates
+    ]
+    latest, ckpt = (
+        max(checkpoints, key=lambda pair: int(pair[1].get("step", 0)))
+        if checkpoints
+        else (None, None)
+    )
 
     if latest is None:
         if resume_mode == "force":
             raise SystemExit(f"--resume specified but no checkpoint found for prefix={prefix}")
         return 1
 
-    ckpt = torch.load(str(latest), map_location="cpu")
+    assert ckpt is not None
     if not _checkpoint_compatible(ckpt, cfg, norm):
         msg = f"Checkpoint incompatible with current model cfg: {latest}"
         if resume_mode == "force":
@@ -458,13 +474,20 @@ def _maybe_resume(
         logger.warning("%s (skipping resume)", msg)
         return 1
 
+    if training_state is not None:
+        saved_state = ckpt.get("training_state", {})
+        if saved_state.get("data_identity") != training_state.get("data_identity"):
+            raise ValueError(
+                f"Checkpoint dataset/split differs from this run: {latest}; use --no-resume with a new output"
+            )
+        if saved_state.get("evaluation") != training_state.get("evaluation"):
+            raise ValueError(f"Checkpoint evaluation settings differ from this run: {latest}")
+        training_state.update(saved_state)
+
     model.load_state_dict(ckpt["state_dict"])
     opt_sd = ckpt.get("optimizer")
     if opt_sd:
-        try:
-            opt.load_state_dict(opt_sd)
-        except Exception as ex:
-            logger.warning("Failed to load optimizer state from %s: %s", latest, ex)
+        opt.load_state_dict(opt_sd)
     model.to(device)
     step0 = int(ckpt.get("step", 0) or 0)
     logger.info("Resumed from %s (step=%d)", latest, step0)
@@ -483,7 +506,10 @@ def _save_training_checkpoint(
     target_mode: str,
     include_pose: bool,
     source_init_report: Optional[dict] = None,
+    training_state: Optional[dict] = None,
 ) -> None:
+    if dist.is_initialized() and dist.get_rank() != 0:
+        return
     ckpt = pack_gpt_checkpoint(model, norm=train_ds.norm, window=int(train_ds._seq_len), cfg=cfg)
     ckpt["step"] = int(step_num)
     ckpt["games"] = [p.game_id for p in game_csvs]
@@ -492,8 +518,14 @@ def _save_training_checkpoint(
     if source_init_report is not None:
         ckpt["source_init_report"] = dict(source_init_report)
     ckpt["optimizer"] = opt.state_dict()
+    ckpt["training_state"] = dict(training_state or {})
     os.makedirs(str(path.parent), exist_ok=True)
-    torch.save(ckpt, str(path))
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        torch.save(ckpt, str(temporary))
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _predict_batch(
@@ -503,6 +535,7 @@ def _predict_batch(
     *,
     free_run: bool,
     runtime_slow_aspect_norm: Optional[float],
+    context_window: Optional[int] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     y = batch["y"].to(device)
     if "x" in batch:
@@ -521,7 +554,7 @@ def _predict_batch(
             x_t[:, 8:11] = prev
             prefix.append(x_t)
             x = torch.stack(prefix, dim=1)
-            pred_t = model(x)[:, -1, :]
+            pred_t = model(x[:, -context_window:] if context_window else x)[:, -1, :]
             preds.append(pred_t)
             prev = _legacy_prev_slow_feedback_target(pred_t, runtime_slow_aspect_norm).detach()
         return torch.stack(preds, dim=1), y
@@ -540,7 +573,7 @@ def _predict_batch(
         x_t = torch.cat([base[:, t, :], prev], dim=-1)
         prefix.append(x_t)
         x = torch.stack(prefix, dim=1)
-        pred_t = model(x)[:, -1, :]
+        pred_t = model(x[:, -context_window:] if context_window else x)[:, -1, :]
         preds.append(pred_t)
         prev = _runtime_feedback_target(pred_t, runtime_slow_aspect_norm).detach()
     return torch.stack(preds, dim=1), y
@@ -560,6 +593,7 @@ def _eval_metrics(
     fast_mult: float,
     free_run: bool,
     runtime_slow_aspect_norm: Optional[float],
+    context_window: Optional[int] = None,
 ) -> dict[str, float]:
     model.eval()
     total = 0
@@ -574,6 +608,7 @@ def _eval_metrics(
             device,
             free_run=free_run,
             runtime_slow_aspect_norm=runtime_slow_aspect_norm,
+            context_window=context_window,
         )
         loss, metrics = _compute_losses(
             pred,
@@ -590,13 +625,78 @@ def _eval_metrics(
         for key, value in metrics.items():
             metric_sums[key] = metric_sums.get(key, 0.0) + float(value) * batch_size
         total += batch_size
+    if dist.is_initialized():
+        keys = sorted(metric_sums)
+        sums = torch.tensor(
+            [total, loss_sum] + [metric_sums[k] for k in keys], dtype=torch.float64, device=device
+        )
+        dist.all_reduce(sums)
+        total, loss_sum = float(sums[0]), float(sums[1])
+        metric_sums = {key: float(sums[i + 2]) for i, key in enumerate(keys)}
     out = {key: value / max(1, total) for key, value in metric_sums.items()}
     out["loss"] = loss_sum / max(1, total)
     return out
 
 
-def main():
+def _target_met(metrics: dict, target_iou: float) -> bool:
+    if target_iou <= 0:
+        return False
+    if "iou_slow" in metrics and "iou_fast" in metrics:
+        return min(metrics["iou_slow"], metrics["iou_fast"]) >= target_iou
+    return metrics.get("iou", -1.0) >= target_iou
+
+
+class TrainingRollout(nn.Module):
+    """Keep every scheduled-sampling forward inside a single DDP forward call."""
+
+    def __init__(self, model: nn.Module, aspect: Optional[float]) -> None:
+        super().__init__()
+        self.model = model
+        self.aspect = aspect
+
+    def forward(self, batch: dict[str, torch.Tensor], probability: float) -> torch.Tensor:
+        if "x" in batch:
+            return self.model(batch["x"])
+        base, prev, y = batch["base"], batch["prev0"], batch["y"]
+        if probability <= 0:
+            previous = torch.cat([prev.unsqueeze(1), y[:, :-1]], dim=1)
+            return self.model(torch.cat([base, previous], dim=-1))
+        prefix, predictions = [], []
+        for t in range(y.shape[1]):
+            prefix.append(torch.cat([base[:, t], prev], dim=-1))
+            prediction = self.model(torch.stack(prefix, dim=1))[:, -1]
+            predictions.append(prediction)
+            feedback = _runtime_feedback_target(prediction, self.aspect).detach()
+            use_prediction = torch.rand((len(y), 1), device=y.device) < probability
+            prev = torch.where(use_prediction, feedback, y[:, t])
+        return torch.stack(predictions, dim=1)
+
+
+def main(argv: Optional[List[str]] = None):
     ap = argparse.ArgumentParser("Train GPT camera model from saved tracking/camera CSVs")
+    ap.add_argument(
+        "--config", type=str, help="Training YAML; explicit CLI arguments override YAML"
+    )
+    ap.add_argument("--dataset-config", type=str, help="Dataset catalog/selection YAML")
+    ap.add_argument("--dataset-root", type=str, help="Override the dataset YAML root on this host")
+    ap.add_argument(
+        "--sample-stride", type=int, default=1, help="Stride between eligible window starts"
+    )
+    ap.add_argument("--run-sampling", choices=["uniform", "windows"], default="windows")
+    ap.add_argument(
+        "--val-seq-len",
+        type=int,
+        default=None,
+        help="Validation rollout length; defaults to --seq-len",
+    )
+    ap.add_argument("--cpu-threads", type=int, default=4)
+    ap.add_argument("--ddp-backend", choices=["nccl", "gloo"], default=None)
+    ap.add_argument(
+        "--metrics-file",
+        type=str,
+        default=None,
+        help="Append training/validation JSONL on rank zero",
+    )
     ap.add_argument("--game-id", action="append", default=[], help="Game id (repeatable)")
     ap.add_argument("--game-ids", type=str, default=None, help="Comma-separated game ids")
     ap.add_argument("--game-ids-file", type=str, default=None, help="Text file with game ids")
@@ -901,7 +1001,36 @@ def main():
         default=0,
         help="Optional cap on number of games loaded from --file-list or ids (0=no cap).",
     )
-    args = ap.parse_args()
+    argv = expand_training_config(ap, list(sys.argv[1:] if argv is None else argv))
+    args = ap.parse_args(argv)
+    if args.seq_len < 2 or args.batch_size < 1 or args.sample_stride < 1 or args.cpu_threads < 1:
+        ap.error("seq-len must be >=2; batch-size, sample-stride, cpu-threads must be positive")
+    if args.val_seq_len is None:
+        args.val_seq_len = args.seq_len
+    if args.val_seq_len < 2:
+        ap.error("val-seq-len must be >=2")
+    if not all(0 <= p <= 1 for p in (args.ss_prob_start, args.ss_prob_end, args.target_iou)):
+        ap.error("Scheduled sampling probabilities and target-iou must be in [0, 1]")
+    rank, world_size = int(os.environ.get("RANK", 0)), int(os.environ.get("WORLD_SIZE", 1))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    device = torch.device(
+        args.device or (f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+    )
+    if device.type == "cuda":
+        if world_size > 1 and device.index not in (None, local_rank):
+            ap.error("DDP device must match LOCAL_RANK")
+        device = torch.device("cuda", local_rank if device.index is None else device.index)
+        torch.cuda.set_device(device)
+    torch.set_num_threads(args.cpu_threads)
+    torch.manual_seed(args.seed + rank)
+    random.seed(args.seed + rank)
+    if world_size > 1:
+        dist.init_process_group(
+            args.ddp_backend or ("nccl" if device.type == "cuda" else "gloo"),
+            timeout=timedelta(minutes=30),
+        )
+    if rank != 0:
+        logger.setLevel("WARNING")
 
     drivegpt_prev_mode = str(args.model_kind) == "drivegpt" and str(args.feature_mode) in {
         "base_prev_y",
@@ -913,15 +1042,15 @@ def main():
         args.scheduled_sampling = drivegpt_prev_mode
 
     if str(args.model_kind) == "drivegpt":
-        if not _arg_in_argv("--d-model"):
+        if not _arg_in_argv("--d-model", argv):
             args.d_model = 256
-        if not _arg_in_argv("--nhead"):
+        if not _arg_in_argv("--nhead", argv):
             args.nhead = 8
-        if not _arg_in_argv("--nlayers"):
+        if not _arg_in_argv("--nlayers", argv):
             args.nlayers = 3
         if args.dim_feedforward is None:
             args.dim_feedforward = 512
-        if not _arg_in_argv("--out"):
+        if not _arg_in_argv("--out", argv):
             args.out = "drivegpt_best.pt"
     elif args.dim_feedforward is None:
         args.dim_feedforward = int(CameraGPTConfig().dim_feedforward)
@@ -954,8 +1083,8 @@ def main():
 
     # --max-iters is an alias for --steps. If both are provided explicitly, require they match.
     if args.max_iters is not None:
-        steps_in_argv = _arg_in_argv("--steps")
-        max_iters_in_argv = _arg_in_argv("--max-iters")
+        steps_in_argv = _arg_in_argv("--steps", argv)
+        max_iters_in_argv = _arg_in_argv("--max-iters", argv)
         if steps_in_argv and max_iters_in_argv and int(args.steps) != int(args.max_iters):
             raise SystemExit("--steps and --max-iters both provided but differ; please use one.")
         if (not steps_in_argv) and max_iters_in_argv:
@@ -968,10 +1097,37 @@ def main():
         resume_mode = "force"
 
     game_csvs: List[GameCsvPaths] = []
+    data_identity = None
 
-    if args.file_list:
+    if args.dataset_config:
+        if args.file_list or args.game_id or args.game_ids or args.game_ids_file:
+            ap.error("--dataset-config cannot be combined with legacy game/file-list selection")
+        catalog_error = None
+        try:
+            train_games, val_games, data_identity = catalog_split(
+                args.dataset_config,
+                args.dataset_root,
+                min_train_frames=args.seq_len,
+                min_val_frames=args.val_seq_len,
+            )
+        except Exception as error:
+            catalog_error = f"rank {rank}: {type(error).__name__}: {error}"
+        errors = [catalog_error]
+        if dist.is_initialized():
+            errors = [None] * world_size
+            dist.all_gather_object(errors, catalog_error)
+        if any(errors):
+            raise RuntimeError(
+                "Dataset validation failed: " + "; ".join(error for error in errors if error)
+            )
+        game_csvs = train_games + val_games
+        if args.include_pose:
+            ap.error("The official catalog omits pose data; use --no-pose")
+        if args.max_games:
+            ap.error("Use dataset YAML include/exclude selectors instead of --max-games")
+    elif args.file_list:
         # Default to seconds-based sampling unless --seq-len was explicitly provided.
-        if not _arg_in_argv("--seq-len"):
+        if not _arg_in_argv("--seq-len", argv):
             fps = max(1.0, float(args.fps))
             secs = max(0.1, float(args.sample_seconds))
             args.seq_len = int(round(secs * fps))
@@ -1052,14 +1208,21 @@ def main():
             "No usable games found (need tracking.csv + camera.csv [+ camera_fast.csv])."
         )
 
-    rng = random.Random(int(args.seed))
-    rng.shuffle(game_csvs)
-    n_val = int(round(len(game_csvs) * float(args.val_split)))
-    val_games = game_csvs[:n_val] if n_val > 0 else []
-    train_games = game_csvs[n_val:] if n_val > 0 else game_csvs
-    if not train_games:
-        train_games = game_csvs
-        val_games = []
+    if data_identity is None:
+        rng = random.Random(int(args.seed))
+        rng.shuffle(game_csvs)
+        n_val = int(round(len(game_csvs) * float(args.val_split)))
+        val_games = game_csvs[:n_val] if n_val > 0 else []
+        train_games = game_csvs[n_val:] if n_val > 0 else game_csvs
+        if not train_games:
+            train_games = game_csvs
+            val_games = []
+        data_identity = {
+            "train_games": [p.game_id for p in train_games],
+            "validation_games": [p.game_id for p in val_games],
+        }
+    if not _arg_in_argv("--val-seq-len", argv):
+        args.val_seq_len = args.seq_len
 
     # Use a train-only normalization scale for train/val consistency without validation leakage.
     max_x, max_y = _scan_games_max_xy(train_games)
@@ -1079,6 +1242,10 @@ def main():
         max_cached_games=int(args.max_cached_games),
         preload_csv=str(args.preload_csv),
         shard_games_by_worker=(int(args.data_workers) > 1),
+        rank=rank,
+        world_size=world_size,
+        sample_stride=args.sample_stride,
+        run_sampling=args.run_sampling,
     )
     train_loader = DataLoader(
         train_ds,
@@ -1086,6 +1253,7 @@ def main():
         num_workers=int(args.data_workers),
         pin_memory=bool(args.pin_memory),
         persistent_workers=int(args.data_workers) > 0,
+        multiprocessing_context="spawn" if args.data_workers > 0 else None,
     )
 
     val_loader = None
@@ -1093,7 +1261,7 @@ def main():
         val_ds = CameraPanZoomGPTIterableDataset(
             games=val_games,
             norm=norm,
-            seq_len=int(args.seq_len),
+            seq_len=int(args.val_seq_len),
             target_mode=str(args.target_mode),
             feature_mode=str(args.feature_mode),
             include_pose=bool(args.include_pose),
@@ -1103,6 +1271,10 @@ def main():
             max_cached_games=max(1, int(args.max_cached_games // 2)),
             preload_csv=str(args.preload_csv),
             shard_games_by_worker=(int(args.data_workers) > 1),
+            rank=rank,
+            world_size=world_size,
+            sample_stride=args.sample_stride,
+            run_sampling=args.run_sampling,
         )
         val_loader = DataLoader(
             val_ds,
@@ -1110,6 +1282,7 @@ def main():
             num_workers=int(args.data_workers),
             pin_memory=bool(args.pin_memory),
             persistent_workers=int(args.data_workers) > 0,
+            multiprocessing_context="spawn" if args.data_workers > 0 else None,
         )
     if float(args.target_iou) > 0.0 and (
         val_loader is None or int(args.eval_every) <= 0 or int(args.val_steps) <= 0
@@ -1119,11 +1292,8 @@ def main():
             "--val-steps > 0, and --eval-every > 0."
         )
 
-    device = (
-        torch.device(args.device)
-        if args.device
-        else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    )
+    if args.dataset_config and args.target_iou > 0 and not args.eval_free_run:
+        ap.error("Official dataset target-iou requires autoregressive --eval-free-run")
     cfg = CameraGPTConfig(
         d_in=int(train_ds.feature_dim),
         d_out=int(train_ds.target_dim),
@@ -1223,7 +1393,9 @@ def main():
 
     steps = int(args.steps)
     if int(args.frames) > 0:
-        steps = int(math.ceil(float(args.frames) / float(args.batch_size * args.seq_len)))
+        steps = int(
+            math.ceil(float(args.frames) / float(args.batch_size * args.seq_len * world_size))
+        )
     logger.info(
         "Training %s: games=%d train=%d val=%d seq_len=%d steps=%d bs=%d device=%s",
         str(args.model_kind),
@@ -1236,8 +1408,33 @@ def main():
         device,
     )
 
-    it = iter(train_loader)
-    best_val = float("inf")
+    training_state = {
+        "data_identity": data_identity,
+        "evaluation": {
+            "seq_len": args.val_seq_len,
+            "context_window": args.seq_len,
+            "free_run": args.eval_free_run,
+            "runtime_slow_iou": args.runtime_slow_iou,
+            "val_steps_per_rank": args.val_steps,
+            "batch_size_per_rank": args.batch_size,
+            "world_size": world_size,
+            "seed": args.seed,
+            "sample_stride": args.sample_stride,
+            "run_sampling": args.run_sampling,
+            "data_workers": args.data_workers,
+            "loss_weights": [
+                args.loss_l1_weight,
+                args.loss_iou_weight,
+                args.loss_vel_weight,
+                args.loss_acc_weight,
+                args.fast_loss_mult,
+            ],
+        },
+        "best_val": float("inf"),
+        "target_met": False,
+        "target_iou": args.target_iou,
+        "resolved_args": vars(args),
+    }
     best_path, prefix, ext = _parse_checkpoint_naming(args.out)
     start_step = _maybe_resume(
         best_path=best_path,
@@ -1249,195 +1446,167 @@ def main():
         opt=opt,
         cfg=cfg,
         norm=norm,
+        training_state=training_state,
+    )
+    # Resume preserves validation history, while a caller can raise the target.
+    training_state["target_iou"] = args.target_iou
+    training_state["target_met"] = training_state.get(
+        "validation_step"
+    ) == start_step - 1 and _target_met(training_state.get("validation", {}), args.target_iou)
+    training_state["resolved_args"] = vars(args)
+    for parameter_group in opt.param_groups:
+        parameter_group["lr"] = args.lr
+    rollout = TrainingRollout(model, runtime_slow_aspect_norm)
+    if world_size > 1:
+        rollout = DistributedDataParallel(
+            rollout,
+            device_ids=[device.index] if device.type == "cuda" else None,
+            broadcast_buffers=False,
+        )
+    metrics_path = (
+        Path(args.metrics_file) if args.metrics_file else best_path.with_suffix(".metrics.jsonl")
     )
 
-    for step in range(start_step, steps + 1):
-        model.train()
-        batch = next(it)
-        y = batch["y"].to(device)
-        if "x" in batch:
-            x = batch["x"].to(device)
-            pred = model(x)
-        else:
-            base = batch["base"].to(device)
-            prev0 = batch["prev0"].to(device)
-            if str(args.feature_mode) not in {"base_prev_y", "players_prev_y"}:
-                raise RuntimeError(
-                    "Dataset emitted base/prev0 but feature-mode does not use previous targets; "
-                    "this is a bug."
+    def record(kind: str, step_num: int, values: dict) -> None:
+        if rank == 0:
+            metrics_path.parent.mkdir(parents=True, exist_ok=True)
+            with metrics_path.open("a") as stream:
+                stream.write(
+                    json.dumps({"kind": kind, "step": step_num, **values}, allow_nan=False) + "\n"
                 )
 
-            # Scheduled sampling: sometimes feed the model's previous prediction as the next-step input.
-            if args.scheduled_sampling:
-                p0 = float(args.ss_prob_start)
-                p1 = float(args.ss_prob_end)
-                warm = int(args.ss_warmup_steps)
-                if warm <= 0:
-                    p = p1
-                else:
-                    frac = float(min(max(step, 0), warm)) / float(warm)
-                    p = p0 + (p1 - p0) * frac
-                bsz, tlen, _ = base.shape
-                prev = prev0
-                preds = []
-                x_prefix = None
-                for t in range(int(tlen)):
-                    x_t = torch.cat([base[:, t, :], prev], dim=-1).unsqueeze(1)  # [B,1,D]
-                    x_prefix = x_t if x_prefix is None else torch.cat([x_prefix, x_t], dim=1)
-                    pred_t = model(x_prefix)[:, -1, :]
-                    preds.append(pred_t)
-                    if t + 1 < int(tlen):
-                        use_pred = torch.rand((bsz,), device=device) < float(p)
-                        feedback_t = _runtime_feedback_target(
-                            pred_t, runtime_slow_aspect_norm
-                        ).detach()
-                        prev = torch.where(use_pred[:, None], feedback_t, y[:, t, :])
-                pred = torch.stack(preds, dim=1)
-                x = x_prefix
-            else:
-                prev_y = torch.cat([prev0.unsqueeze(1), y[:, :-1, :]], dim=1)
-                x = torch.cat([base, prev_y], dim=-1)
-                pred = model(x)
-        loss, metrics = _compute_losses(
-            pred,
-            y,
-            w_l1=float(args.loss_l1_weight),
-            w_iou=float(args.loss_iou_weight),
-            w_vel=float(args.loss_vel_weight),
-            w_acc=float(args.loss_acc_weight),
-            fast_mult=float(args.fast_loss_mult),
-            runtime_slow_aspect_norm=runtime_slow_aspect_norm,
+    def save(path: Path, step_num: int) -> None:
+        _save_training_checkpoint(
+            path=path,
+            step_num=step_num,
+            model=model,
+            opt=opt,
+            train_ds=train_ds,
+            cfg=cfg,
+            game_csvs=game_csvs,
+            target_mode=args.target_mode,
+            include_pose=args.include_pose,
+            source_init_report=source_init_report,
+            training_state=training_state,
         )
 
+    record(
+        "run",
+        start_step - 1,
+        {
+            "data_identity": data_identity,
+            "evaluation": training_state["evaluation"],
+            "args": vars(args),
+            "torch": torch.__version__,
+        },
+    )
+    if training_state["target_met"]:
+        logger.info("Resumed checkpoint already meets target validation IoU %.4f", args.target_iou)
+        if dist.is_initialized():
+            dist.destroy_process_group()
+        return
+    # Vary the stochastic stream after resume instead of replaying the first windows.
+    train_ds._seed += max(0, start_step - 1) * 1_000_033
+    it = iter(train_loader)
+    last_step = start_step - 1
+    for step in range(start_step, steps + 1):
+        last_step = step
+        rollout.train()
+        batch = {
+            key: value.to(device, non_blocking=args.pin_memory) for key, value in next(it).items()
+        }
+        fraction = (
+            min(step / max(1, args.ss_warmup_steps), 1.0) if args.ss_warmup_steps > 0 else 1.0
+        )
+        probability = (
+            args.ss_prob_start + (args.ss_prob_end - args.ss_prob_start) * fraction
+            if args.scheduled_sampling
+            else 0.0
+        )
+        pred = rollout(batch, probability)
+        loss, metrics = _compute_losses(
+            pred,
+            batch["y"],
+            w_l1=args.loss_l1_weight,
+            w_iou=args.loss_iou_weight,
+            w_vel=args.loss_vel_weight,
+            w_acc=args.loss_acc_weight,
+            fast_mult=args.fast_loss_mult,
+            runtime_slow_aspect_norm=runtime_slow_aspect_norm,
+        )
+        finite = torch.tensor(int(torch.isfinite(loss).item()), device=device)
+        if dist.is_initialized():
+            dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+        if not finite.item():
+            raise RuntimeError(f"Nonfinite training loss at step {step}")
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
-
-        if int(args.checkpoint_every) > 0 and (step % int(args.checkpoint_every) == 0):
-            ckpt_path = _checkpoint_path(best_path, prefix, ext, step)
-            _save_training_checkpoint(
-                path=ckpt_path,
-                step_num=step,
-                model=model,
-                opt=opt,
-                train_ds=train_ds,
-                cfg=cfg,
-                game_csvs=game_csvs,
-                target_mode=str(args.target_mode),
-                include_pose=bool(args.include_pose),
-                source_init_report=source_init_report,
-            )
-            logger.info("Saved checkpoint to %s", ckpt_path)
-            max_keep = int(args.max_checkpoints)
-            if max_keep > 0:
-                numbered = _list_numbered_checkpoints(best_path, prefix, ext)
-                if len(numbered) > max_keep:
-                    for _, p in numbered[: len(numbered) - max_keep]:
-                        try:
-                            p.unlink()
-                        except Exception:
-                            pass
-
-        if step % int(args.log_every) == 0 or step == 1:
-            msg = f"step {step}/{steps}: train_loss={metrics['loss']:.5f}"
-            if "l1_slow" in metrics:
-                msg += f" l1_slow={metrics['l1_slow']:.5f} l1_fast={metrics['l1_fast']:.5f}"
-                msg += f" iou_slow={metrics['iou_slow']:.4f} iou_fast={metrics['iou_fast']:.4f}"
-            else:
-                msg += f" l1={metrics.get('l1', float('nan')):.5f}"
-                if "iou" in metrics:
-                    msg += f" iou={metrics['iou']:.4f}"
-            logger.info(msg)
-
+        if step == 1 or step % args.log_every == 0:
+            if dist.is_initialized():
+                keys = sorted(metrics)
+                values = torch.tensor([metrics[k] for k in keys], device=device)
+                dist.all_reduce(values)
+                metrics = {k: float(values[i]) / world_size for i, k in enumerate(keys)}
+            logger.info("step %d/%d: train %s", step, steps, metrics)
+            record("train", step, metrics)
         do_eval = (
             val_loader is not None
-            and int(args.eval_every) > 0
-            and (step % int(args.eval_every) == 0 or step == steps)
+            and args.eval_every > 0
+            and (step % args.eval_every == 0 or step == steps)
         )
         if do_eval:
             val_metrics = _eval_metrics(
                 model,
                 val_loader,
                 device,
-                steps=int(args.val_steps),
-                w_l1=float(args.loss_l1_weight),
-                w_iou=float(args.loss_iou_weight),
-                w_vel=float(args.loss_vel_weight),
-                w_acc=float(args.loss_acc_weight),
-                fast_mult=float(args.fast_loss_mult),
-                free_run=bool(args.eval_free_run),
+                steps=args.val_steps,
+                w_l1=args.loss_l1_weight,
+                w_iou=args.loss_iou_weight,
+                w_vel=args.loss_vel_weight,
+                w_acc=args.loss_acc_weight,
+                fast_mult=args.fast_loss_mult,
+                free_run=args.eval_free_run,
                 runtime_slow_aspect_norm=runtime_slow_aspect_norm,
+                context_window=args.seq_len,
             )
-            val = float(val_metrics["loss"])
-            val_msg = f"step {step}/{steps}: val_loss={val:.5f}"
-            if "iou_slow" in val_metrics:
-                val_msg += (
-                    f" iou_slow={val_metrics['iou_slow']:.4f}"
-                    f" iou_fast={val_metrics['iou_fast']:.4f}"
-                )
-            elif "iou" in val_metrics:
-                val_msg += f" iou={val_metrics['iou']:.4f}"
-            logger.info(val_msg)
-            saved_best = False
-            if val < best_val:
-                best_val = float(val)
-                _save_training_checkpoint(
-                    path=best_path,
-                    step_num=step,
-                    model=model,
-                    opt=opt,
-                    train_ds=train_ds,
-                    cfg=cfg,
-                    game_csvs=game_csvs,
-                    target_mode=str(args.target_mode),
-                    include_pose=bool(args.include_pose),
-                    source_init_report=source_init_report,
-                )
-                logger.info("Saved best checkpoint to %s", best_path)
-                saved_best = True
-            target_iou = float(args.target_iou)
-            if target_iou > 0.0:
-                if "iou_slow" in val_metrics and "iou_fast" in val_metrics:
-                    target_met = (
-                        float(val_metrics["iou_slow"]) >= target_iou
-                        and float(val_metrics["iou_fast"]) >= target_iou
-                    )
-                elif "iou" in val_metrics:
-                    target_met = float(val_metrics["iou"]) >= target_iou
-                else:
-                    target_met = False
-                if target_met:
-                    if not saved_best:
-                        _save_training_checkpoint(
-                            path=best_path,
-                            step_num=step,
-                            model=model,
-                            opt=opt,
-                            train_ds=train_ds,
-                            cfg=cfg,
-                            game_csvs=game_csvs,
-                            target_mode=str(args.target_mode),
-                            include_pose=bool(args.include_pose),
-                            source_init_report=source_init_report,
-                        )
-                        logger.info("Saved target-met checkpoint to %s", best_path)
-                    logger.info("Reached target validation IoU %.4f at step %d", target_iou, step)
-                    break
-
-    if val_loader is None:
-        _save_training_checkpoint(
-            path=best_path,
-            step_num=steps,
-            model=model,
-            opt=opt,
-            train_ds=train_ds,
-            cfg=cfg,
-            game_csvs=game_csvs,
-            target_mode=str(args.target_mode),
-            include_pose=bool(args.include_pose),
-            source_init_report=source_init_report,
-        )
-        logger.info("Saved checkpoint to %s", best_path)
+            if not all(math.isfinite(v) for v in val_metrics.values()):
+                raise RuntimeError(f"Nonfinite validation metrics: {val_metrics}")
+            training_state["validation"] = val_metrics
+            training_state["validation_step"] = step
+            training_state["target_met"] = _target_met(val_metrics, args.target_iou)
+            logger.info("step %d/%d: validation %s", step, steps, val_metrics)
+            record("validation", step, {**val_metrics, "target_met": training_state["target_met"]})
+            improved = val_metrics["loss"] < training_state["best_val"]
+            if improved:
+                training_state["best_val"] = val_metrics["loss"]
+            if improved or training_state["target_met"]:
+                save(best_path, step)
+        if args.checkpoint_every > 0 and step % args.checkpoint_every == 0:
+            save(_checkpoint_path(best_path, prefix, ext, step), step)
+            if rank == 0 and args.max_checkpoints > 0:
+                numbered = _list_numbered_checkpoints(best_path, prefix, ext)
+                for _, old_path in numbered[: -args.max_checkpoints]:
+                    old_path.unlink()
+        if training_state["target_met"]:
+            logger.info("Reached target validation IoU %.4f at step %d", args.target_iou, step)
+            break
+    if last_step >= start_step:
+        save(_checkpoint_path(best_path, prefix, ext, last_step), last_step)
+        if val_loader is None:
+            save(best_path, last_step)
+    record(
+        "finished",
+        last_step,
+        {
+            "target_met": training_state["target_met"],
+            "validation": training_state.get("validation"),
+            "target_iou": args.target_iou,
+        },
+    )
+    if dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

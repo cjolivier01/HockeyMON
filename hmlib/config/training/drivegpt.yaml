@@ -1,0 +1,69 @@
+schema: hockey-drivegpt-training-v1
+
+dataset:
+  dataset_config: /mnt/ripper-data/datasets/HockeyDriveGPT/dataset.yaml
+
+model:
+  model_kind: drivegpt
+  drivegpt_init: require
+  drivegpt_source_checkpoint: /mnt/ripper-data/pretrained/drivegpt/ckpts/uniad_base_e2e.pth
+  d_model: 256
+  nhead: 8
+  nlayers: 3
+  dim_feedforward: 512
+  dropout: 0.1
+
+features:
+  # These features are available from live tracking outputs and model feedback.
+  feature_mode: players_prev_y
+  target_mode: slow_fast_tlwh
+  include_pose: false
+  include_rink: false
+  max_players: 22
+  residual_prev_y: true
+  residual_scale: 0.1
+
+sampling:
+  seq_len: 32
+  sample_stride: 1
+  # Games are uniform within worker shards; runs are weighted by window count.
+  run_sampling: windows
+  seed: 0
+  data_workers: 2
+  preload_csv: shard
+  max_cached_games: 64
+  pin_memory: true
+
+optimization:
+  # Per-rank batch size: two GPUs give an effective batch size of 32.
+  batch_size: 16
+  steps: 100000
+  lr: 0.0001
+  scheduled_sampling: true
+  ss_prob_start: 0.0
+  ss_prob_end: 0.8
+  ss_warmup_steps: 5000
+  loss_l1_weight: 1.0
+  loss_iou_weight: 0.5
+  loss_vel_weight: 0.2
+  loss_acc_weight: 0.1
+  fast_loss_mult: 2.0
+
+validation:
+  # Longer rollouts expose drift; attention retains the 32-frame runtime context.
+  val_seq_len: 256
+  val_steps: 16
+  eval_every: 500
+  eval_free_run: true
+  runtime_slow_iou: true
+  target_iou: 0.97
+
+checkpoint:
+  out: /mnt/ripper-data/datasets/HockeyDriveGPT/runs/official/drivegpt_best.pt
+  checkpoint_every: 1000
+  max_checkpoints: 5
+  log_every: 25
+
+distributed:
+  ddp_backend: nccl
+  cpu_threads: 4

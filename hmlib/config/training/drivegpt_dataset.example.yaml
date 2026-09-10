@@ -1,0 +1,28 @@
+schema: hockey-drivegpt-dataset-v1
+root: /mnt/ripper-data/datasets/HockeyDriveGPT
+catalog: catalog.json
+include:
+  - "*"
+exclude:
+  # Identical tracking export of 2025-2026/col-steamboat.
+  - 2025-2026/rl-steamboat
+  - 2025-2026/demo
+  - 2025-2026/short
+split:
+  seed: 0
+  validation_fraction: 0.1
+  # Different exports/segments of one source game must stay on one side.
+  groups:
+    col-steamboat:
+      - 2025-2026/col-steamboat
+      - 2025-2026/col-steamboat-b
+      - 2025-2026/rl-steamboat
+    tv-12-1-r2:
+      - 2025-2026/tv-12-1-r2
+      - 2025-2026/demo
+    tv-12-1-r1:
+      - 2025-2026/tv-12-1-r1
+      - 2025-2026/short
+  # Optional explicit IDs override validation_fraction; IDs must be included above.
+  # validation_games:
+  #   - 2025-2026/blackhawks-p1

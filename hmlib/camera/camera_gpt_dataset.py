@@ -285,38 +285,25 @@ def _load_game(
 
     tracks_by_frame: Dict[int, np.ndarray] = {}
     if not tracks.empty:
-        for frame_id, group in tracks.groupby("Frame"):
-            fid = int(frame_id)
-            arr = group[["BBox_X", "BBox_Y", "BBox_W", "BBox_H"]].to_numpy(dtype=np.float32)
-            tracks_by_frame[fid] = arr
+        ordered = tracks.sort_values("Frame", kind="stable")
+        track_frames = ordered["Frame"].to_numpy(dtype=np.int64)
+        boxes = ordered[["BBox_X", "BBox_Y", "BBox_W", "BBox_H"]].to_numpy(dtype=np.float32)
+        indices = np.flatnonzero(np.diff(track_frames)) + 1
+        starts = np.concatenate(([0], indices))
+        tracks_by_frame = dict(zip(track_frames[starts].tolist(), np.split(boxes, indices)))
 
-    cam_slow_tlwh_by_frame: Dict[int, np.ndarray] = {}
-    if not cams.empty:
-        for row in cams.itertuples(index=False):
-            fid = int(getattr(row, "Frame"))
-            x = float(getattr(row, "BBox_X"))
-            y = float(getattr(row, "BBox_Y"))
-            w = float(getattr(row, "BBox_W"))
-            h = float(getattr(row, "BBox_H"))
-            x1 = float(np.clip(x / max(1e-6, float(norm.scale_x)), 0.0, 1.0))
-            y1 = float(np.clip(y / max(1e-6, float(norm.scale_y)), 0.0, 1.0))
-            w1 = float(np.clip(w / max(1e-6, float(norm.scale_x)), 0.0, 1.0))
-            h1 = float(np.clip(h / max(1e-6, float(norm.scale_y)), 0.0, 1.0))
-            cam_slow_tlwh_by_frame[fid] = np.asarray([x1, y1, w1, h1], dtype=np.float32)
+    def normalized_boxes(dataframe: Optional[pd.DataFrame]) -> Dict[int, np.ndarray]:
+        if dataframe is None or dataframe.empty:
+            return {}
+        boxes = dataframe[["BBox_X", "BBox_Y", "BBox_W", "BBox_H"]].to_numpy(dtype=np.float32)
+        scale = np.asarray(
+            [norm.scale_x, norm.scale_y, norm.scale_x, norm.scale_y], dtype=np.float32
+        )
+        boxes = np.clip(boxes / np.maximum(scale, 1e-6), 0.0, 1.0)
+        return dict(zip(dataframe["Frame"].astype(int).tolist(), boxes))
 
-    cam_fast_tlwh_by_frame: Dict[int, np.ndarray] = {}
-    if cams_fast is not None and not cams_fast.empty:
-        for row in cams_fast.itertuples(index=False):
-            fid = int(getattr(row, "Frame"))
-            x = float(getattr(row, "BBox_X"))
-            y = float(getattr(row, "BBox_Y"))
-            w = float(getattr(row, "BBox_W"))
-            h = float(getattr(row, "BBox_H"))
-            x1 = float(np.clip(x / max(1e-6, float(norm.scale_x)), 0.0, 1.0))
-            y1 = float(np.clip(y / max(1e-6, float(norm.scale_y)), 0.0, 1.0))
-            w1 = float(np.clip(w / max(1e-6, float(norm.scale_x)), 0.0, 1.0))
-            h1 = float(np.clip(h / max(1e-6, float(norm.scale_y)), 0.0, 1.0))
-            cam_fast_tlwh_by_frame[fid] = np.asarray([x1, y1, w1, h1], dtype=np.float32)
+    cam_slow_tlwh_by_frame = normalized_boxes(cams)
+    cam_fast_tlwh_by_frame = normalized_boxes(cams_fast)
 
     pose_feat_by_frame: Dict[int, np.ndarray] = {}
     if include_pose and paths.pose_csv:
@@ -365,6 +352,10 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
         *,
         preload_csv: str = "none",
         shard_games_by_worker: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
+        sample_stride: int = 1,
+        run_sampling: str = "windows",
     ) -> None:
         super().__init__()
         self._games = games
@@ -384,6 +375,14 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
         self._max_cached = int(max_cached_games)
         self._preload_csv = str(preload_csv)
         self._shard_games_by_worker = bool(shard_games_by_worker)
+        self._rank = int(rank)
+        self._world_size = int(world_size)
+        self._sample_stride = int(sample_stride)
+        self._run_sampling = str(run_sampling)
+        if not 0 <= self._rank < self._world_size or self._sample_stride < 1:
+            raise ValueError("Invalid distributed rank/world size or sample stride")
+        if self._run_sampling not in {"uniform", "windows"}:
+            raise ValueError(f"Unknown run sampling: {self._run_sampling}")
         self._cache: Dict[str, _LoadedGame] = {}
         self._cache_order: deque[str] = deque()
         self._unusable_reasons: Dict[str, str] = {}
@@ -468,7 +467,7 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
         worker = get_worker_info()
         worker_id = int(worker.id) if worker is not None else 0
         num_workers = int(worker.num_workers) if worker is not None else 1
-        rng = random.Random(self._seed + worker_id)
+        rng = random.Random(self._seed + self._rank * 1_000_003 + worker_id)
 
         games = self._games
         if self._shard_games_by_worker and worker is not None and num_workers > 1:
@@ -492,8 +491,18 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
                 continue
 
             eligible_runs = [run for run in game.frame_runs if len(run) >= self._seq_len]
-            frames = rng.choice(eligible_runs)
-            start = rng.randint(0, len(frames) - self._seq_len)
+            windows = [
+                (len(run) - self._seq_len) // self._sample_stride + 1 for run in eligible_runs
+            ]
+            frames = (
+                rng.choices(eligible_runs, weights=windows, k=1)[0]
+                if self._run_sampling == "windows"
+                else rng.choice(eligible_runs)
+            )
+            start = (
+                rng.randrange((len(frames) - self._seq_len) // self._sample_stride + 1)
+                * self._sample_stride
+            )
             seq_frames = frames[start : start + self._seq_len]
 
             feats = []
