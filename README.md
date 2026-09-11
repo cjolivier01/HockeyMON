@@ -16,7 +16,7 @@ For a fresh Ubuntu/Debian machine you should run, from the repo root:
 ```
 
 - `env/install_deps.sh` installs the system libraries needed by the native C++ tools used by HockeyMON:
-  - Hugin CLI tools (`pto_gen`, `autooptimiser`, `nona`) for stitching.
+  - Hugin CLI tools (`pto_gen`, `autooptimiser`, `pano_modify`, `pano_trafo`, `nona`) for stitching and optional rink leveling.
   - Enblend/Enfuse and image/codec libraries (tiff, jpeg, png, OpenEXR, FFTW, wxWidgets, etc.).
   - These are required so the Bazel/CMake builds in `external/hugin` and `external/enblend-enfuse` succeed and the CLI binaries can run.
 - `build_deps.sh` runs the Hugin Bazel build:
@@ -59,6 +59,9 @@ python -m hmlib.cli.stitch --game-id ev-stockton-1 -o stitched_output-with-audio
 ```
 
 Ensure your `PYTHONPATH` includes the repo root when running directly (for example, see `hm_run.sh` for how we set `PYTHONPATH` in development).
+
+When a game-based NONA calibration creates new stitching maps, it also opens the optional
+[rink-post leveling selector](docs/rink-leveling-selection.md) after panorama alignment and before the final maps.
 
 ## Running hmtrack with a pre-stitched or panoramic video
 

@@ -16,6 +16,7 @@ from stitching_fixtures import write_generation
 
 from hmlib.stitching import artifacts, configure_stitching
 from hmlib.stitching.artifact_validation import validate_artifact_generation, validate_mapping_tiff
+from hmlib.stitching.calibration_leveling import CalibrationLevelingResult
 from hmlib.stitching.seam import load_canvas_seam_mask, read_png_layout
 
 
@@ -467,6 +468,94 @@ def _build_fake_generation(**kwargs):
             + "\n"
         )
     return True
+
+
+def should_publish_and_persist_selected_calibration_leveling_settings(tmp_path, monkeypatch):
+    images = _source_images(tmp_path)
+    game = tmp_path / "game"
+    game.mkdir()
+    config = {"stitching": {"mapping_backend": "nona", "run_autooptimizer": True}}
+    private, saved, selections = {}, [], []
+
+    def select(**kwargs):
+        selections.append(kwargs)
+        return CalibrationLevelingResult(True, (11, -24, 3))
+
+    def build(**kwargs):
+        stage = Path(kwargs["project_file_path"]).parent
+        effective = kwargs["calibration_leveling"](
+            stage / ".autooptimiser_out.aligned.pto",
+            stage / "autooptimiser_out.pto",
+            kwargs["image_files"],
+            kwargs["settings"],
+        )
+        assert effective.framing.rotation_degrees == (11, -24, 3)
+        return _build_fake_generation(**kwargs)
+
+    monkeypatch.setattr(configure_stitching, "select_calibration_leveling", select)
+    monkeypatch.setattr(configure_stitching, "_build_stitching_project_in_place", build)
+    monkeypatch.setattr(configure_stitching, "get_game_config_private", lambda **kwargs: private)
+    monkeypatch.setattr(
+        configure_stitching,
+        "save_private_config",
+        lambda **kwargs: saved.append(kwargs["data"].copy()),
+    )
+    assert configure_stitching.build_stitching_project(
+        str(game / "hm_project.pto"),
+        images,
+        20,
+        game_id="demo",
+        game_config=config,
+    )
+    assert len(selections) == 1
+    assert selections[0]["game_id"] == "demo"
+    assert config["stitching"]["projection_framing"]["rotation_degrees"] == [11, -24, 3]
+    assert saved[-1]["stitching"]["projection_framing"]["rotation_degrees"] == [11, -24, 3]
+    manifest = json.loads((game / ".stitching_artifacts.json").read_text())
+    assert json.loads(manifest["calibration_settings"])["framing"]["rotation_degrees"] == [
+        11,
+        -24,
+        3,
+    ]
+
+
+def should_cancel_leveling_without_publishing_a_partial_generation(tmp_path, monkeypatch):
+    images = _source_images(tmp_path)
+    game = tmp_path / "game"
+    game.mkdir()
+    write_generation(game)
+    before = {path.name: path.read_bytes() for path in game.iterdir()}
+    config = {"stitching": {"mapping_backend": "nona", "run_autooptimizer": True}}
+
+    monkeypatch.setattr(
+        configure_stitching,
+        "select_calibration_leveling",
+        lambda **kwargs: CalibrationLevelingResult(False, (0, 0, 0), True),
+    )
+
+    def build(**kwargs):
+        stage = Path(kwargs["project_file_path"]).parent
+        kwargs["calibration_leveling"](
+            stage / ".autooptimiser_out.aligned.pto",
+            stage / "autooptimiser_out.pto",
+            kwargs["image_files"],
+            kwargs["settings"],
+        )
+        pytest.fail("cancelled selector returned to the builder")
+
+    monkeypatch.setattr(configure_stitching, "_build_stitching_project_in_place", build)
+    with pytest.raises(configure_stitching.CalibrationLevelingCancelled):
+        configure_stitching.build_stitching_project(
+            str(game / "hm_project.pto"),
+            images,
+            20,
+            game_id="demo",
+            game_config=config,
+        )
+    assert {
+        path.name: path.read_bytes() for path in game.iterdir() if path.name != ".stitching.lock"
+    } == before
+    assert not list(game.glob(".stitching-stage-*"))
 
 
 def should_reuse_frame_content_before_running_matcher_or_invalidating_again(tmp_path, monkeypatch):

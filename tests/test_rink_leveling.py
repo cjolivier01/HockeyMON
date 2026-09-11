@@ -6,13 +6,21 @@ import math
 import shutil
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import yaml
 from PIL import Image
 
+from hmlib.stitching import configure_stitching as shared_stitching
 from hmlib.stitching.artifacts import stitching_lock
+from hmlib.stitching.calibration_leveling import (
+    CalibrationLevelingResult,
+    CalibrationLevelingSelector,
+    CalibrationLevelingSession,
+)
+from hmlib.stitching.calibration_leveling_page import PAGE as CALIBRATION_LEVELING_PAGE
 from hmlib.stitching.leveling_editor import LevelingSession
 from hmlib.stitching.projections import read_panorama_geometry
 from hmlib.stitching.rink_leveling import (
@@ -92,6 +100,173 @@ def should_validate_original_source_coordinates_and_pano_trafo_output():
     for invalid in ("nan 899.5\n" * 6, "3600 0\n" * 6, "1 2 3\n" * 6):
         with pytest.raises(ValueError):
             parse_rays(invalid, 3)
+
+
+def should_automatically_estimate_without_an_estimate_button():
+    assert 'id="estimate"' not in CALIBRATION_LEVELING_PAGE
+    assert "setTimeout" in CALIBRATION_LEVELING_PAGE
+    assert ",150)" in CALIBRATION_LEVELING_PAGE
+    assert "if(drag){scheduleEstimate();return}" in CALIBRATION_LEVELING_PAGE
+    assert "Skip leveling" in CALIBRATION_LEVELING_PAGE
+    assert "Cancel calibration" in CALIBRATION_LEVELING_PAGE
+
+
+def should_run_selector_tools_with_final_calibration_locale_and_context(monkeypatch, tmp_path):
+    captured = {}
+
+    def run(command, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(stdout="converted")
+
+    monkeypatch.setattr(shared_stitching.subprocess, "run", run)
+    token = shared_stitching._command_directory.set(tmp_path)
+    try:
+        assert (
+            shared_stitching._run_stitching_command(
+                ["pano_trafo", "sphere.pto"], input_text="0 1 2\n", timeout_seconds=60
+            )
+            == "converted"
+        )
+    finally:
+        shared_stitching._command_directory.reset(token)
+    assert captured["cwd"] == tmp_path
+    assert captured["env"]["LC_ALL"] == "C"
+    assert captured["input"] == "0 1 2\n"
+    assert captured["timeout"] == 60
+
+
+class _SelectorSession:
+    published_rotation = (17.0, -9.0, 2.0)
+
+
+def should_distinguish_use_skip_cancel_and_backend_close():
+    selector = CalibrationLevelingSelector(_SelectorSession(), game_id="demo")
+    selector._complete("skip", [99, 1, 2])
+    assert selector.result == CalibrationLevelingResult(False, (17, -9, 2))
+
+    selector = CalibrationLevelingSelector(_SelectorSession(), game_id="demo")
+    selector._complete("cancel", [17, 1, 2])
+    assert selector.result.cancel_calibration
+
+    selector = CalibrationLevelingSelector(_SelectorSession(), game_id="demo")
+    selector._latest_preview = (17, 4, -3)
+    with pytest.raises(ValueError, match="Preview"):
+        selector._complete("use", [17, 4, -2])
+    selector._complete("use", [91, 4, -3])
+    assert selector.result == CalibrationLevelingResult(True, (17, 4, -3))
+
+    selector = CalibrationLevelingSelector(_SelectorSession(), game_id="demo")
+    selector.close()
+    assert selector.result.cancel_calibration
+
+
+def _calibration_leveling_session(tmp_path):
+    images = [tmp_path / "left.png", tmp_path / "right.png"]
+    for index, path in enumerate(images):
+        Image.new("RGB", (160, 100), (20 + index * 50, 80, 140)).save(path)
+    project = (
+        'p f19 w4000 h2000 v150 P"110 10 -10" n"PNG"\n'
+        'i w160 h100 f0 v100 y0 p0 r0 n"left.png"\n'
+        'i w160 h100 f0 v100 y0 p0 r0 n"right.png"\n'
+    )
+    aligned = tmp_path / ".autooptimiser_out.aligned.pto"
+    framed = tmp_path / "autooptimiser_out.pto"
+    aligned.write_text(project)
+    framed.write_text(project)
+    settings = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": "nona",
+                "run_autooptimizer": True,
+                "projection": "general-panini",
+                "projection_parameters": {"general-panini": [110, 10, -10]},
+                "projection_framing": {
+                    "auto_fov": True,
+                    "auto_canvas": True,
+                    "auto_crop": True,
+                    "rotation_degrees": [17, -9, 2],
+                },
+            }
+        }
+    )
+    commands = []
+
+    def run(command, *, input_text=None, timeout_seconds=None):
+        commands.append((list(command), input_text, timeout_seconds))
+        tool = Path(command[0]).name
+        if tool == "pano_trafo":
+            return "1000 1000\n1000 700\n1800 1000\n1800 700\n2600 1000\n2600 700\n"
+        if tool == "pano_modify":
+            output = Path(command[command.index("-o") + 1])
+            source = Path(command[-1])
+            text = source.read_text()
+            canvas = next(
+                (item.split("=", 1)[1] for item in command if item.startswith("--canvas=")), None
+            )
+            if canvas and canvas != "AUTO":
+                width, height = canvas.split("x")
+                text = text.replace("w4000 h2000", f"w{width} h{height}")
+            output.write_text(text)
+            return ""
+        if tool == "nona":
+            output = Path(command[command.index("-o") + 1])
+            geometry = read_panorama_geometry(command[-1])
+            Image.new("RGB", (geometry.width, geometry.height), (40, 100, 150)).save(output)
+            return ""
+        raise AssertionError(command)
+
+    session = CalibrationLevelingSession(
+        aligned,
+        framed,
+        images,
+        settings,
+        run,
+        lambda executable: f"/tools/{executable}",
+    )
+    return session, commands
+
+
+def should_require_posts_from_both_cameras_and_pin_yaw_server_side(tmp_path):
+    session, commands = _calibration_leveling_session(tmp_path)
+    posts = [
+        {"image_index": 0, "first": [10, 10], "second": [10, 80]},
+        {"image_index": 0, "first": [50, 10], "second": [50, 80]},
+        {"image_index": 0, "first": [90, 10], "second": [90, 80]},
+    ]
+    try:
+        with pytest.raises(ValueError, match="each camera"):
+            session.estimate(posts, [17, -9, 2])
+        posts[-1]["image_index"] = 1
+        with pytest.raises(ValueError, match="Yaw"):
+            session.estimate(posts, [18, -9, 2])
+        session.estimate(posts, [17, -9, 2])
+        assert commands[-1][0][0] == "/tools/pano_trafo"
+        assert commands[-1][1].count("\n") == 6
+        assert commands[-1][2] == 60
+    finally:
+        session.close()
+
+
+def should_frame_exact_selected_settings_before_downscaling_preview(tmp_path):
+    session, commands = _calibration_leveling_session(tmp_path)
+    try:
+        preview = session.preview([17, -12.5, 3.25])
+        assert preview.startswith(b"\x89PNG")
+        projection, cap, nona = [entry[0] for entry in commands]
+        assert projection[0] == "/tools/pano_modify"
+        assert "--projection=19" in projection
+        assert "--projection-parameter=110 10 -10" in projection
+        assert "--rotate=17,-12.5,3.25" in projection
+        assert "--fov=AUTO" in projection
+        assert "--canvas=AUTO" in projection
+        assert "--crop=AUTO" in projection
+        assert cap[0] == "/tools/pano_modify"
+        assert "--canvas=1600x800" in cap
+        assert nona[0] == "/tools/nona"
+        assert commands[-1][2] == 60
+        assert read_panorama_geometry(session._preview_project).width == 1600
+    finally:
+        session.close()
 
 
 def _game(tmp_path, *, rotation=None):

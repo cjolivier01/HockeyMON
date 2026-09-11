@@ -199,6 +199,84 @@ def should_apply_rotation_and_manual_crop_before_mapping(tmp_path):
     assert "--projection-parameter=100 0 0" in commands[0]
 
 
+def should_level_between_projection_and_one_final_nona_enblend_pass(tmp_path, monkeypatch):
+    images = [tmp_path / "left.png", tmp_path / "right.png"]
+    for image in images:
+        assert cv2.imwrite(str(image), np.zeros((3, 4, 3), np.uint8))
+    project = tmp_path / "hm_project.pto"
+    project.write_text('p f2 w4 h3 v180\ni w4 h3 f0 v90 n"left.png"\ni w4 h3 f0 v90 n"right.png"\n')
+    settings = _nona(projection="equirectangular")
+    events = []
+
+    def optimize(command, _project):
+        events.append("optimizer")
+        shutil.copyfile(project, command[command.index("-o") + 1])
+
+    def frame(path, selected, *_args):
+        events.append("projection")
+        if events.count("projection") == 1:
+            Path(path).write_text("initially framed")
+        else:
+            assert Path(path).read_text().startswith("p f2 w4 h3")
+
+    def cap(*_args, **_kwargs):
+        events.append("cap")
+
+    def select(aligned, framed, source_images, current):
+        events.append("leveling")
+        assert aligned.read_text().startswith("p f2 w4 h3")
+        assert framed.read_text() == "initially framed"
+        assert source_images == [str(path.resolve()) for path in images]
+        return replace(
+            current,
+            framing=replace(current.framing, rotation_degrees=(0, -23, 2)),
+        )
+
+    def run(command):
+        tool = Path(command[0]).name
+        if tool == "nona":
+            events.append("nona")
+            for index in range(2):
+                (tmp_path / f"mapping_{index:04}.tif").write_bytes(b"mapping")
+        elif tool == "enblend":
+            events.append("enblend")
+            assert cv2.imwrite(str(tmp_path / "seam_file.png"), np.array([[0, 255]], np.uint8))
+        else:
+            raise AssertionError(command)
+        return ""
+
+    monkeypatch.setattr(configure_stitching, "_optimize_hugin_geometry", optimize)
+    monkeypatch.setattr(
+        configure_stitching, "_set_hugin_optimization_variables", lambda *args: None
+    )
+    monkeypatch.setattr(configure_stitching, "write_control_points", lambda *args: None)
+    monkeypatch.setattr(configure_stitching, "apply_projection_framing", frame)
+    monkeypatch.setattr(configure_stitching, "cap_projection_canvas", cap)
+    monkeypatch.setattr(configure_stitching, "_run_stitching_command", run)
+    monkeypatch.setattr(configure_stitching, "get_enblend_bin", lambda: "enblend")
+    monkeypatch.setattr(
+        configure_stitching, "get_pixel_value_percentages", lambda _path: {0: 50, 255: 50}
+    )
+    assert configure_stitching._build_stitching_project_in_place(
+        str(project),
+        [str(path) for path in images],
+        20,
+        skip_if_exists=False,
+        settings=settings,
+        control_points={},
+        calibration_leveling=select,
+    )
+    assert events == [
+        "optimizer",
+        "projection",
+        "leveling",
+        "projection",
+        "cap",
+        "nona",
+        "enblend",
+    ]
+
+
 @pytest.mark.skipif(
     not shutil.which("pano_modify") or not shutil.which("pto_gen"),
     reason="Hugin binaries unavailable",

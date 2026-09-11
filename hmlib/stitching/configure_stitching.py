@@ -50,13 +50,22 @@ from hmlib.stitching.calibration import (
     calibration_candidates,
     sample_frame_indices,
 )
+from hmlib.stitching.calibration_leveling import (
+    CalibrationLevelingCancelled,
+    CalibrationLevelingResult,
+    select_calibration_leveling,
+)
 from hmlib.stitching.control_points import calculate_control_points
 from hmlib.stitching.homography_maps import (
     create_opencv_affine_ransac_mapping_files,
     create_opencv_magsac_mapping_files,
 )
 from hmlib.stitching.hugin import configure_control_points, write_control_points
-from hmlib.stitching.projections import apply_projection, set_source_horizontal_fov
+from hmlib.stitching.projections import (
+    apply_projection_framing,
+    cap_projection_canvas,
+    set_source_horizontal_fov,
+)
 from hmlib.stitching.settings import MAPPING_BACKENDS as MAPPING_BACKENDS
 from hmlib.stitching.settings import OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS
 from hmlib.stitching.settings import StitchingSettings
@@ -76,6 +85,7 @@ logger = logging.getLogger(__name__)
 _STITCH_FRAME_TIME_PATH = ("stitching", "stitch_frame_time")
 _STITCH_FRAME_TIME_ALT_PATH = ("stitching", "stitch-frame-time")
 _STITCH_ARTIFACT_MANIFEST = ".stitching_artifacts.json"
+_STITCH_ROTATION_PATH = "stitching.projection_framing.rotation_degrees"
 
 
 _stitch_game_lock = stitching_lock
@@ -102,6 +112,11 @@ def _resolve_local_binary(executable: str) -> Optional[str]:
         if bin_path.is_file() and os.access(bin_path, os.X_OK):
             return str(bin_path)
     return None
+
+
+def _resolve_stitching_binary(executable: str) -> str:
+    """Resolve a bundled tool consistently for final and preview commands."""
+    return _resolve_local_binary(executable) or executable
 
 
 def _save_stitched_reference_frame(dir_name: Union[str, Path]) -> None:
@@ -143,9 +158,16 @@ def get_enblend_bin() -> str:
     return "enblend"
 
 
-def _run_stitching_command(cmd: Sequence[str]) -> str:
+def _run_stitching_command(
+    cmd: Sequence[str],
+    *,
+    input_text: Optional[str] = None,
+    timeout_seconds: Optional[float] = None,
+) -> str:
     """Run an external stitching command and fail if it does not complete."""
     logger.info("Running stitching command: %s", " ".join(cmd))
+    environment = os.environ.copy()
+    environment["LC_ALL"] = "C"
     try:
         result = subprocess.run(
             cmd,
@@ -154,6 +176,9 @@ def _run_stitching_command(cmd: Sequence[str]) -> str:
             stderr=subprocess.STDOUT,
             text=True,
             cwd=_command_directory.get(),
+            env=environment,
+            input=input_text,
+            timeout=timeout_seconds,
         )
     except subprocess.CalledProcessError as exc:
         logger.error("Stitching command failed: %s\n%s", " ".join(cmd), exc.stdout)
@@ -805,6 +830,36 @@ def _output_scale_provenance(scale: Optional[float]) -> str:
     return format(1.0 if scale is None else float(scale), ".17g")
 
 
+CalibrationLevelingCallback = Callable[
+    [Path, Path, Sequence[str], StitchingSettings], StitchingSettings
+]
+
+
+def _persist_calibration_leveling_result(
+    result: CalibrationLevelingResult,
+    settings: StitchingSettings,
+    *,
+    game_id: str,
+    game_config: Optional[Dict[str, Any]],
+) -> StitchingSettings:
+    """Apply an explicit selector outcome to settings and game configuration."""
+    if result.cancel_calibration:
+        raise CalibrationLevelingCancelled("Stitching calibration cancelled during rink leveling")
+    if not result.use_angles:
+        return settings
+    framing = replace(
+        settings.framing,
+        rotation_degrees=result.rotation_degrees,
+    )
+    selected = replace(settings, framing=framing)
+    private_config = get_game_config_private(game_id=game_id) or {}
+    set_nested_value(private_config, _STITCH_ROTATION_PATH, list(result.rotation_degrees))
+    save_private_config(game_id=game_id, data=private_config, verbose=True)
+    if game_config is not None:
+        set_nested_value(game_config, _STITCH_ROTATION_PATH, list(result.rotation_degrees))
+    return selected
+
+
 def build_stitching_project(
     project_file_path: str,
     image_files: List[str],
@@ -862,6 +917,34 @@ def build_stitching_project(
         settings,
         lens_profile_fingerprint=lens_calibration.fingerprint if lens_calibration else None,
     )
+    effective_settings = [settings]
+    calibration_leveling: Optional[CalibrationLevelingCallback] = None
+    if game_id is not None and settings.mapping_backend == "nona":
+
+        def calibration_leveling(
+            aligned_project: Path,
+            framed_project: Path,
+            staged_images: Sequence[str],
+            current_settings: StitchingSettings,
+        ) -> StitchingSettings:
+            result = select_calibration_leveling(
+                aligned_project=aligned_project,
+                framed_project=framed_project,
+                image_files=staged_images,
+                settings=current_settings,
+                game_id=game_id,
+                run=_run_stitching_command,
+                resolve_binary=_resolve_stitching_binary,
+            )
+            selected = _persist_calibration_leveling_result(
+                result,
+                current_settings,
+                game_id=game_id,
+                game_config=game_config,
+            )
+            effective_settings[0] = selected
+            return selected
+
     input_images = _image_content_provenance(image_files)
     provenance = {
         **(provenance if provenance is not None else {"input_images": input_images}),
@@ -913,6 +996,7 @@ def build_stitching_project(
             lens_calibration=lens_calibration,
             lens_calibration_resolved=True,
             control_points=control_points,
+            calibration_leveling=calibration_leveling,
         )
         if not result:
             raise RuntimeError("Failed to build staged stitching project")
@@ -925,7 +1009,11 @@ def build_stitching_project(
             _rewrite_pto_sources(pto, source_directory=stage, target_directory=project.parent)
         (stage / _STITCH_ARTIFACT_MANIFEST).write_text(
             json.dumps(
-                {**settings.manifest(), **provenance, "reference_images": input_images},
+                {
+                    **effective_settings[0].manifest(),
+                    **provenance,
+                    "reference_images": input_images,
+                },
                 indent=2,
                 sort_keys=True,
             )
@@ -963,6 +1051,7 @@ def _build_stitching_project_in_place(
     lens_calibration: Optional[LensCalibrationPair] = None,
     lens_calibration_resolved: bool = False,
     control_points: Optional[Dict[str, torch.Tensor]] = None,
+    calibration_leveling: Optional[CalibrationLevelingCallback] = None,
 ):
     """Create or update a Hugin PTO project and seam masks for two images.
 
@@ -1069,6 +1158,7 @@ def _build_stitching_project_in_place(
             )
 
         def run_remap_pipeline(control_points: Dict[str, torch.Tensor]) -> bool:
+            nonlocal settings
             remove_remap_outputs()
             if mapping_backend == "nona":
                 cmd = [
@@ -1083,16 +1173,46 @@ def _build_stitching_project_in_place(
                 ]
                 _optimize_hugin_geometry(cmd, hm_project)
                 _set_hugin_optimization_variables(autooptimiser_out, ("r1", "p1", "y1"))
-                apply_projection(
+                aligned_project = Path(dir_name) / ".autooptimiser_out.aligned.pto"
+                shutil.copyfile(autooptimiser_out, aligned_project)
+                pano_modify = _resolve_stitching_binary("pano_modify")
+                apply_projection_framing(
                     autooptimiser_out,
                     settings,
                     _run_stitching_command,
-                    _resolve_local_binary("pano_modify") or "pano_modify",
+                    pano_modify,
+                )
+                if calibration_leveling is not None:
+                    selected_settings = calibration_leveling(
+                        aligned_project,
+                        Path(autooptimiser_out),
+                        image_files,
+                        settings,
+                    )
+                    if selected_settings.mapping_backend != "nona":
+                        raise ValueError("Rink leveling cannot change the mapping backend")
+                    if (
+                        selected_settings.framing.rotation_degrees
+                        != settings.framing.rotation_degrees
+                    ):
+                        shutil.copyfile(aligned_project, autooptimiser_out)
+                        apply_projection_framing(
+                            autooptimiser_out,
+                            selected_settings,
+                            _run_stitching_command,
+                            pano_modify,
+                        )
+                    settings = selected_settings
+                cap_projection_canvas(
+                    autooptimiser_out,
+                    settings,
+                    _run_stitching_command,
+                    pano_modify,
                     scale=scale,
                 )
 
                 cmd = [
-                    "nona",
+                    _resolve_stitching_binary("nona"),
                     "-m",
                     "TIFF_m",
                     "-z",
