@@ -242,14 +242,14 @@ def read_stitching_settings(
     matcher = normalize_control_point_matcher(
         _defaulted(stitch, "control_point_matcher", "superpoint-lightglue")
     )
-    backend = normalize_mapping_backend(_defaulted(stitch, "mapping_backend", "opencv-magsac"))
+    backend = normalize_mapping_backend(_defaulted(stitch, "mapping_backend", "nona"))
     projection = normalize_projection(
         _defaulted(stitch, "projection", "general-panini" if backend == "nona" else "rectilinear")
     )
     if backend != "nona" and projection != "rectilinear":
         raise ValueError(f"{backend} supports only rectilinear output; {projection} requires nona")
     optimizer = _boolean(
-        _defaulted(stitch, "run_autooptimizer", False), "stitching.run_autooptimizer"
+        _defaulted(stitch, "run_autooptimizer", True), "stitching.run_autooptimizer"
     )
     if backend == "nona" and not optimizer:
         raise ValueError(

@@ -136,9 +136,9 @@ stitching:
     m_kpts0: null
     m_kpts1: null
   control_point_matcher: "superpoint-lightglue"
-  # Native mapping keeps calibration functional when Hugin autooptimization is disabled.
-  mapping_backend: "opencv-magsac"
-  projection: "rectilinear"
+  # Use Hugin alignment and General Panini for the default panorama mapping.
+  mapping_backend: "nona"
+  projection: "general-panini"
   # Hugin/libpano projection defaults retained per adjustable projection so
   # switching projections in the UI does not discard another projection's tuning.
   projection_parameters:
@@ -154,8 +154,8 @@ stitching:
     horizontal_fov: 180
     auto_canvas: true
     auto_crop: false
-  # Opt in to Hugin's automatic alignment pass during stitching calibration.
-  run_autooptimizer: false
+  # NONA requires Hugin's automatic alignment pass during stitching calibration.
+  run_autooptimizer: true
   max_output_dimension: null
   offsets: null
   dir_name: null
