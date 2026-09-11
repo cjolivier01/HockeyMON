@@ -45,7 +45,7 @@ def should_publish_complete_independent_copies_with_tracking_last(tmp_path, monk
         original_link(source, target, **kwargs)
 
     monkeypatch.setattr(publication.os, "link", link)
-    result = publication.publish_artifacts(sources, destination)
+    result = publication.publish_artifacts(sources, destination, exact=True)
     assert result.suffix == 0
     assert links[-1] == "tracking.csv"
     for name, source in sources.items():
@@ -85,7 +85,7 @@ def should_serialize_concurrent_generation_reservations(tmp_path):
         results = list(
             pool.map(lambda _: publication.publish_artifacts(sources, destination), range(3))
         )
-    assert sorted(result.suffix for result in results) == [0, 1, 2]
+    assert sorted(result.suffix for result in results) == [1, 2, 3]
     for result in results:
         assert len(result.files) == 4
         assert all(path.exists() for path in result.files.values())
@@ -126,7 +126,7 @@ def should_rollback_partial_publication_and_retain_working_files(
 
         monkeypatch.setattr(publication.os, "link", fail_link)
     with pytest.raises(OSError):
-        publication.publish_artifacts(sources, destination)
+        publication.publish_artifacts(sources, destination, exact=True)
     assert _visible(destination) == []
     assert all(path.exists() for path in sources.values())
     _assert_no_staging(destination)
@@ -246,8 +246,58 @@ def should_preserve_replaced_files_during_failed_publication(tmp_path, monkeypat
 
     monkeypatch.setattr(publication.os, "link", replace_companion)
     with pytest.raises(OSError, match="tracking link failed"):
-        publication.publish_artifacts(sources, destination)
+        publication.publish_artifacts(sources, destination, exact=True)
     assert _visible(destination) == ["camera.csv"]
     assert (destination / "camera.csv").read_bytes() == b"new owner"
     assert "changed ownership" in caplog.text
     _assert_no_staging(destination)
+
+
+@pytest.mark.parametrize(
+    "history,expected",
+    [
+        ([], 1),
+        (["game-tracking_output-with-audio.mp4"], 1),
+        (
+            [
+                "game-tracking_output-with-audio-1.mp4",
+                "game-tracking_output-with-audio-3.mp4",
+                "game-stitched_output-with-audio-3.mp4",
+                "game-stitched_output-with-audio-4.mp4",
+            ],
+            5,
+        ),
+        (["stitched_output-1001.mkv"], 1002),
+        (["rink_mask_0-17.png"], 18),
+    ],
+)
+def should_number_videos_csvs_and_run_mask_above_both_video_histories(tmp_path, history, expected):
+    from hmlib.cli.hmtrack import _deploy_output_artifacts
+
+    sources = _sources(tmp_path / "work")
+    video = tmp_path / "work" / "tracking_output-with-audio.mp4"
+    video.write_bytes(b"video")
+    mask = tmp_path / "work" / "rink_mask_0.png"
+    mask.write_bytes(b"the mask used for this run")
+    destination = tmp_path / "game"
+    destination.mkdir()
+    for name in history:
+        (destination / name).write_bytes(b"preserved")
+    published = _deploy_output_artifacts(
+        output_video_path=str(video),
+        output_video=None,
+        results_folder=str(video.parent),
+        target_deploy_dir=str(destination),
+        game_id="game",
+    )
+    assert published.name == f"game-tracking_output-with-audio-{expected}.mp4"
+    for name, source in sources.items():
+        assert (
+            destination / publication.artifact_name(name, expected)
+        ).read_bytes() == source.read_bytes()
+    mask.write_bytes(b"next run mask")
+    assert (
+        destination / f"rink_mask_0-{expected}.png"
+    ).read_bytes() == b"the mask used for this run"
+    for name in history:
+        assert (destination / name).read_bytes() == b"preserved"

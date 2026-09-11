@@ -1590,6 +1590,9 @@ def _main(args, num_gpu):
         results_folder = os.path.join(".", "output_workdirs", args.game_id)
         os.makedirs(results_folder, exist_ok=True)
         args.work_dir = results_folder
+        # The rink plugin snapshots the mask it actually loads this run.
+        # Clear the previous run's snapshot before any pipeline work starts.
+        Path(results_folder, "rink_mask_0.png").unlink(missing_ok=True)
         try:
             args.game_dir = get_game_dir(args.game_id, assert_exists=False)
         except Exception:
@@ -2418,13 +2421,13 @@ def _deploy_output_artifacts(
     target_deploy_dir: Optional[str],
     game_id: Optional[str],
 ) -> Optional[Path]:
-    """Publish a completed run, reserving one generation for its video and CSVs."""
+    """Publish a completed run with one suffix for its video, CSVs, and rink mask."""
     sources = {}
     if target_deploy_dir:
         sources = {
             path.name: path
             for path in sorted(Path(results_folder).iterdir())
-            if path.suffix == ".csv" and path.is_file()
+            if (path.suffix == ".csv" or path.name == "rink_mask_0.png") and path.is_file()
         }
     source_video = Path(output_video_path) if output_video_path else None
     if source_video is not None and not source_video.is_file():

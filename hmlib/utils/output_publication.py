@@ -90,7 +90,8 @@ def publish_artifacts(
     published files are independent of the working source files.
 
     ``exact`` reserves exactly the requested suffix and raises on collisions.
-    Otherwise a suffix above every existing generation is selected. On
+    Otherwise numbering starts at one, above every existing tracking/stitched
+    video or companion generation, even when some numbers are missing. On
     failure, only names still owned by this attempt are removed; all source
     artifacts remain available for recovery.
     """
@@ -109,12 +110,30 @@ def publish_artifacts(
             raise ValueError("Output publication lock is not a regular file")
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         if not exact:
+            suffix = max(1, suffix)
             patterns = [
                 re.compile(
                     rf"^{re.escape(Path(name).stem)}(?:-(\d+))?{re.escape(Path(name).suffix)}$"
                 )
                 for name in names
             ]
+            patterns.extend(
+                [
+                    re.compile(
+                        r"^(?:.*-)?(?:tracking|stitched)_output(?:-with-audio)?"
+                        r"(?:-(\d+))?\.(?:mp4|mkv|mov|m4v|avi)(?:\.hstream-pin)?$",
+                        re.IGNORECASE,
+                    ),
+                    re.compile(
+                        r"^(?:tracking|detections|camera|camera_fast|hstream_frame_index|"
+                        r"hstream_config_events)(?:-(\d+))?\.csv$"
+                    ),
+                    re.compile(
+                        r"^(?:rink_mask_\d+|hstream_telemetry|hstream_replay)"
+                        r"(?:-(\d+))?\.(?:png|json|jsonl)$"
+                    ),
+                ]
+            )
             for existing in directory.iterdir():
                 for pattern in patterns:
                     match = pattern.fullmatch(existing.name)

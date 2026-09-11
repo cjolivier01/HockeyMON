@@ -26,7 +26,7 @@ Run end-to-end tracking on a game: optional stitching, detections, tracking, jer
 ```bash
 # From a configured game directory
 hmtrack --game-id ev-stockton-1
-# -> $HOME/Videos/ev-stockton-1/ev-stockton-1-tracking_output-with-audio.mp4
+# -> $HOME/Videos/ev-stockton-1/ev-stockton-1-tracking_output-with-audio-1.mp4
 
 # From an explicit input file
 hmtrack --input-video path/to/stitched_output-with-audio.mp4 --output tracking.mp4
@@ -277,3 +277,11 @@ Some commands accept these shared flags:
 
 ## Help
 Each command supports `--help` to print the full set of options and defaults.
+
+
+Completed automatic deployments use a shared numeric suffix for the video,
+CSVs, and the run's `rink_mask_0-N.png` snapshot. Numbering starts at `-1` and
+advances beyond the highest tracking or stitched video or companion number in
+the destination, without filling gaps. For example, `-1`, `-3`, and `-4`
+advance to `-5`. Explicit output filenames keep their requested name and bind
+companions to that suffix; existing files are never overwritten.
