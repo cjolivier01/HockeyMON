@@ -80,8 +80,8 @@ def should_accept_custom_camera_with_complete_explicit_fov():
 @pytest.mark.parametrize(
     "values, message",
     [
-        ({"mapping_backend": "nona"}, "run_autooptimizer"),
-        ({"projection": "general-panini"}, "only rectilinear"),
+        ({"mapping_backend": "nona", "run_autooptimizer": False}, "run_autooptimizer"),
+        ({"mapping_backend": "opencv-magsac", "projection": "general-panini"}, "only rectilinear"),
         ({"run_autooptimizer": "nope"}, "true or false"),
         ({"camera_fov": {"horizontal_fov": float("nan")}}, "finite"),
         ({"rink_config": "missing-rink"}, "Unknown"),
@@ -127,7 +127,12 @@ def should_validate_projection_parameters_and_dynamic_fov():
 
 
 def should_fingerprint_effective_settings_and_preserve_inactive_tuning():
-    config = {"stitching": {"projection_parameters": {"general-panini": [50, 1, 2]}}}
+    config = {
+        "stitching": {
+            "mapping_backend": "opencv-magsac",
+            "projection_parameters": {"general-panini": [50, 1, 2]},
+        }
+    }
     before = copy.deepcopy(config)
     settings = read_stitching_settings(config)
     assert settings.parameters == ()
@@ -345,13 +350,14 @@ def should_forward_effective_config_to_calibration_worker(monkeypatch, tmp_path)
 )
 def should_require_nona_for_nondefault_effective_framing(values):
     with pytest.raises(ValueError, match="requires mapping_backend=nona"):
-        read_stitching_settings({"stitching": values})
+        read_stitching_settings({"stitching": {"mapping_backend": "opencv-magsac", **values}})
 
 
 def should_allow_explicit_zero_rotation_to_disable_native_rink_default():
     settings = read_stitching_settings(
         {
             "stitching": {
+                "mapping_backend": "opencv-magsac",
                 "rink_config": "vallco",
                 "projection_framing": {"rotation_degrees": [0, 0, 0]},
             }

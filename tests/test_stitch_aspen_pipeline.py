@@ -185,7 +185,9 @@ def should_build_aspen_pipeline_for_stitching(monkeypatch, tmp_path):
 
     settings = read_stitching_settings(captured_net["configure_game_config"])
     assert settings.control_point_matcher == "superpoint-lightglue"
-    assert settings.mapping_backend == "opencv-magsac"
+    assert settings.mapping_backend == "nona"
+    assert settings.projection == "general-panini"
+    assert settings.run_autooptimizer
     assert settings.max_output_dimension is None
 
 
