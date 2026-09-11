@@ -10,6 +10,7 @@ import os
 import secrets
 import socket
 import stat
+import subprocess
 import threading
 import traceback
 import webbrowser
@@ -493,7 +494,7 @@ class CalibrationLevelingSelector:
                     self._send_json({"error": "Unknown selector action"}, HTTPStatus.NOT_FOUND)
                 except ValueError as exc:
                     self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
-                except (OSError, RuntimeError) as exc:
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
                     logger.warning("Rink leveling request %s failed: %s", path, exc)
                     self._send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
                 except Exception as exc:
