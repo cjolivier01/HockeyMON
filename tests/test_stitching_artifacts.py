@@ -12,8 +12,10 @@ import cv2
 import numpy as np
 import pytest
 import tifffile
+import yaml
 from stitching_fixtures import write_generation
 
+from hmlib import config as hmlib_config
 from hmlib.stitching import artifacts, configure_stitching
 from hmlib.stitching.artifact_validation import validate_artifact_generation, validate_mapping_tiff
 from hmlib.stitching.calibration_leveling import CalibrationLevelingResult
@@ -30,6 +32,66 @@ def should_publish_all_files_and_allow_nested_readers(tmp_path):
     assert (tmp_path / "first").read_bytes() == (tmp_path / "second").read_bytes() == b"new"
     assert not list(tmp_path.glob(".stitching-stage-*"))
     assert not (tmp_path / artifacts._JOURNAL).exists()
+
+
+@pytest.mark.parametrize("atomic_edit", [False, True])
+def should_rollback_if_expected_config_changes_during_publication(
+    tmp_path, monkeypatch, atomic_edit
+):
+    (tmp_path / "first").write_bytes(b"old artifact")
+    (tmp_path / "config.yaml").write_bytes(b"old config")
+    replace = os.replace
+    changed = False
+
+    def edit_config_after_first_artifact(source, destination):
+        nonlocal changed
+        replace(source, destination)
+        if Path(destination).name == "first" and not changed:
+            changed = True
+            if atomic_edit:
+                concurrent = tmp_path / ".config.concurrent"
+                concurrent.write_bytes(b"concurrent config")
+                replace(concurrent, tmp_path / "config.yaml")
+            else:
+                (tmp_path / "config.yaml").write_bytes(b"concurrent config")
+
+    monkeypatch.setattr(artifacts.os, "replace", edit_config_after_first_artifact)
+    with artifacts.artifact_stage(tmp_path) as stage:
+        (stage / "first").write_bytes(b"new artifact")
+        (stage / "config.yaml").write_bytes(b"new config")
+        with pytest.raises(RuntimeError, match="changed while the generation was staged"):
+            artifacts.publish_artifacts(
+                tmp_path,
+                stage,
+                ["first", "config.yaml"],
+                expected_old_contents={"config.yaml": b"old config"},
+            )
+    assert (tmp_path / "first").read_bytes() == b"old artifact"
+    assert (tmp_path / "config.yaml").read_bytes() == b"concurrent config"
+    assert not (tmp_path / artifacts._JOURNAL).exists()
+
+
+def should_serialize_private_config_saves_with_artifact_publication(tmp_path, monkeypatch):
+    monkeypatch.setitem(
+        hmlib_config.save_private_config.__globals__, "GAME_DIR_BASE", str(tmp_path)
+    )
+    game = tmp_path / "demo"
+    game.mkdir()
+    started, saved = threading.Event(), threading.Event()
+
+    def save():
+        started.set()
+        hmlib_config.save_private_config("demo", {"unrelated": "value"}, verbose=False)
+        saved.set()
+
+    with artifacts.stitching_lock(game):
+        thread = threading.Thread(target=save)
+        thread.start()
+        assert started.wait(1)
+        assert not saved.wait(0.1)
+    thread.join(2)
+    assert saved.is_set()
+    assert yaml.safe_load((game / "config.yaml").read_text()) == {"unrelated": "value"}
 
 
 @pytest.mark.parametrize("failed_replace", [1, 2, 3, 4])
@@ -475,7 +537,7 @@ def should_publish_and_persist_selected_calibration_leveling_settings(tmp_path, 
     game = tmp_path / "game"
     game.mkdir()
     config = {"stitching": {"mapping_backend": "nona", "run_autooptimizer": True}}
-    private, saved, selections = {}, [], []
+    private, selections = {}, []
 
     def select(**kwargs):
         selections.append(kwargs)
@@ -497,8 +559,8 @@ def should_publish_and_persist_selected_calibration_leveling_settings(tmp_path, 
     monkeypatch.setattr(configure_stitching, "get_game_config_private", lambda **kwargs: private)
     monkeypatch.setattr(
         configure_stitching,
-        "save_private_config",
-        lambda **kwargs: saved.append(kwargs["data"].copy()),
+        "_private_config_path",
+        lambda game_id: (game / "config.yaml").resolve(),
     )
     assert configure_stitching.build_stitching_project(
         str(game / "hm_project.pto"),
@@ -510,13 +572,112 @@ def should_publish_and_persist_selected_calibration_leveling_settings(tmp_path, 
     assert len(selections) == 1
     assert selections[0]["game_id"] == "demo"
     assert config["stitching"]["projection_framing"]["rotation_degrees"] == [11, -24, 3]
-    assert saved[-1]["stitching"]["projection_framing"]["rotation_degrees"] == [11, -24, 3]
+    saved = yaml.safe_load((game / "config.yaml").read_text())
+    assert saved["stitching"]["projection_framing"]["rotation_degrees"] == [11, -24, 3]
     manifest = json.loads((game / ".stitching_artifacts.json").read_text())
     assert json.loads(manifest["calibration_settings"])["framing"]["rotation_degrees"] == [
         11,
         -24,
         3,
     ]
+
+
+def should_not_persist_leveling_when_downstream_generation_fails(tmp_path, monkeypatch):
+    images = _source_images(tmp_path)
+    game = tmp_path / "game"
+    game.mkdir()
+    write_generation(game)
+    before = {path.name: path.read_bytes() for path in game.iterdir()}
+    config = {"stitching": {"mapping_backend": "nona", "run_autooptimizer": True}}
+    private = {"unrelated": "keep"}
+
+    monkeypatch.setattr(
+        configure_stitching,
+        "select_calibration_leveling",
+        lambda **kwargs: CalibrationLevelingResult(True, (11, -24, 3)),
+    )
+    monkeypatch.setattr(configure_stitching, "get_game_config_private", lambda **kwargs: private)
+
+    def fail_after_selection(**kwargs):
+        stage = Path(kwargs["project_file_path"]).parent
+        kwargs["calibration_leveling"](
+            stage / ".autooptimiser_out.aligned.pto",
+            stage / "autooptimiser_out.pto",
+            kwargs["image_files"],
+            kwargs["settings"],
+        )
+        raise RuntimeError("downstream NONA failure")
+
+    monkeypatch.setattr(
+        configure_stitching, "_build_stitching_project_in_place", fail_after_selection
+    )
+    with pytest.raises(RuntimeError, match="downstream NONA"):
+        configure_stitching.build_stitching_project(
+            str(game / "hm_project.pto"),
+            images,
+            20,
+            game_id="demo",
+            game_config=config,
+        )
+    assert {
+        path.name: path.read_bytes() for path in game.iterdir() if path.name != ".stitching.lock"
+    } == before
+    assert "projection_framing" not in config["stitching"]
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        ("mapping_backend", "opencv-magsac"),
+        ("projection", "equirectangular"),
+        ("camera_fov", {"horizontal_fov": 105}),
+        ("projection_framing", {"auto_crop": True}),
+        ("projection_framing", {"rotation_degrees": [0, 3, -2]}),
+        ("rink_config", "olympic"),
+    ],
+)
+def should_reject_leveling_when_calibration_config_changes(tmp_path, monkeypatch, change):
+    images = _source_images(tmp_path)
+    game = tmp_path / "game"
+    game.mkdir()
+    write_generation(game)
+    before = {path.name: path.read_bytes() for path in game.iterdir()}
+    config = {"stitching": {"mapping_backend": "nona", "run_autooptimizer": True}}
+    private = {}
+
+    monkeypatch.setattr(
+        configure_stitching,
+        "select_calibration_leveling",
+        lambda **kwargs: CalibrationLevelingResult(True, (11, -24, 3)),
+    )
+    monkeypatch.setattr(configure_stitching, "get_game_config_private", lambda **kwargs: private)
+
+    def change_after_selection(**kwargs):
+        stage = Path(kwargs["project_file_path"]).parent
+        kwargs["calibration_leveling"](
+            stage / ".autooptimiser_out.aligned.pto",
+            stage / "autooptimiser_out.pto",
+            kwargs["image_files"],
+            kwargs["settings"],
+        )
+        config["stitching"][change[0]] = change[1]
+        return _build_fake_generation(**kwargs)
+
+    monkeypatch.setattr(
+        configure_stitching, "_build_stitching_project_in_place", change_after_selection
+    )
+    with pytest.raises(ValueError, match="settings changed"):
+        configure_stitching.build_stitching_project(
+            str(game / "hm_project.pto"),
+            images,
+            20,
+            game_id="demo",
+            game_config=config,
+        )
+    assert {
+        path.name: path.read_bytes() for path in game.iterdir() if path.name != ".stitching.lock"
+    } == before
+    assert not list(game.glob(".stitching-stage-*"))
 
 
 def should_cancel_leveling_without_publishing_a_partial_generation(tmp_path, monkeypatch):
@@ -578,6 +739,7 @@ def should_reuse_frame_content_before_running_matcher_or_invalidating_again(tmp_
 
     monkeypatch.setattr(create_control_points, "calculate_control_points", match)
     monkeypatch.setattr(configure_stitching, "_build_stitching_project_in_place", build)
+    monkeypatch.setattr(configure_stitching, "get_game_config_private", lambda **kwargs: {})
     monkeypatch.setattr(
         configure_stitching,
         "invalidate_stitching_geometry",
@@ -595,8 +757,8 @@ def should_reuse_frame_content_before_running_matcher_or_invalidating_again(tmp_
             game_config=config,
         )
     assert len(matches) == len(builds) == len(invalidations) == 1
-    assert invalidations[0]["game_id"] == "demo"
-    assert invalidations[0]["game_config"] is config
+    assert invalidations[0] == {}
+    assert "ice_contours_mask_count" not in config.get("rink", {})
     assert not list(tmp_path.glob("hm-calibration-input-*"))
     # A real content change must rebuild even though temporary names are ignored.
     create_control_points.configure_stitching(

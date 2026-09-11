@@ -11,7 +11,7 @@ import tempfile
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Mapping
 
 logger = logging.getLogger(__name__)
 _JOURNAL = ".stitching-publication.json"
@@ -37,6 +37,28 @@ def _identity(path: Path):
     if not stat.S_ISREG(info.st_mode):
         raise ValueError(f"Stitching artifact must be a regular file: {path}")
     return [info.st_dev, info.st_ino]
+
+
+def _content(path: Path) -> bytes | None:
+    """Read a small publication target without following replacement symlinks."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 16 * 1024 * 1024:
+            raise ValueError(f"Invalid publication comparison target: {path}")
+        payload = stream.read()
+        after = os.fstat(stream.fileno())
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ):
+        raise RuntimeError(f"Publication comparison target changed while reading: {path}")
+    return payload
 
 
 def _write_journal(directory: Path, journal: dict) -> None:
@@ -91,6 +113,15 @@ def _read_journal(directory: Path) -> dict | None:
                 raise ValueError(f"Invalid stitching recovery identity: {entry!r}")
         if entry.get("new") is None:
             raise ValueError(f"Missing new stitching artifact identity: {entry!r}")
+    for key in ("guarded",):
+        values = journal.get(key, [])
+        if (
+            not isinstance(values, list)
+            or len(set(values)) != len(values)
+            or any(value not in names for value in values)
+        ):
+            raise ValueError(f"Invalid stitching recovery {key}: {path}")
+        journal[key] = values
     return journal
 
 
@@ -106,16 +137,21 @@ def recover_artifacts(directory: Path) -> None:
     previous = stage / "previous"
     if previous.is_symlink() or not previous.is_dir():
         raise ValueError(f"Missing or unsafe stitching recovery backup: {previous}")
+    guarded = set(journal.get("guarded", []))
     for entry in journal["entries"]:
         path = directory / entry["name"]
         current = _identity(path)
         if journal["phase"] == "committed":
             if current != entry["new"]:
+                if entry["name"] in guarded:
+                    continue
                 raise RuntimeError(f"Published stitching artifact changed before recovery: {path}")
             continue
         if current == entry["old"]:
             continue
         if current != entry["new"]:
+            if entry["name"] in guarded:
+                continue
             raise RuntimeError(f"Stitching recovery refuses to replace an unowned artifact: {path}")
         if entry["old"] is None:
             path.unlink()
@@ -165,7 +201,13 @@ def stitching_lock(directory: str | Path, *, blocking: bool = True) -> Iterator[
         lock.release()
 
 
-def publish_artifacts(directory: Path, stage: Path, names: list[str]) -> None:
+def publish_artifacts(
+    directory: Path,
+    stage: Path,
+    names: list[str],
+    *,
+    expected_old_contents: Mapping[str, bytes | None] | None = None,
+) -> None:
     """Replace a validated generation, restoring prior files after interrupted writes.
 
     The caller holds ``stitching_lock``. All files are staged on this filesystem;
@@ -176,6 +218,14 @@ def publish_artifacts(directory: Path, stage: Path, names: list[str]) -> None:
         raise ValueError("Stitching stage must be an owned directory inside the game directory")
     if not names or len(set(names)) != len(names):
         raise ValueError("Stitching publication requires distinct artifact names")
+    expected_old_contents = expected_old_contents or {}
+    if set(expected_old_contents) - set(names):
+        raise ValueError("Expected publication targets must be part of the generation")
+    for name, expected in expected_old_contents.items():
+        if _content(directory / name) != expected:
+            raise RuntimeError(
+                f"Publication target changed while the generation was staged: {directory / name}"
+            )
     previous = stage / "previous"
     previous.mkdir()
     entries = []
@@ -197,10 +247,23 @@ def publish_artifacts(directory: Path, stage: Path, names: list[str]) -> None:
         entries.append({"name": name, "old": old, "new": new})
     _sync_directory(previous)
     _sync_directory(stage)
-    journal = {"version": 1, "stage": stage.name, "phase": "prepared", "entries": entries}
+    journal = {
+        "version": 1,
+        "stage": stage.name,
+        "phase": "prepared",
+        "entries": entries,
+        "guarded": sorted(expected_old_contents),
+    }
     try:
         _write_journal(directory, journal)
         for name in names:
+            if (
+                name in expected_old_contents
+                and _content(directory / name) != expected_old_contents[name]
+            ):
+                raise RuntimeError(
+                    f"Publication target changed while the generation was staged: {directory / name}"
+                )
             os.replace(stage / name, directory / name)
         _sync_directory(directory)
         journal["phase"] = "committed"

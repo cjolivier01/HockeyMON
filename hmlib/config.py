@@ -10,6 +10,7 @@ HockeyMON pipelines (games, rinks, cameras and private overrides).
 import argparse
 import copy
 import os
+import tempfile
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -186,12 +187,31 @@ def get_game_config(game_id: str, root_dir: Optional[str] = None) -> Dict[str, A
 
 
 def save_private_config(game_id: str, data: Dict[str, Any], verbose: bool = True):
-    yaml_file_path = os.path.join(GAME_DIR_BASE, game_id, "config.yaml")
+    from hmlib.stitching.artifacts import stitching_lock
+
+    game_directory = Path(GAME_DIR_BASE) / game_id
+    yaml_file_path = game_directory / "config.yaml"
     data_to_save = copy.deepcopy(data) if isinstance(data, dict) else data
     if isinstance(data_to_save, dict):
         normalize_runtime_config(data_to_save)
-    with open(yaml_file_path, "w") as file:
-        yaml.dump(data_to_save, stream=file, sort_keys=False)
+    with stitching_lock(game_directory):
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".config.yaml.", suffix=".tmp", dir=game_directory
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as file:
+                yaml.dump(data_to_save, stream=file, sort_keys=False)
+                file.flush()
+                os.fsync(file.fileno())
+            os.replace(temporary, yaml_file_path)
+            directory_descriptor = os.open(game_directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        finally:
+            temporary.unlink(missing_ok=True)
     if verbose:
         get_logger(__name__).info("Saved private config to %s", yaml_file_path)
 

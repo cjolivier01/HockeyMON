@@ -49,6 +49,7 @@ class CommandRunner(Protocol):
         *,
         input_text: str | None = None,
         timeout_seconds: float | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
         ...
 
@@ -194,7 +195,13 @@ class CalibrationLevelingSession:
         ):
             path.unlink(missing_ok=True)
 
-    def estimate(self, posts: list[dict], requested_rotation: Any) -> dict[str, Any]:
+    def estimate(
+        self,
+        posts: list[dict],
+        requested_rotation: Any,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, Any]:
         rotation = _coerce_rotation(requested_rotation)
         if rotation[0] != self.published_rotation[0]:
             raise ValueError("Yaw cannot be changed by rink leveling")
@@ -207,13 +214,19 @@ class CalibrationLevelingSession:
                 [self.resolve_binary("pano_trafo"), str(self._sphere)],
                 input_text=points,
                 timeout_seconds=60,
+                cancel_event=cancel_event,
             )
         estimate = estimate_leveling(
             parse_rays(output, len(posts)), self.published_rotation, self.published_rotation[0]
         )
         return asdict(estimate)
 
-    def preview(self, requested_rotation: Any) -> bytes:
+    def preview(
+        self,
+        requested_rotation: Any,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> bytes:
         rotation = _coerce_rotation(requested_rotation)
         if rotation[0] != self.published_rotation[0]:
             raise ValueError("Yaw cannot be changed by rink leveling")
@@ -223,9 +236,23 @@ class CalibrationLevelingSession:
         )
         bounded_settings = replace(
             preview_settings,
-            max_output_dimension=_PREVIEW_MAXIMUM_DIMENSION,
+            max_output_dimension=None,
             max_output_width=_PREVIEW_MAXIMUM_DIMENSION,
         )
+
+        def run_preview_command(
+            command: Sequence[str],
+            *,
+            input_text: str | None = None,
+            timeout_seconds: float | None = None,
+        ) -> str:
+            return self.run(
+                command,
+                input_text=input_text,
+                timeout_seconds=timeout_seconds,
+                cancel_event=cancel_event,
+            )
+
         with self._tool_lock:
             for path in (self._preview_framed, self._preview_project, self._preview_image):
                 path.unlink(missing_ok=True)
@@ -236,12 +263,14 @@ class CalibrationLevelingSession:
                     "aligned stitching project",
                 )
             )
-            apply_projection_framing(
+            framed_geometry = apply_projection_framing(
                 self._preview_framed,
                 preview_settings,
-                self.run,
+                run_preview_command,
                 self.resolve_binary("pano_modify"),
             )
+            if framed_geometry.height > framed_geometry.width * 4:
+                raise ValueError("The rink leveling preview is too tall to render safely")
             self._preview_project.write_bytes(
                 _read_bounded(
                     self._preview_framed,
@@ -252,10 +281,10 @@ class CalibrationLevelingSession:
             cap_projection_canvas(
                 self._preview_project,
                 bounded_settings,
-                self.run,
+                run_preview_command,
                 self.resolve_binary("pano_modify"),
             )
-            self.run(
+            run_preview_command(
                 [
                     self.resolve_binary("nona"),
                     "-m",
@@ -272,8 +301,8 @@ class CalibrationLevelingSession:
                 self._preview_image, _MAXIMUM_IMAGE_BYTES, "rink leveling preview"
             )
             with Image.open(io.BytesIO(payload)) as image:
-                if max(image.size) > _PREVIEW_MAXIMUM_DIMENSION:
-                    raise ValueError("The rink leveling preview exceeded its size limit")
+                if image.width > _PREVIEW_MAXIMUM_DIMENSION:
+                    raise ValueError("The rink leveling preview exceeded its width limit")
                 image.verify()
             return payload
 
@@ -321,6 +350,7 @@ class CalibrationLevelingSelector:
         self._completed = False
         self._state_lock = threading.Lock()
         self._operation_lock = threading.Lock()
+        self._operation_cancel = threading.Event()
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self._latest_preview: tuple[float, float, float] | None = None
@@ -364,6 +394,7 @@ class CalibrationLevelingSelector:
                 self.result = CalibrationLevelingResult(False, self.initial_rotation, True)
                 self._completed = True
                 self._completion.set()
+            self._operation_cancel.set()
         server, server_thread = self._server, self._server_thread
         self._server = None
         self._server_thread = None
@@ -415,6 +446,8 @@ class CalibrationLevelingSelector:
             else:
                 raise ValueError("Unsupported completion action")
             self._completed = True
+            self._operation_cancel.set()
+            self._completion.set()
 
     def _authorized(self, handler: BaseHTTPRequestHandler) -> bool:
         return handler.headers.get("Host", "") in self._allowed_hosts
@@ -466,30 +499,40 @@ class CalibrationLevelingSelector:
                     payload = self._read_json()
                     if path == "/api/estimate":
                         with selector._operation_lock:
+                            selector._operation_cancel.clear()
                             selector._require_active()
-                            estimate = selector.session.estimate(
-                                payload.get("posts", []), payload.get("rotation")
-                            )
                             with selector._state_lock:
                                 selector._latest_preview = None
+                            estimate = selector.session.estimate(
+                                payload.get("posts", []),
+                                payload.get("rotation"),
+                                cancel_event=selector._operation_cancel,
+                            )
+                            selector._require_active()
                         self._send_json(estimate)
                         return
                     if path == "/api/preview":
                         rotation = selector._rotation(payload.get("rotation"))
                         with selector._operation_lock:
+                            selector._operation_cancel.clear()
                             selector._require_active()
-                            preview = selector.session.preview(rotation)
                             with selector._state_lock:
+                                selector._latest_preview = None
+                            preview = selector.session.preview(
+                                rotation, cancel_event=selector._operation_cancel
+                            )
+                            with selector._state_lock:
+                                if selector._completed:
+                                    raise ValueError(
+                                        "This rink leveling session is already complete"
+                                    )
                                 selector._preview_bytes = preview
                                 selector._latest_preview = rotation
                         self._send_json({"preview": f"/preview.png?v={secrets.token_hex(12)}"})
                         return
                     if path == "/api/complete":
                         selector._complete(payload.get("action"), payload.get("rotation"))
-                        try:
-                            self._send_json({"complete": True})
-                        finally:
-                            selector._completion.set()
+                        self._send_json({"complete": True})
                         return
                     self._send_json({"error": "Unknown selector action"}, HTTPStatus.NOT_FOUND)
                 except ValueError as exc:
