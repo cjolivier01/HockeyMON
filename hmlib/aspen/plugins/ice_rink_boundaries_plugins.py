@@ -1,4 +1,7 @@
 import hashlib
+import os
+import tempfile
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
@@ -365,6 +368,7 @@ class IceRinkSegmConfigPlugin(Plugin):
         self._require_geometry_provenance = bool(require_geometry_provenance)
         self._rink_profile = None
         self._rink_geometry_key = None
+        self._snapshot_mask = None
 
     def forward(self, context: Dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
@@ -439,6 +443,33 @@ class IceRinkSegmConfigPlugin(Plugin):
                     revision.encode() + memoryview(raw).tobytes()
                 ).hexdigest()
             self._rink_geometry_key = geometry_key
+            work_dir = context.get("work_dir") or context.get("shared", {}).get("work_dir")
+            if self._rink_profile is not None and work_dir:
+                from hmlib.segm.ice_rink import save_boolean_tensor_as_png
+
+                # configure_ice_rink_mask returns a CPU mask. Preserve that
+                # exact calibration image once, before later runs can change
+                # the game-directory mask. This does not read video frames.
+                mask = self._rink_profile["combined_mask"]
+                if mask is not None:
+                    if self._snapshot_mask is not None:
+                        if not torch.equal(mask, self._snapshot_mask):
+                            raise ValueError(
+                                "Rink mask changed during a run with an output snapshot"
+                            )
+                        return {"rink_profile": self._rink_profile}
+                    destination = Path(work_dir) / "rink_mask_0.png"
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".png", dir=destination.parent, delete=False
+                    ) as temporary:
+                        snapshot = Path(temporary.name)
+                    try:
+                        save_boolean_tensor_as_png(mask, str(snapshot))
+                        os.replace(snapshot, destination)
+                        self._snapshot_mask = mask.clone()
+                    finally:
+                        snapshot.unlink(missing_ok=True)
         if self._rink_profile is None:
             return {}
         return {"rink_profile": self._rink_profile}
@@ -451,6 +482,7 @@ class IceRinkSegmConfigPlugin(Plugin):
             "inputs",
             "game_id",
             "camera_input_geometry",
+            "work_dir",
         }
 
     def output_keys(self):

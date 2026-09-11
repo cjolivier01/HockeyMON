@@ -705,3 +705,20 @@ def should_reject_nonregular_images_without_blocking(tmp_path):
     os.mkfifo(image)
     with pytest.raises(ValueError, match="calibration image"):
         configure_stitching._image_content_provenance([image])
+
+
+@pytest.mark.parametrize("clean_all", [False, True])
+def should_preserve_archived_run_masks_when_invalidating_calibration(
+    tmp_path, monkeypatch, clean_all
+):
+    for name in ["rink_mask_0.png", "rink_mask_1.png", "rink_mask_0-1.png", "rink_mask_0-7.png"]:
+        (tmp_path / name).write_bytes(name.encode())
+    monkeypatch.setattr(configure_stitching, "get_game_config_private", lambda **kwargs: {})
+    if clean_all:
+        configure_stitching.clean_stitch_game_artifacts("game", tmp_path)
+    else:
+        configure_stitching.invalidate_stitching_geometry(tmp_path)
+    assert not (tmp_path / "rink_mask_0.png").exists()
+    assert not (tmp_path / "rink_mask_1.png").exists()
+    for name in ["rink_mask_0-1.png", "rink_mask_0-7.png"]:
+        assert (tmp_path / name).read_bytes() == name.encode()

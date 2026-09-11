@@ -172,3 +172,58 @@ def should_reuse_static_rink_embedding_and_reset_camera_history(tmp_path, monkey
                 sample.pred_track_instances = sample.pred_track_instances[:0]
         with pytest.raises(ValueError, match="requires a profile"):
             controller(invalid)
+
+
+@requires_torch
+def should_snapshot_loaded_mask_once_for_run_publication(tmp_path, monkeypatch):
+    from PIL import Image
+    import numpy as np
+
+    mask = torch.zeros((20, 30), dtype=torch.bool)
+    mask[2:8, 4:12] = True
+    calls = []
+
+    def configure(**kwargs):
+        calls.append(kwargs)
+        return {"combined_mask": mask}
+
+    monkeypatch.setattr("hmlib.segm.ice_rink.configure_ice_rink_mask", configure)
+    plugin = IceRinkSegmConfigPlugin()
+    context = {
+        "data_samples": make_track_data_sample(num_frames=1, ori_shape=(20, 30)),
+        "original_images": torch.zeros(1, 3, 20, 30),
+        "shared": {"game_id": "snapshot-game", "work_dir": str(tmp_path)},
+    }
+    plugin.forward(context)
+    snapshot = tmp_path / "rink_mask_0.png"
+    original = snapshot.read_bytes()
+    assert np.array_equal(np.asarray(Image.open(snapshot)) > 0, mask.numpy())
+    plugin.forward(context)
+    assert len(calls) == 1 and snapshot.read_bytes() == original
+    assert list(tmp_path.iterdir()) == [snapshot]
+
+
+@requires_torch
+def should_reject_changed_mask_in_a_single_published_run(tmp_path, monkeypatch):
+    calls = []
+
+    def configure(**kwargs):
+        calls.append(kwargs)
+        return {
+            "combined_mask": torch.full(kwargs["expected_shape"], len(calls) == 1, dtype=torch.bool)
+        }
+
+    monkeypatch.setattr("hmlib.segm.ice_rink.configure_ice_rink_mask", configure)
+    plugin = IceRinkSegmConfigPlugin(require_geometry_provenance=True)
+    context = {
+        "data_samples": make_track_data_sample(num_frames=1, ori_shape=(20, 30)),
+        "original_images": torch.zeros(1, 3, 20, 30),
+        "camera_input_geometry": {"stitched_geometry_revision": "first"},
+        "shared": {"game_id": "snapshot-game", "work_dir": str(tmp_path)},
+    }
+    plugin.forward(context)
+    original = (tmp_path / "rink_mask_0.png").read_bytes()
+    context["camera_input_geometry"] = {"stitched_geometry_revision": "second"}
+    with pytest.raises(ValueError, match="Rink mask changed"):
+        plugin.forward(context)
+    assert (tmp_path / "rink_mask_0.png").read_bytes() == original

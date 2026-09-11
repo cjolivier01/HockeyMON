@@ -1590,6 +1590,9 @@ def _main(args, num_gpu):
         results_folder = os.path.join(".", "output_workdirs", args.game_id)
         os.makedirs(results_folder, exist_ok=True)
         args.work_dir = results_folder
+        # The rink plugin snapshots the mask it actually loads this run.
+        # Clear the previous run's snapshot before any pipeline work starts.
+        Path(results_folder, "rink_mask_0.png").unlink(missing_ok=True)
         try:
             args.game_dir = get_game_dir(args.game_id, assert_exists=False)
         except Exception:
@@ -2418,13 +2421,13 @@ def _deploy_output_artifacts(
     target_deploy_dir: Optional[str],
     game_id: Optional[str],
 ) -> Optional[Path]:
-    """Publish a completed run, reserving one generation for its video and CSVs."""
+    """Publish a completed run with one suffix for its video, CSVs, and rink mask."""
     sources = {}
     if target_deploy_dir:
         sources = {
             path.name: path
             for path in sorted(Path(results_folder).iterdir())
-            if path.suffix == ".csv" and path.is_file()
+            if (path.suffix == ".csv" or path.name == "rink_mask_0.png") and path.is_file()
         }
     source_video = Path(output_video_path) if output_video_path else None
     if source_video is not None and not source_video.is_file():
@@ -2432,10 +2435,35 @@ def _deploy_output_artifacts(
     if source_video is not None and output_video:
         destination = Path(output_video)
         match = re.search(r"-(\d+)$", destination.stem)
-        suffix = int(match.group(1)) if match else 0
+        if match is None:
+            # An unnumbered requested basename still needs an immutable run
+            # suffix: bare rink_mask_0.png is the mutable calibration cache.
+            same_directory = (
+                target_deploy_dir
+                and destination.parent.resolve() == Path(target_deploy_dir).resolve()
+            )
+            video_sources = dict(sources) if same_directory else {}
+            video_sources[destination.name] = source_video
+            result = publish_artifacts(
+                video_sources,
+                destination.parent,
+                generation_directories=[target_deploy_dir] if target_deploy_dir else (),
+            )
+            if target_deploy_dir and not same_directory:
+                publish_artifacts(
+                    {artifact_name(name, result.suffix): path for name, path in sources.items()},
+                    target_deploy_dir,
+                    exact=True,
+                )
+            return result.files[destination.name]
         # An explicit archive filename fixes the CSV generation as well. A
         # collision must be resolved by the caller, never by overwriting data.
-        csv_sources = {artifact_name(name, suffix): path for name, path in sources.items()}
+        # Preserve the literal suffix, including -0 and leading zeroes: neither
+        # may alias the bare, mutable calibration mask in the game directory.
+        csv_sources = {
+            f"{Path(name).stem}{match.group(0)}{Path(name).suffix}": path
+            for name, path in sources.items()
+        }
         if target_deploy_dir and destination.parent.resolve() == Path(target_deploy_dir).resolve():
             if destination.resolve() != source_video.resolve():
                 csv_sources[destination.name] = source_video

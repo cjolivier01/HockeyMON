@@ -11,7 +11,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from hmlib.utils.finalization import finalize_resources
 
@@ -80,6 +80,7 @@ def publish_artifacts(
     *,
     suffix: int = 0,
     exact: bool = False,
+    generation_directories: Sequence[str | Path] = (),
 ) -> PublishedArtifacts:
     """Copy a generation into destination storage and publish tracking last.
 
@@ -90,9 +91,14 @@ def publish_artifacts(
     published files are independent of the working source files.
 
     ``exact`` reserves exactly the requested suffix and raises on collisions.
-    Otherwise a suffix above every existing generation is selected. On
+    Otherwise numbering starts at one, above every existing tracking/stitched
+    video or companion generation, even when some numbers are missing. On
     failure, only names still owned by this attempt are removed; all source
     artifacts remain available for recovery.
+
+    Additional ``generation_directories`` contribute their existing numbers
+    when an explicit video is saved separately from its game-directory CSVs.
+    Exact companion publication still rejects concurrent destination collisions.
     """
     directory = Path(directory)
     names = list(sources)
@@ -109,17 +115,38 @@ def publish_artifacts(
             raise ValueError("Output publication lock is not a regular file")
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         if not exact:
+            suffix = max(1, suffix)
             patterns = [
                 re.compile(
                     rf"^{re.escape(Path(name).stem)}(?:-(\d+))?{re.escape(Path(name).suffix)}$"
                 )
                 for name in names
             ]
-            for existing in directory.iterdir():
-                for pattern in patterns:
-                    match = pattern.fullmatch(existing.name)
-                    if match:
-                        suffix = max(suffix, int(match.group(1) or 0) + 1)
+            patterns.extend(
+                [
+                    re.compile(
+                        r"^(?:.*-)?(?:tracking|stitched)_output(?:-with-audio)?"
+                        r"(?:-(\d+))?\.(?:mp4|mkv|mov|m4v|avi)(?:\.hstream-pin)?$",
+                        re.IGNORECASE,
+                    ),
+                    re.compile(
+                        r"^(?:tracking|detections|camera|camera_fast|hstream_frame_index|"
+                        r"hstream_config_events)(?:-(\d+))?\.csv$"
+                    ),
+                    re.compile(
+                        r"^(?:rink_mask_\d+|hstream_telemetry|hstream_replay)"
+                        r"(?:-(\d+))?\.(?:png|json|jsonl)$"
+                    ),
+                ]
+            )
+            for history in {directory, *(Path(path) for path in generation_directories)}:
+                if not history.exists():
+                    continue
+                for existing in history.iterdir():
+                    for pattern in patterns:
+                        match = pattern.fullmatch(existing.name)
+                        if match:
+                            suffix = max(suffix, int(match.group(1) or 0) + 1)
         candidates = {name: directory / artifact_name(name, suffix) for name in names}
         while any(os.path.lexists(path) for path in candidates.values()):
             if exact:
