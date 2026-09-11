@@ -330,3 +330,29 @@ def should_number_unnumbered_explicit_output_without_overwriting_calibration(
     assert (game / "tracking-5.csv").exists()
     assert (game / "rink_mask_0-5.png").read_bytes() == b"run mask"
     assert (game / "rink_mask_0.png").read_bytes() == b"current calibration"
+
+
+@pytest.mark.parametrize("suffix", ["-0", "-007"])
+def should_preserve_literal_explicit_video_suffix_for_all_companions(tmp_path, suffix):
+    from hmlib.cli.hmtrack import _deploy_output_artifacts
+
+    sources = _sources(tmp_path / "work")
+    video = tmp_path / "work" / "output.mp4"
+    video.write_bytes(b"video")
+    (video.parent / "rink_mask_0.png").write_bytes(b"run mask")
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "rink_mask_0.png").write_bytes(b"calibration")
+    explicit = game / f"custom{suffix}.mp4"
+    published = _deploy_output_artifacts(
+        output_video_path=str(video),
+        output_video=str(explicit),
+        results_folder=str(video.parent),
+        target_deploy_dir=str(game),
+        game_id="game",
+    )
+    assert published == explicit and published.read_bytes() == b"video"
+    for name, source in sources.items():
+        assert (game / f"{Path(name).stem}{suffix}.csv").read_bytes() == source.read_bytes()
+    assert (game / f"rink_mask_0{suffix}.png").read_bytes() == b"run mask"
+    assert (game / "rink_mask_0.png").read_bytes() == b"calibration"

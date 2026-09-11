@@ -2456,10 +2456,14 @@ def _deploy_output_artifacts(
                     exact=True,
                 )
             return result.files[destination.name]
-        suffix = int(match.group(1)) if match else 0
         # An explicit archive filename fixes the CSV generation as well. A
         # collision must be resolved by the caller, never by overwriting data.
-        csv_sources = {artifact_name(name, suffix): path for name, path in sources.items()}
+        # Preserve the literal suffix, including -0 and leading zeroes: neither
+        # may alias the bare, mutable calibration mask in the game directory.
+        csv_sources = {
+            f"{Path(name).stem}{match.group(0)}{Path(name).suffix}": path
+            for name, path in sources.items()
+        }
         if target_deploy_dir and destination.parent.resolve() == Path(target_deploy_dir).resolve():
             if destination.resolve() != source_video.resolve():
                 csv_sources[destination.name] = source_video
