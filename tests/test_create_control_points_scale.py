@@ -102,7 +102,7 @@ def should_delegate_frame_calibration_with_settings_device_and_temporary_inputs(
     [
         ({"mapping_backend": "opencv-magsac", "scale": 0.5}, "opencv-magsac"),
         ({"mapping_backend": "opencv-affine-ransac", "scale": 0.5}, "opencv-affine-ransac"),
-        ({"mapping_backend": "nona"}, "run_autooptimizer"),
+        ({"mapping_backend": "nona", "run_autooptimizer": False}, "run_autooptimizer"),
         ({"max_output_dimension": 0}, "max_output_dimension"),
         ({"max_output_dimension": 65535}, "max_output_dimension"),
         ({"scale": 0}, "scale"),
