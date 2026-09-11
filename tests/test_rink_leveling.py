@@ -116,6 +116,7 @@ def should_automatically_estimate_without_an_estimate_button():
     assert "if(finishing||(busy&&action==='use'))return" in CALIBRATION_LEVELING_PAGE
     assert "URL.revokeObjectURL" in CALIBRATION_LEVELING_PAGE
     assert "addEventListener('beforeunload',releaseObjectUrls)" in CALIBRATION_LEVELING_PAGE
+    assert "if(failed||finished)" in CALIBRATION_LEVELING_PAGE
     assert "Skip leveling" in CALIBRATION_LEVELING_PAGE
     assert "Cancel calibration" in CALIBRATION_LEVELING_PAGE
 

@@ -1,6 +1,7 @@
 """Durable publication and stable reads of a game's stitching file generation."""
 
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -123,6 +124,19 @@ def _read_journal(directory: Path) -> dict | None:
         ):
             raise ValueError(f"Invalid stitching recovery {key}: {path}")
         journal[key] = values
+    guarded_new_contents = journal.get("guarded_new_contents", {})
+    if (
+        not isinstance(guarded_new_contents, dict)
+        or set(guarded_new_contents) - set(journal["guarded"])
+        or any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in guarded_new_contents.values()
+        )
+    ):
+        raise ValueError(f"Invalid guarded stitching recovery content: {path}")
+    journal["guarded_new_contents"] = guarded_new_contents
     return journal
 
 
@@ -139,6 +153,7 @@ def recover_artifacts(directory: Path) -> None:
     if previous.is_symlink() or not previous.is_dir():
         raise ValueError(f"Missing or unsafe stitching recovery backup: {previous}")
     guarded = set(journal.get("guarded", []))
+    guarded_new_contents = journal.get("guarded_new_contents", {})
     for entry in journal["entries"]:
         path = directory / entry["name"]
         current = _identity(path)
@@ -150,6 +165,13 @@ def recover_artifacts(directory: Path) -> None:
             continue
         if current == entry["old"]:
             continue
+        if current == entry["new"] and entry["name"] in guarded_new_contents:
+            payload = _content(path)
+            if (
+                payload is None
+                or hashlib.sha256(payload).hexdigest() != guarded_new_contents[entry["name"]]
+            ):
+                continue
         if current != entry["new"]:
             if entry["name"] in guarded:
                 continue
@@ -254,6 +276,10 @@ def publish_artifacts(
         "phase": "prepared",
         "entries": entries,
         "guarded": sorted(expected_old_contents),
+        "guarded_new_contents": {
+            name: hashlib.sha256(_content(stage / name) or b"").hexdigest()
+            for name in expected_old_contents
+        },
     }
     try:
         _write_journal(directory, journal)

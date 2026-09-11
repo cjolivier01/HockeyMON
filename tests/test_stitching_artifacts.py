@@ -71,6 +71,37 @@ def should_rollback_if_expected_config_changes_during_publication(
     assert not (tmp_path / artifacts._JOURNAL).exists()
 
 
+def should_preserve_guarded_config_edited_after_its_replacement(tmp_path, monkeypatch):
+    for name in ("first", "last"):
+        (tmp_path / name).write_bytes(b"old artifact")
+    (tmp_path / "config.yaml").write_bytes(b"old config")
+    replace = os.replace
+
+    def edit_config_then_fail(source, destination):
+        if Path(destination).name == "last":
+            raise OSError("injected publication failure")
+        replace(source, destination)
+        if Path(destination).name == "config.yaml":
+            (tmp_path / "config.yaml").write_bytes(b"concurrent config")
+
+    monkeypatch.setattr(artifacts.os, "replace", edit_config_then_fail)
+    with artifacts.artifact_stage(tmp_path) as stage:
+        for name in ("first", "last"):
+            (stage / name).write_bytes(b"new artifact")
+        (stage / "config.yaml").write_bytes(b"new config")
+        with pytest.raises(OSError, match="injected publication failure"):
+            artifacts.publish_artifacts(
+                tmp_path,
+                stage,
+                ["first", "config.yaml", "last"],
+                expected_old_contents={"config.yaml": b"old config"},
+            )
+    assert (tmp_path / "first").read_bytes() == b"old artifact"
+    assert (tmp_path / "last").read_bytes() == b"old artifact"
+    assert (tmp_path / "config.yaml").read_bytes() == b"concurrent config"
+    assert not (tmp_path / artifacts._JOURNAL).exists()
+
+
 def should_serialize_private_config_saves_with_artifact_publication(tmp_path, monkeypatch):
     monkeypatch.setitem(
         hmlib_config.save_private_config.__globals__, "GAME_DIR_BASE", str(tmp_path)
