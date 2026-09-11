@@ -301,3 +301,32 @@ def should_number_videos_csvs_and_run_mask_above_both_video_histories(tmp_path, 
     ).read_bytes() == b"the mask used for this run"
     for name in history:
         assert (destination / name).read_bytes() == b"preserved"
+
+
+@pytest.mark.parametrize("separate_video_directory", [False, True])
+def should_number_unnumbered_explicit_output_without_overwriting_calibration(
+    tmp_path, separate_video_directory
+):
+    from hmlib.cli.hmtrack import _deploy_output_artifacts
+
+    _sources(tmp_path / "work")
+    video = tmp_path / "work" / "output.mp4"
+    video.write_bytes(b"video")
+    (video.parent / "rink_mask_0.png").write_bytes(b"run mask")
+    game = tmp_path / "game"
+    game.mkdir()
+    (game / "rink_mask_0.png").write_bytes(b"current calibration")
+    (game / "game-stitched_output-with-audio-4.mp4").write_bytes(b"old video")
+    video_dir = tmp_path / "movies" if separate_video_directory else game
+    published = _deploy_output_artifacts(
+        output_video_path=str(video),
+        output_video=str(video_dir / "custom.mp4"),
+        results_folder=str(video.parent),
+        target_deploy_dir=str(game),
+        game_id="game",
+    )
+    assert published == video_dir / "custom-5.mp4"
+    assert published.read_bytes() == b"video"
+    assert (game / "tracking-5.csv").exists()
+    assert (game / "rink_mask_0-5.png").read_bytes() == b"run mask"
+    assert (game / "rink_mask_0.png").read_bytes() == b"current calibration"

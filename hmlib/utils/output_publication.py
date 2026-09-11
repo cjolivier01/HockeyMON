@@ -11,7 +11,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from hmlib.utils.finalization import finalize_resources
 
@@ -80,6 +80,7 @@ def publish_artifacts(
     *,
     suffix: int = 0,
     exact: bool = False,
+    generation_directories: Sequence[str | Path] = (),
 ) -> PublishedArtifacts:
     """Copy a generation into destination storage and publish tracking last.
 
@@ -94,6 +95,10 @@ def publish_artifacts(
     video or companion generation, even when some numbers are missing. On
     failure, only names still owned by this attempt are removed; all source
     artifacts remain available for recovery.
+
+    Additional ``generation_directories`` contribute their existing numbers
+    when an explicit video is saved separately from its game-directory CSVs.
+    Exact companion publication still rejects concurrent destination collisions.
     """
     directory = Path(directory)
     names = list(sources)
@@ -134,11 +139,14 @@ def publish_artifacts(
                     ),
                 ]
             )
-            for existing in directory.iterdir():
-                for pattern in patterns:
-                    match = pattern.fullmatch(existing.name)
-                    if match:
-                        suffix = max(suffix, int(match.group(1) or 0) + 1)
+            for history in {directory, *(Path(path) for path in generation_directories)}:
+                if not history.exists():
+                    continue
+                for existing in history.iterdir():
+                    for pattern in patterns:
+                        match = pattern.fullmatch(existing.name)
+                        if match:
+                            suffix = max(suffix, int(match.group(1) or 0) + 1)
         candidates = {name: directory / artifact_name(name, suffix) for name in names}
         while any(os.path.lexists(path) for path in candidates.values()):
             if exact:

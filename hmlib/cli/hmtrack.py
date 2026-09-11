@@ -2435,6 +2435,27 @@ def _deploy_output_artifacts(
     if source_video is not None and output_video:
         destination = Path(output_video)
         match = re.search(r"-(\d+)$", destination.stem)
+        if match is None:
+            # An unnumbered requested basename still needs an immutable run
+            # suffix: bare rink_mask_0.png is the mutable calibration cache.
+            same_directory = (
+                target_deploy_dir
+                and destination.parent.resolve() == Path(target_deploy_dir).resolve()
+            )
+            video_sources = dict(sources) if same_directory else {}
+            video_sources[destination.name] = source_video
+            result = publish_artifacts(
+                video_sources,
+                destination.parent,
+                generation_directories=[target_deploy_dir] if target_deploy_dir else (),
+            )
+            if target_deploy_dir and not same_directory:
+                publish_artifacts(
+                    {artifact_name(name, result.suffix): path for name, path in sources.items()},
+                    target_deploy_dir,
+                    exact=True,
+                )
+            return result.files[destination.name]
         suffix = int(match.group(1)) if match else 0
         # An explicit archive filename fixes the CSV generation as well. A
         # collision must be resolved by the caller, never by overwriting data.

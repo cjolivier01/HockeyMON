@@ -635,7 +635,9 @@ def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: Union[str, Path]
             _STITCH_ARTIFACT_MANIFEST,
         ],
     )
-    removed_files += _delete_globs(game_dir, patterns=["rink_mask_*.png"])
+    removed_files += _delete_globs(
+        game_dir, patterns=[path.name for path in _calibration_masks(game_dir)]
+    )
     removed_files += _delete_extracted_frames(game_dir)
 
     try:
@@ -665,6 +667,15 @@ def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: Union[str, Path]
     return removed_files
 
 
+def _calibration_masks(game_dir: Union[str, Path]) -> list[Path]:
+    # Numbered run snapshots must survive calibration cache invalidation.
+    return [
+        path
+        for path in Path(game_dir).glob("rink_mask_*.png")
+        if re.fullmatch(r"rink_mask_\d+\.png", path.name)
+    ]
+
+
 def invalidate_stitching_geometry(
     game_dir: Union[str, Path],
     *,
@@ -691,7 +702,7 @@ def invalidate_stitching_geometry(
         if game_config is not None:
             for path in paths:
                 _delete_nested_key(game_config, path)
-        for path in [*Path(game_dir).glob("rink_mask_*.png"), Path(game_dir) / "xor_file.png"]:
+        for path in [*_calibration_masks(game_dir), Path(game_dir) / "xor_file.png"]:
             path.unlink(missing_ok=True)
 
 

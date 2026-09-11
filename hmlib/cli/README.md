@@ -283,5 +283,6 @@ Completed automatic deployments use a shared numeric suffix for the video,
 CSVs, and the run's `rink_mask_0-N.png` snapshot. Numbering starts at `-1` and
 advances beyond the highest tracking or stitched video or companion number in
 the destination, without filling gaps. For example, `-1`, `-3`, and `-4`
-advance to `-5`. Explicit output filenames keep their requested name and bind
-companions to that suffix; existing files are never overwritten.
+advance to `-5`. Explicit output filenames with a numeric suffix keep that name and bind
+companions to that suffix. Unnumbered names such as `custom.mp4` become
+`custom-1.mp4` (or the next generation); existing files are never overwritten.
