@@ -146,6 +146,36 @@ def should_conflicting_guid_aborts_the_whole_merge(tmp_path):
         discover_runs([original, conflict])
 
 
+def should_merge_preserve_full_run_configuration_archive(tmp_path):
+    source, merged = tmp_path / "game.db", tmp_path / "merged.db"
+    run_id, _ = recording(source)
+    configuration = (
+        "schema: hstream-run-configuration-v1\n"
+        "resolved: {pipeline: {detector: example}, stitching: {projection: panini}}\n"
+        "input-layers: {baseline: {version: 1}, user: {}, game: {}}\n"
+    )
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            "INSERT INTO config_events VALUES(?,?,?,?,?,?,?,?)",
+            (
+                run_id,
+                2,
+                1,
+                "run-configuration",
+                "startup",
+                "hstream-run-configuration-v1",
+                "run-config.yaml",
+                configuration,
+            ),
+        )
+    merge_databases(merged, [source])
+    with sqlite3.connect(merged) as connection:
+        assert connection.execute(
+            "SELECT run_id,sample_boundary,artifact_contents FROM config_events WHERE kind='run-configuration'"
+        ).fetchone() == (run_id, 1, configuration)
+    assert len(discover_runs([source, merged])) == 1
+
+
 def should_database_training_retains_empty_frames_order_and_policy_boundaries(tmp_path):
     path = tmp_path / "hstream_telemetry-2.db"
     _, mask = recording(path)

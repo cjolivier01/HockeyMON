@@ -4,6 +4,15 @@ Hstream records one `hstream_telemetry.db` (or numbered `hstream_telemetry-N.db`
 
 The database includes the original stitched canvas dimensions, lossless rink mask, mask transform/hash/revision, ordered detections and tracks, fast/Program camera outputs, timestamps and source/reset identities, configuration history, exact native replay inputs, and periodic native checkpoints. Panorama pixels and encoded video are not stored. A 16,000 × 6,500 recording retains native coordinates regardless of the saved video's dimensions.
 
+New hstream recordings also archive the complete resolved launch configuration, the loaded baseline/user/game layers, app and subconfiguration documents, and the contents of referenced text configuration files. This `hstream-run-configuration-v1` YAML archive is stored in `config_events` with `kind='run-configuration'`, `key='startup'`, and `artifact_name='run-config.yaml'`. Layer snapshots preserve parsed values; referenced files preserve their text. Directory references and unavailable optional files are recorded explicitly. Masks are stored separately in `geometries`; model/video binaries remain external. Copying, merging, fingerprinting, and dataset publication preserve the archive with its run GUID.
+
+To retrieve the full configuration for a run:
+
+```sql
+SELECT artifact_contents FROM config_events
+WHERE run_id = '<run-uuid>' AND kind = 'run-configuration';
+```
+
 Train directly from any combination of individual and merged databases:
 
 ```sh
