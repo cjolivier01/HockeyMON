@@ -273,3 +273,32 @@ def should_verify_publication_and_omit_short_geometry_selections(tmp_path):
         connection.execute("UPDATE cameras SET left=left+10")
     with pytest.raises(ValueError, match="published catalog"):
         catalog_split(str(destination / "dataset.yaml"), min_train_frames=32, min_val_frames=32)
+
+
+def should_filter_short_geometries_before_worker_sharding(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from hmlib.camera import camera_gpt_dataset as dataset_module
+
+    path = tmp_path / "run.db"
+    recording(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO geometries SELECT run_id,2,width,height,coordinate_space,'short',mask_codec,mask,mask_sha256,mask_to_tracking FROM geometries"
+        )
+        connection.execute("UPDATE frames SET geometry_id=2 WHERE sample_id=80")
+    games, _ = discover_database_games([path])
+    dataset = dataset_module.CameraPanZoomGPTIterableDataset(
+        games,
+        CameraNorm(200, 100, 8),
+        seq_len=32,
+        target_mode="slow_fast_tlwh",
+        include_pose=False,
+        include_rink=False,
+        shard_games_by_worker=True,
+    )
+    assert len(dataset._games) == 1
+    for worker_id in range(2):
+        monkeypatch.setattr(
+            dataset_module, "get_worker_info", lambda: SimpleNamespace(id=worker_id, num_workers=2)
+        )
+        assert next(iter(dataset))["y"].shape[0] == 32

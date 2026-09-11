@@ -38,6 +38,7 @@ from hmlib.camera.camera_database import (
     load_database_rink,
     scan_database_max_xy,
     split_database_games,
+    usable_database_games,
 )
 from hmlib.camera.camera_transformer import CameraNorm
 from hmlib.camera.rink_context import (
@@ -1351,6 +1352,22 @@ def main(argv: Optional[List[str]] = None):
         }
     geometry_error = None
     try:
+        if any(game.database_path for game in game_csvs):
+            train_games = usable_database_games(
+                train_games, int(args.rollout_len), str(args.target_mode)
+            )
+            val_games = usable_database_games(
+                val_games, int(args.val_seq_len), str(args.target_mode)
+            )
+            if not train_games:
+                raise ValueError("No usable database training passages remain")
+            game_csvs = train_games + val_games
+            selected_runs = {game.run_id for game in game_csvs}
+            data_identity["runs"] = {
+                key: value for key, value in data_identity["runs"].items() if key in selected_runs
+            }
+            data_identity["train_games"] = [game.game_id for game in train_games]
+            data_identity["validation_games"] = [game.game_id for game in val_games]
         # Use a train-only normalization scale for train/val consistency without validation leakage.
         max_x, max_y = _scan_games_max_xy(train_games)
         if args.include_rink and args.rink_input == "grid":

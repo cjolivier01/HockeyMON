@@ -392,3 +392,61 @@ def publish_database_dataset(inputs, destination, min_frames=32):
     except BaseException:
         shutil.rmtree(stage)
         raise
+
+
+def has_database_passage(paths, minimum, target_mode):
+    """Check frame/camera indexes without loading tracks or mask BLOBs."""
+    from bisect import bisect_right
+
+    with read_database(paths.database_path) as connection:
+        run = connection.execute(
+            "SELECT completed FROM runs WHERE run_id=?", (paths.run_id,)
+        ).fetchone()
+        if run is None or not run[0]:
+            raise ValueError(f"Recording is incomplete: {paths.run_id}")
+        boundaries = [
+            row[0]
+            for row in connection.execute(
+                "SELECT sample_boundary FROM config_events WHERE run_id=? ORDER BY sample_boundary",
+                (paths.run_id,),
+            )
+        ]
+        sql = (
+            "SELECT sample_id,source_id,seek_epoch,reset_epoch,pts_ns FROM frames f "
+            "WHERE run_id=? AND geometry_id=? AND EXISTS "
+            "(SELECT 1 FROM cameras c WHERE c.run_id=f.run_id AND c.sample_id=f.sample_id AND role='program') "
+        )
+        if target_mode == "slow_fast_tlwh":
+            sql += "AND EXISTS (SELECT 1 FROM cameras c WHERE c.run_id=f.run_id AND c.sample_id=f.sample_id AND role='fast') "
+        previous, length = None, 0
+        for row in connection.execute(
+            sql + "ORDER BY sample_id", (paths.run_id, paths.geometry_id)
+        ):
+            continuous = (
+                previous is not None
+                and row[0] == previous[0] + 1
+                and tuple(row[1:4]) == tuple(previous[1:4])
+                and row[4] is not None
+                and previous[4] is not None
+                and row[4] > previous[4]
+                and bisect_right(boundaries, row[0]) == bisect_right(boundaries, previous[0])
+            )
+            length = length + 1 if continuous else 1
+            if length >= minimum:
+                return True
+            previous = row
+    return False
+
+
+def usable_database_games(games, minimum, target_mode):
+    import logging
+
+    usable = []
+    for game in games:
+        if not game.database_path or has_database_passage(game, minimum, target_mode):
+            usable.append(game)
+        else:
+            logging.getLogger(__name__).warning(
+                "Excluding %s: no contiguous passage of %d frames", game.game_id, minimum
+            )
+    return usable

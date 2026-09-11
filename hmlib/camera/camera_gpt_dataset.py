@@ -433,6 +433,14 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
             raise ValueError(f"Unknown feature_mode: {self._feature_mode}")
         if self._preload_csv not in {"none", "shard", "all"}:
             raise ValueError(f"Unknown preload_csv: {self._preload_csv}")
+        if any(game.database_path for game in self._games):
+            from hmlib.camera.camera_database import usable_database_games
+
+            self._games = usable_database_games(self._games, self._seq_len, self._target_mode)
+            if not self._games:
+                raise ValueError(
+                    "No usable database passages remain for the requested sequence length"
+                )
 
     @property
     def norm(self) -> CameraNorm:
