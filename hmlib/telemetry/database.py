@@ -156,7 +156,7 @@ def discover_runs(inputs: Iterable[str | Path]) -> list[dict]:
                         raise ValueError(f"Conflicting content for recording GUID {run_id}: {path}")
                     continue
                 runs[run_id] = {**dict(row), "database": str(path), "sha256": fingerprint}
-    return list(runs.values())
+    return [runs[run_id] for run_id in sorted(runs)]
 
 
 def merge_databases(destination: str | Path, inputs: Iterable[str | Path]) -> dict:

@@ -237,3 +237,39 @@ def should_published_dataset_preserves_suffixes_and_trains_from_databases(tmp_pa
     assert len(identity["runs"]) == 2
     with read_database(train[0].database_path) as connection:
         assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
+
+
+def should_preserve_dataset_identity_when_database_packing_changes(tmp_path):
+    a, b, combined = (tmp_path / name for name in ("a.db", "b.db", "combined.db"))
+    recording(a, run_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    recording(b, run_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    merge_databases(combined, [a, b])
+    original, original_identity = discover_database_games([a, b])
+    merged, merged_identity = discover_database_games([combined])
+    assert [game.game_id for game in original] == [game.game_id for game in merged]
+    assert original_identity == merged_identity
+
+
+def should_verify_publication_and_omit_short_geometry_selections(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    first, second = source / "a.db", source / "b.db"
+    run_id, _ = recording(first)
+    recording(second, "game-b")
+    with sqlite3.connect(first) as connection:
+        connection.execute(
+            "INSERT INTO geometries SELECT run_id,2,width,height,coordinate_space,'short',mask_codec,mask,mask_sha256,mask_to_tracking FROM geometries"
+        )
+        connection.execute("UPDATE frames SET geometry_id=2 WHERE sample_id=80")
+    destination = tmp_path / "published"
+    catalog = publish_database_dataset([source], destination, min_frames=32)
+    assert [(item["run_id"], item["geometry_id"]) for item in catalog["rejected"]] == [(run_id, 2)]
+    train, val, _ = catalog_split(
+        str(destination / "dataset.yaml"), min_train_frames=32, min_val_frames=32
+    )
+    assert len(train) == len(val) == 1
+    assert all(game.geometry_id == 1 for game in train + val)
+    with sqlite3.connect(train[0].database_path) as connection:
+        connection.execute("UPDATE cameras SET left=left+10")
+    with pytest.raises(ValueError, match="published catalog"):
+        catalog_split(str(destination / "dataset.yaml"), min_train_frames=32, min_val_frames=32)

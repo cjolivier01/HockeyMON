@@ -196,7 +196,16 @@ def database_config_split(
 
     from hmlib.camera.camera_gpt_dataset import _contiguous_frame_runs
 
-    if set(config) - {"schema", "root", "databases", "include", "exclude", "split"}:
+    if set(config) - {
+        "schema",
+        "root",
+        "databases",
+        "catalog",
+        "recordings",
+        "include",
+        "exclude",
+        "split",
+    }:
         raise ValueError("Unknown database dataset configuration keys")
     root = Path(root_override or config.get("root", ".")).expanduser()
     if not root.is_absolute():
@@ -209,6 +218,36 @@ def database_config_split(
     ):
         raise ValueError("Dataset databases must be a nonempty list of paths/globs")
     games, identity = discover_database_games([str(root / value) for value in inputs])
+    if "catalog" in config:
+        catalog = json.loads((root / config["catalog"]).read_text())
+        if catalog.get("schema") != "hockey-drivegpt-catalog-v2":
+            raise ValueError("Unsupported database publication catalog")
+        expected = {
+            run["run_id"]: {"game_id": run["game_id"], "sha256": run["sha256"]}
+            for run in catalog["runs"]
+        }
+        if expected != identity["runs"]:
+            raise ValueError("Database content differs from the published catalog")
+    if "recordings" in config:
+        selected = config["recordings"]
+        if (
+            not isinstance(selected, list)
+            or not selected
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"run_id", "geometry_id"}
+                or not isinstance(item["run_id"], str)
+                or type(item["geometry_id"]) is not int
+                or item["geometry_id"] <= 0
+                for item in selected
+            )
+        ):
+            raise ValueError("Dataset recordings must list run_id/geometry_id selections")
+        keys = {(item["run_id"], item["geometry_id"]) for item in selected}
+        available = {(game.run_id, game.geometry_id) for game in games}
+        if len(keys) != len(selected) or keys - available:
+            raise ValueError("Unknown or repeated recording geometry selection")
+        games = [game for game in games if (game.run_id, game.geometry_id) in keys]
     include, exclude = config.get("include", ["*"]), config.get("exclude", [])
     if not all(
         isinstance(patterns, list) and all(isinstance(p, str) for p in patterns)
@@ -306,11 +345,17 @@ def publish_database_dataset(inputs, destination, min_frames=32):
                     "longest_run": longest,
                 }
             )
-        if not any(game["longest_run"] >= min_frames for game in coverage):
+        usable = [game for game in coverage if game["longest_run"] >= min_frames]
+        if not usable:
             raise ValueError("No recording has a sufficiently long contiguous training passage")
         catalog = {
             "schema": "hockey-drivegpt-catalog-v2",
-            "games": coverage,
+            "games": usable,
+            "rejected": [
+                {**game, "reason": f"No contiguous passage of {min_frames} frames"}
+                for game in coverage
+                if game not in usable
+            ],
             "runs": [
                 {**run, "database": str(Path(run["database"]).relative_to(stage))}
                 for run in copied_runs
@@ -325,9 +370,16 @@ def publish_database_dataset(inputs, destination, min_frames=32):
             "schema": "hockey-drivegpt-dataset-v2",
             "root": ".",
             "databases": [str(path.relative_to(stage)) for path in copies],
+            "catalog": "catalog.json",
+            "recordings": [
+                {"run_id": game["run_id"], "geometry_id": game["geometry_id"]} for game in usable
+            ],
             "include": ["*"],
             "exclude": [],
-            "split": {"seed": 0, "validation_fraction": 0.1},
+            "split": {
+                "seed": 0,
+                "validation_fraction": 0.1 if len({game["game_id"] for game in usable}) > 1 else 0,
+            },
         }
         (stage / "dataset.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
         (stage / "README.md").write_text(

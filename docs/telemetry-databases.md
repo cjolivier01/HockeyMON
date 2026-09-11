@@ -43,7 +43,7 @@ python -m hmlib.cli.drivegpt_dataset --database=/data/games \
   --database=/data/combined.db --out=/data/training-dataset
 ```
 
-The output contains the database copies, a catalog, and `dataset.yaml`. Masks and configurations stay inside the databases; no CSV companions are created. The existing `--source` publishing option automatically uses this format when databases are present.
+The output contains the database copies, a catalog, and `dataset.yaml`. The generated configuration verifies run fingerprints against the published catalog and explicitly selects usable run/geometry passages; short revisions remain in the databases and are listed as rejected in the catalog. Masks and configurations stay inside the databases; no CSV companions are created. The existing `--source` publishing option automatically uses this format when databases are present.
 
 Inspect and merge:
 
