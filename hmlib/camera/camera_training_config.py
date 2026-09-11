@@ -118,6 +118,12 @@ def catalog_split(
 ) -> tuple[list[GameCsvPaths], list[GameCsvPaths], dict]:
     path = Path(config_path).expanduser().resolve()
     config = read_mapping(path)
+    if config.get("schema") == "hockey-drivegpt-dataset-v2":
+        from hmlib.camera.camera_database import database_config_split
+
+        return database_config_split(
+            config, path, root_override, min_train_frames, min_val_frames, require_rink_grid
+        )
     allowed = {"schema", "root", "catalog", "include", "exclude", "split"}
     if set(config) - allowed or config.get("schema") != "hockey-drivegpt-dataset-v1":
         raise ValueError(f"Invalid dataset schema/keys in {path}")

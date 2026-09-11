@@ -886,3 +886,15 @@ sh_test(
     ],
     env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
+
+sh_test(
+    name = "test_telemetry_database",
+    srcs = ["test_camera_datasets.sh"],
+    args = ["test_telemetry_database.py"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_telemetry_database.py",
+    ],
+)

@@ -159,6 +159,10 @@ def publish_dataset(source: Path, destination: Path, min_frames: int = 32) -> di
     source, destination = source.expanduser().resolve(), destination.expanduser().resolve()
     if not source.is_dir():
         raise ValueError(f"Source directory does not exist: {source}")
+    if any(source.rglob("*.db")) or any(source.rglob("*.sqlite")):
+        from hmlib.camera.camera_database import publish_database_dataset
+
+        return publish_database_dataset([source], destination, min_frames)
     if destination.exists() and (not destination.is_dir() or any(destination.iterdir())):
         raise ValueError(f"Refusing to overwrite nonempty dataset: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -266,13 +270,24 @@ def publish_dataset(source: Path, destination: Path, min_frames: int = 32) -> di
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--database",
+        action="append",
+        default=[],
+        help="Database file/directory/glob; repeat to combine inputs",
+    )
     parser.add_argument("--source", type=Path, default=Path.home() / "Videos")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--min-frames", type=int, default=32)
     args = parser.parse_args()
     if args.min_frames < 2:
         parser.error("--min-frames must be at least 2")
-    catalog = publish_dataset(args.source, args.out, args.min_frames)
+    if args.database:
+        from hmlib.camera.camera_database import publish_database_dataset
+
+        catalog = publish_database_dataset(args.database, args.out, args.min_frames)
+    else:
+        catalog = publish_dataset(args.source, args.out, args.min_frames)
     print(f"Published {len(catalog['games'])} games to {args.out}")
 
 
