@@ -351,6 +351,7 @@ class CalibrationLevelingSelector:
         self._state_lock = threading.Lock()
         self._operation_lock = threading.Lock()
         self._operation_cancel = threading.Event()
+        self._operation_serial = 0
         self._server: ThreadingHTTPServer | None = None
         self._server_thread: threading.Thread | None = None
         self._latest_preview: tuple[float, float, float] | None = None
@@ -421,10 +422,29 @@ class CalibrationLevelingSelector:
         self._server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         self._server_thread.start()
 
-    def _require_active(self) -> None:
+    def _reserve_operation(self) -> int:
+        """Cancel older work and reserve the newest estimate or preview request."""
         with self._state_lock:
             if self._completed:
                 raise ValueError("This rink leveling session is already complete")
+            self._operation_serial += 1
+            self._operation_cancel.set()
+            return self._operation_serial
+
+    def _activate_operation(self, serial: int) -> None:
+        with self._state_lock:
+            if self._completed:
+                raise ValueError("This rink leveling session is already complete")
+            if serial != self._operation_serial:
+                raise ValueError("This rink leveling request was superseded")
+            self._operation_cancel.clear()
+
+    def _require_operation(self, serial: int) -> None:
+        with self._state_lock:
+            if self._completed:
+                raise ValueError("This rink leveling session is already complete")
+            if serial != self._operation_serial:
+                raise ValueError("This rink leveling request was superseded")
 
     def _rotation(self, raw: Any) -> tuple[float, float, float]:
         selected = _coerce_rotation(raw)
@@ -498,9 +518,9 @@ class CalibrationLevelingSelector:
                 try:
                     payload = self._read_json()
                     if path == "/api/estimate":
+                        serial = selector._reserve_operation()
                         with selector._operation_lock:
-                            selector._operation_cancel.clear()
-                            selector._require_active()
+                            selector._activate_operation(serial)
                             with selector._state_lock:
                                 selector._latest_preview = None
                             estimate = selector.session.estimate(
@@ -508,14 +528,14 @@ class CalibrationLevelingSelector:
                                 payload.get("rotation"),
                                 cancel_event=selector._operation_cancel,
                             )
-                            selector._require_active()
+                            selector._require_operation(serial)
                         self._send_json(estimate)
                         return
                     if path == "/api/preview":
                         rotation = selector._rotation(payload.get("rotation"))
+                        serial = selector._reserve_operation()
                         with selector._operation_lock:
-                            selector._operation_cancel.clear()
-                            selector._require_active()
+                            selector._activate_operation(serial)
                             with selector._state_lock:
                                 selector._latest_preview = None
                             preview = selector.session.preview(
@@ -526,6 +546,8 @@ class CalibrationLevelingSelector:
                                     raise ValueError(
                                         "This rink leveling session is already complete"
                                     )
+                                if serial != selector._operation_serial:
+                                    raise ValueError("This rink leveling request was superseded")
                                 selector._preview_bytes = preview
                                 selector._latest_preview = rotation
                         self._send_json({"preview": f"/preview.png?v={secrets.token_hex(12)}"})

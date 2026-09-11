@@ -114,6 +114,8 @@ def should_automatically_estimate_without_an_estimate_button():
     assert "if(drag){scheduleEstimate();return}" in CALIBRATION_LEVELING_PAGE
     assert "if(hit>=0){clearTimeout(estimateTimer);++estimateSerial" in CALIBRATION_LEVELING_PAGE
     assert "if(finishing||(busy&&action==='use'))return" in CALIBRATION_LEVELING_PAGE
+    assert "URL.revokeObjectURL" in CALIBRATION_LEVELING_PAGE
+    assert "addEventListener('beforeunload',releaseObjectUrls)" in CALIBRATION_LEVELING_PAGE
     assert "Skip leveling" in CALIBRATION_LEVELING_PAGE
     assert "Cancel calibration" in CALIBRATION_LEVELING_PAGE
 
@@ -186,6 +188,29 @@ class _BlockingSelectorSession(_SelectorSession):
 
     def preview(self, rotation, *, cancel_event=None):
         return self._block(cancel_event)
+
+
+class _SupersedingSelectorSession(_SelectorSession):
+    def __init__(self):
+        self.first_started = threading.Event()
+        self.calls = 0
+        self.lock = threading.Lock()
+
+    def estimate(self, posts, rotation, *, cancel_event=None):
+        with self.lock:
+            self.calls += 1
+            call = self.calls
+        if call == 1:
+            self.first_started.set()
+            if not cancel_event.wait(5):
+                raise AssertionError("obsolete estimate was not cancelled")
+            raise subprocess.SubprocessError("Stitching command cancelled")
+        return {
+            "rotation_degrees": [17, 4, -3],
+            "inlier_indices": [0, 1, 2],
+            "residual_degrees": [0.1, 0.2, 0.3],
+            "rms_residual_degrees": 0.2,
+        }
 
 
 def _selector_post(selector, path, payload):
@@ -286,6 +311,45 @@ def should_backend_close_cancel_an_active_selector_tool():
     assert not operation_thread.is_alive() and not run_thread.is_alive()
     assert session.cancelled.is_set()
     assert len(result) == 1 and result[0].cancel_calibration
+
+
+def should_cancel_an_obsolete_estimate_before_running_the_latest_request():
+    session = _SupersedingSelectorSession()
+    selector = CalibrationLevelingSelector(
+        session, game_id="demo", bind_host="127.0.0.1", open_browser=False
+    )
+    selector._start_server()
+    posts = [
+        {"image_index": 0, "first": [1, 1], "second": [1, 2]},
+        {"image_index": 0, "first": [2, 1], "second": [2, 2]},
+        {"image_index": 1, "first": [3, 1], "second": [3, 2]},
+    ]
+    errors = []
+
+    def first_estimate():
+        try:
+            _selector_post(
+                selector,
+                "/api/estimate",
+                {"posts": posts, "rotation": [17, -9, 2]},
+            )
+        except urllib.error.HTTPError as error:
+            errors.append(error.code)
+
+    first = threading.Thread(target=first_estimate)
+    first.start()
+    assert session.first_started.wait(2)
+    latest = _selector_post(
+        selector,
+        "/api/estimate",
+        {"posts": posts, "rotation": [17, -9, 2]},
+    )
+    first.join(2)
+    selector.close()
+    assert not first.is_alive()
+    assert errors == [500]
+    assert latest["rotation_degrees"] == [17, 4, -3]
+    assert session.calls == 2
 
 
 def should_distinguish_use_skip_cancel_and_backend_close():

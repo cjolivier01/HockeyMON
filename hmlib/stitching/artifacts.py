@@ -117,6 +117,7 @@ def _read_journal(directory: Path) -> dict | None:
         values = journal.get(key, [])
         if (
             not isinstance(values, list)
+            or any(not isinstance(value, str) for value in values)
             or len(set(values)) != len(values)
             or any(value not in names for value in values)
         ):
