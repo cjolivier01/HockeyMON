@@ -4,15 +4,28 @@ import io
 import json
 import math
 import shutil
+import subprocess
+import sys
 import threading
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import yaml
 from PIL import Image
 
+from hmlib.stitching import configure_stitching as shared_stitching
 from hmlib.stitching.artifacts import stitching_lock
+from hmlib.stitching.calibration_leveling import (
+    CalibrationLevelingResult,
+    CalibrationLevelingSelector,
+    CalibrationLevelingSession,
+)
+from hmlib.stitching.calibration_leveling_page import PAGE as CALIBRATION_LEVELING_PAGE
 from hmlib.stitching.leveling_editor import LevelingSession
 from hmlib.stitching.projections import read_panorama_geometry
 from hmlib.stitching.rink_leveling import (
@@ -92,6 +105,436 @@ def should_validate_original_source_coordinates_and_pano_trafo_output():
     for invalid in ("nan 899.5\n" * 6, "3600 0\n" * 6, "1 2 3\n" * 6):
         with pytest.raises(ValueError):
             parse_rays(invalid, 3)
+
+
+def should_automatically_estimate_without_an_estimate_button():
+    assert 'id="estimate"' not in CALIBRATION_LEVELING_PAGE
+    assert "setTimeout" in CALIBRATION_LEVELING_PAGE
+    assert ",150)" in CALIBRATION_LEVELING_PAGE
+    assert "if(drag){scheduleEstimate();return}" in CALIBRATION_LEVELING_PAGE
+    assert "if(hit>=0){clearTimeout(estimateTimer);++estimateSerial" in CALIBRATION_LEVELING_PAGE
+    assert "if(finishing||(busy&&action==='use'))return" in CALIBRATION_LEVELING_PAGE
+    assert "URL.revokeObjectURL" in CALIBRATION_LEVELING_PAGE
+    assert "addEventListener('beforeunload',releaseObjectUrls)" in CALIBRATION_LEVELING_PAGE
+    assert "if(failed||finished)" in CALIBRATION_LEVELING_PAGE
+    assert "Skip leveling" in CALIBRATION_LEVELING_PAGE
+    assert "Cancel calibration" in CALIBRATION_LEVELING_PAGE
+
+
+def should_run_selector_tools_with_final_calibration_locale_and_context(monkeypatch, tmp_path):
+    captured = {}
+
+    def run(command, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(stdout="converted")
+
+    monkeypatch.setattr(shared_stitching.subprocess, "run", run)
+    token = shared_stitching._command_directory.set(tmp_path)
+    try:
+        assert (
+            shared_stitching._run_stitching_command(
+                ["pano_trafo", "sphere.pto"], input_text="0 1 2\n", timeout_seconds=60
+            )
+            == "converted"
+        )
+    finally:
+        shared_stitching._command_directory.reset(token)
+    assert captured["cwd"] == tmp_path
+    assert captured["env"]["LC_ALL"] == "C"
+    assert captured["input"] == "0 1 2\n"
+    assert captured["timeout"] == 60
+
+
+def should_terminate_a_cancelled_stitching_tool_promptly():
+    cancelled = threading.Event()
+    timer = threading.Timer(0.25, cancelled.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.SubprocessError, match="cancelled"):
+            shared_stitching._run_stitching_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)",
+                ],
+                timeout_seconds=10,
+                cancel_event=cancelled,
+            )
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 2
+
+
+class _SelectorSession:
+    published_rotation = (17.0, -9.0, 2.0)
+    prepared = SimpleNamespace(image_sizes=((160, 100), (160, 100)))
+    source_images = [b"left", b"right"]
+
+
+class _BlockingSelectorSession(_SelectorSession):
+    def __init__(self):
+        self.started = threading.Event()
+        self.cancelled = threading.Event()
+
+    def _block(self, cancel_event):
+        self.started.set()
+        if not cancel_event.wait(5):
+            raise AssertionError("selector operation was not cancelled")
+        self.cancelled.set()
+        raise subprocess.SubprocessError("Stitching command cancelled")
+
+    def estimate(self, posts, rotation, *, cancel_event=None):
+        return self._block(cancel_event)
+
+    def preview(self, rotation, *, cancel_event=None):
+        return self._block(cancel_event)
+
+
+class _SupersedingSelectorSession(_SelectorSession):
+    def __init__(self):
+        self.first_started = threading.Event()
+        self.calls = 0
+        self.lock = threading.Lock()
+
+    def estimate(self, posts, rotation, *, cancel_event=None):
+        with self.lock:
+            self.calls += 1
+            call = self.calls
+        if call == 1:
+            self.first_started.set()
+            if not cancel_event.wait(5):
+                raise AssertionError("obsolete estimate was not cancelled")
+            raise subprocess.SubprocessError("Stitching command cancelled")
+        return {
+            "rotation_degrees": [17, 4, -3],
+            "inlier_indices": [0, 1, 2],
+            "residual_degrees": [0.1, 0.2, 0.3],
+            "rms_residual_degrees": 0.2,
+        }
+
+
+def _selector_post(selector, path, payload):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{selector.port}{path}",
+        data=json.dumps(payload).encode(),
+        headers={
+            "Content-Type": "application/json",
+            "X-Editor-Token": selector._token,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=3) as response:
+        return json.loads(response.read())
+
+
+def _wait_for_selector(selector):
+    deadline = time.monotonic() + 3
+    while not selector.access_urls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert selector.access_urls
+
+
+@pytest.mark.parametrize(
+    "operation,action,expected_cancel",
+    [("estimate", "skip", False), ("preview", "cancel", True)],
+)
+def should_finish_promptly_while_a_selector_tool_is_active(operation, action, expected_cancel):
+    session = _BlockingSelectorSession()
+    selector = CalibrationLevelingSelector(
+        session, game_id="demo", bind_host="127.0.0.1", open_browser=False
+    )
+    result = []
+    run_thread = threading.Thread(target=lambda: result.append(selector.run()))
+    run_thread.start()
+    _wait_for_selector(selector)
+    operation_errors = []
+    payload = (
+        {
+            "posts": [
+                {"image_index": 0, "first": [1, 1], "second": [1, 2]},
+                {"image_index": 0, "first": [2, 1], "second": [2, 2]},
+                {"image_index": 1, "first": [3, 1], "second": [3, 2]},
+            ],
+            "rotation": [17, -9, 2],
+        }
+        if operation == "estimate"
+        else {"rotation": [17, 4, -3]}
+    )
+
+    def operate():
+        try:
+            _selector_post(selector, f"/api/{operation}", payload)
+        except urllib.error.HTTPError as error:
+            operation_errors.append(error.code)
+
+    operation_thread = threading.Thread(target=operate)
+    operation_thread.start()
+    assert session.started.wait(2)
+    started = time.monotonic()
+    assert _selector_post(
+        selector, "/api/complete", {"action": action, "rotation": [17, 4, -3]}
+    ) == {"complete": True}
+    operation_thread.join(2)
+    run_thread.join(2)
+    assert time.monotonic() - started < 2
+    assert not operation_thread.is_alive() and not run_thread.is_alive()
+    assert session.cancelled.is_set()
+    assert operation_errors == [500]
+    assert len(result) == 1 and result[0].cancel_calibration is expected_cancel
+
+
+def should_backend_close_cancel_an_active_selector_tool():
+    session = _BlockingSelectorSession()
+    selector = CalibrationLevelingSelector(
+        session, game_id="demo", bind_host="127.0.0.1", open_browser=False
+    )
+    result = []
+    run_thread = threading.Thread(target=lambda: result.append(selector.run()))
+    run_thread.start()
+    _wait_for_selector(selector)
+    operation_thread = threading.Thread(
+        target=lambda: pytest.raises(
+            urllib.error.HTTPError,
+            _selector_post,
+            selector,
+            "/api/preview",
+            {"rotation": [17, 4, -3]},
+        )
+    )
+    operation_thread.start()
+    assert session.started.wait(2)
+    started = time.monotonic()
+    selector.close()
+    operation_thread.join(2)
+    run_thread.join(2)
+    assert time.monotonic() - started < 2
+    assert not operation_thread.is_alive() and not run_thread.is_alive()
+    assert session.cancelled.is_set()
+    assert len(result) == 1 and result[0].cancel_calibration
+
+
+def should_cancel_an_obsolete_estimate_before_running_the_latest_request():
+    session = _SupersedingSelectorSession()
+    selector = CalibrationLevelingSelector(
+        session, game_id="demo", bind_host="127.0.0.1", open_browser=False
+    )
+    selector._start_server()
+    posts = [
+        {"image_index": 0, "first": [1, 1], "second": [1, 2]},
+        {"image_index": 0, "first": [2, 1], "second": [2, 2]},
+        {"image_index": 1, "first": [3, 1], "second": [3, 2]},
+    ]
+    errors = []
+
+    def first_estimate():
+        try:
+            _selector_post(
+                selector,
+                "/api/estimate",
+                {"posts": posts, "rotation": [17, -9, 2]},
+            )
+        except urllib.error.HTTPError as error:
+            errors.append(error.code)
+
+    first = threading.Thread(target=first_estimate)
+    first.start()
+    assert session.first_started.wait(2)
+    latest = _selector_post(
+        selector,
+        "/api/estimate",
+        {"posts": posts, "rotation": [17, -9, 2]},
+    )
+    first.join(2)
+    selector.close()
+    assert not first.is_alive()
+    assert errors == [500]
+    assert latest["rotation_degrees"] == [17, 4, -3]
+    assert session.calls == 2
+
+
+def should_distinguish_use_skip_cancel_and_backend_close():
+    selector = CalibrationLevelingSelector(_SelectorSession(), game_id="demo")
+    selector._complete("skip", [99, 1, 2])
+    assert selector.result == CalibrationLevelingResult(False, (17, -9, 2))
+
+    selector = CalibrationLevelingSelector(_SelectorSession(), game_id="demo")
+    selector._complete("cancel", [17, 1, 2])
+    assert selector.result.cancel_calibration
+
+    selector = CalibrationLevelingSelector(_SelectorSession(), game_id="demo")
+    selector._latest_preview = (17, 4, -3)
+    with pytest.raises(ValueError, match="Preview"):
+        selector._complete("use", [17, 4, -2])
+    selector._complete("use", [91, 4, -3])
+    assert selector.result == CalibrationLevelingResult(True, (17, 4, -3))
+
+    selector = CalibrationLevelingSelector(_SelectorSession(), game_id="demo")
+    selector.close()
+    assert selector.result.cancel_calibration
+
+
+def should_authenticate_selector_images_and_reject_dns_rebinding():
+    selector = CalibrationLevelingSelector(
+        _SelectorSession(), game_id="demo", bind_host="127.0.0.1", open_browser=False
+    )
+    selector._start_server()
+    base = f"http://127.0.0.1:{selector.port}"
+    try:
+        with urllib.request.urlopen(base + "/", timeout=2) as response:
+            assert b"Level the rink" in response.read()
+        with pytest.raises(urllib.error.HTTPError) as unauthorized:
+            urllib.request.urlopen(base + "/image/0", timeout=2)
+        assert unauthorized.value.code == 403
+        request = urllib.request.Request(
+            base + "/image/0", headers={"X-Editor-Token": selector._token}
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            assert response.read() == b"left"
+        rebound = urllib.request.Request(base + "/", headers={"Host": "attacker.example"})
+        with pytest.raises(urllib.error.HTTPError) as forbidden:
+            urllib.request.urlopen(rebound, timeout=2)
+        assert forbidden.value.code == 403
+    finally:
+        selector.close()
+
+
+def _calibration_leveling_session(tmp_path):
+    images = [tmp_path / "left.png", tmp_path / "right.png"]
+    for index, path in enumerate(images):
+        Image.new("RGB", (160, 100), (20 + index * 50, 80, 140)).save(path)
+    project = (
+        'p f19 w4000 h2000 v150 P"110 10 -10" n"PNG"\n'
+        'i w160 h100 f0 v100 y0 p0 r0 n"left.png"\n'
+        'i w160 h100 f0 v100 y0 p0 r0 n"right.png"\n'
+    )
+    aligned = tmp_path / ".autooptimiser_out.aligned.pto"
+    framed = tmp_path / "autooptimiser_out.pto"
+    aligned.write_text(project)
+    framed.write_text(project)
+    settings = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": "nona",
+                "run_autooptimizer": True,
+                "projection": "general-panini",
+                "projection_parameters": {"general-panini": [110, 10, -10]},
+                "projection_framing": {
+                    "auto_fov": True,
+                    "auto_canvas": True,
+                    "auto_crop": True,
+                    "rotation_degrees": [17, -9, 2],
+                },
+            }
+        }
+    )
+    commands = []
+
+    def run(command, *, input_text=None, timeout_seconds=None, cancel_event=None):
+        commands.append((list(command), input_text, timeout_seconds))
+        tool = Path(command[0]).name
+        if tool == "pano_trafo":
+            return "1000 1000\n1000 700\n1800 1000\n1800 700\n2600 1000\n2600 700\n"
+        if tool == "pano_modify":
+            output = Path(command[command.index("-o") + 1])
+            source = Path(command[-1])
+            text = source.read_text()
+            canvas = next(
+                (item.split("=", 1)[1] for item in command if item.startswith("--canvas=")), None
+            )
+            if canvas and canvas != "AUTO":
+                width, height = canvas.split("x")
+                text = text.replace("w4000 h2000", f"w{width} h{height}")
+            output.write_text(text)
+            return ""
+        if tool == "nona":
+            output = Path(command[command.index("-o") + 1])
+            geometry = read_panorama_geometry(command[-1])
+            Image.new("RGB", (geometry.width, geometry.height), (40, 100, 150)).save(output)
+            return ""
+        raise AssertionError(command)
+
+    session = CalibrationLevelingSession(
+        aligned,
+        framed,
+        images,
+        settings,
+        run,
+        lambda executable: f"/tools/{executable}",
+    )
+    return session, commands
+
+
+def should_require_posts_from_both_cameras_and_pin_yaw_server_side(tmp_path):
+    session, commands = _calibration_leveling_session(tmp_path)
+    posts = [
+        {"image_index": 0, "first": [10, 10], "second": [10, 80]},
+        {"image_index": 0, "first": [50, 10], "second": [50, 80]},
+        {"image_index": 0, "first": [90, 10], "second": [90, 80]},
+    ]
+    try:
+        with pytest.raises(ValueError, match="each camera"):
+            session.estimate(posts, [17, -9, 2])
+        posts[-1]["image_index"] = 1
+        with pytest.raises(ValueError, match="Yaw"):
+            session.estimate(posts, [18, -9, 2])
+        session.estimate(posts, [17, -9, 2])
+        assert commands[-1][0][0] == "/tools/pano_trafo"
+        assert commands[-1][1].count("\n") == 6
+        assert commands[-1][2] == 60
+    finally:
+        session.close()
+
+
+def should_frame_exact_selected_settings_before_downscaling_preview(tmp_path):
+    session, commands = _calibration_leveling_session(tmp_path)
+    try:
+        preview = session.preview([17, -12.5, 3.25])
+        assert preview.startswith(b"\x89PNG")
+        projection, cap, nona = [entry[0] for entry in commands]
+        assert projection[0] == "/tools/pano_modify"
+        assert "--projection=19" in projection
+        assert "--projection-parameter=110 10 -10" in projection
+        assert "--rotate=17,-12.5,3.25" in projection
+        assert "--fov=AUTO" in projection
+        assert "--canvas=AUTO" in projection
+        assert "--crop=AUTO" in projection
+        assert cap[0] == "/tools/pano_modify"
+        assert "--canvas=1600x800" in cap
+        assert nona[0] == "/tools/nona"
+        assert commands[-1][2] == 60
+        assert read_panorama_geometry(session._preview_project).width == 1600
+    finally:
+        session.close()
+
+
+def should_cap_preview_width_without_over_downscaling_a_tall_panorama(tmp_path):
+    session, commands = _calibration_leveling_session(tmp_path)
+    tall_project = session.aligned_project.read_text().replace("w4000 h2000", "w1000 h4000")
+    session.aligned_project.write_text(tall_project)
+    session.framed_project.write_text(tall_project)
+    try:
+        preview = session.preview([17, -12.5, 3.25])
+        with Image.open(io.BytesIO(preview)) as image:
+            assert image.size == (1000, 4000)
+        assert [Path(command[0]).name for command, _, _ in commands] == [
+            "pano_modify",
+            "nona",
+        ]
+    finally:
+        session.close()
+
+
+def should_reject_an_extremely_tall_preview_before_running_nona(tmp_path):
+    session, commands = _calibration_leveling_session(tmp_path)
+    tall_project = session.aligned_project.read_text().replace("w4000 h2000", "w1000 h4002")
+    session.aligned_project.write_text(tall_project)
+    try:
+        with pytest.raises(ValueError, match="too tall"):
+            session.preview([17, -12.5, 3.25])
+        assert [Path(command[0]).name for command, _, _ in commands] == ["pano_modify"]
+    finally:
+        session.close()
 
 
 def _game(tmp_path, *, rotation=None):

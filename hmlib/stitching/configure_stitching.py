@@ -7,6 +7,7 @@ estimation and per-game synchronization into reusable functions.
 @see @ref hmlib.stitching.hugin.configure_control_points "configure_control_points"
 """
 
+import copy
 import hashlib
 import json
 import logging
@@ -17,6 +18,8 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
+import time
 from contextvars import ContextVar
 from dataclasses import replace
 from functools import partial
@@ -27,8 +30,10 @@ import cv2
 import numpy as np
 import tifffile
 import torch
+import yaml
 from PIL import Image
 
+import hmlib.config as hmlib_config
 from hmlib.config import (
     get_game_config_private,
     get_nested_value,
@@ -50,13 +55,22 @@ from hmlib.stitching.calibration import (
     calibration_candidates,
     sample_frame_indices,
 )
+from hmlib.stitching.calibration_leveling import (
+    CalibrationLevelingCancelled,
+    CalibrationLevelingResult,
+    select_calibration_leveling,
+)
 from hmlib.stitching.control_points import calculate_control_points
 from hmlib.stitching.homography_maps import (
     create_opencv_affine_ransac_mapping_files,
     create_opencv_magsac_mapping_files,
 )
 from hmlib.stitching.hugin import configure_control_points, write_control_points
-from hmlib.stitching.projections import apply_projection, set_source_horizontal_fov
+from hmlib.stitching.projections import (
+    apply_projection_framing,
+    cap_projection_canvas,
+    set_source_horizontal_fov,
+)
 from hmlib.stitching.settings import MAPPING_BACKENDS as MAPPING_BACKENDS
 from hmlib.stitching.settings import OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS
 from hmlib.stitching.settings import StitchingSettings
@@ -76,6 +90,31 @@ logger = logging.getLogger(__name__)
 _STITCH_FRAME_TIME_PATH = ("stitching", "stitch_frame_time")
 _STITCH_FRAME_TIME_ALT_PATH = ("stitching", "stitch-frame-time")
 _STITCH_ARTIFACT_MANIFEST = ".stitching_artifacts.json"
+_STITCH_ROTATION_PATH = "stitching.projection_framing.rotation_degrees"
+_STITCH_GEOMETRY_CONFIG_PATHS = (
+    ("stitching", "control_points"),
+    ("rink", "scoreboard", "perspective_polygon"),
+    ("rink", "ice_contours_mask_count"),
+    ("rink", "ice_contours_mask_centroid"),
+    ("rink", "ice_contours_combined_bbox"),
+)
+_CALIBRATION_CONFIG_KEYS = (
+    "control_point_matcher",
+    "mapping_backend",
+    "projection",
+    "projection_parameters",
+    "run_autooptimizer",
+    "camera_configs",
+    "camera_config",
+    "camera_fov",
+    "projection_framing",
+    "rink_config",
+    "rink_configs",
+    "max_output_dimension",
+    "max_output_width",
+    "calibration_frame_count",
+    "max_control_points",
+)
 
 
 _stitch_game_lock = stitching_lock
@@ -102,6 +141,11 @@ def _resolve_local_binary(executable: str) -> Optional[str]:
         if bin_path.is_file() and os.access(bin_path, os.X_OK):
             return str(bin_path)
     return None
+
+
+def _resolve_stitching_binary(executable: str) -> str:
+    """Resolve a bundled tool consistently for final and preview commands."""
+    return _resolve_local_binary(executable) or executable
 
 
 def _save_stitched_reference_frame(dir_name: Union[str, Path]) -> None:
@@ -143,23 +187,81 @@ def get_enblend_bin() -> str:
     return "enblend"
 
 
-def _run_stitching_command(cmd: Sequence[str]) -> str:
+def _run_stitching_command(
+    cmd: Sequence[str],
+    *,
+    input_text: Optional[str] = None,
+    timeout_seconds: Optional[float] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> str:
     """Run an external stitching command and fail if it does not complete."""
     logger.info("Running stitching command: %s", " ".join(cmd))
-    try:
-        result = subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            cwd=_command_directory.get(),
-        )
-    except subprocess.CalledProcessError as exc:
-        logger.error("Stitching command failed: %s\n%s", " ".join(cmd), exc.stdout)
-        raise
-    logger.info("%s", result.stdout)
-    return result.stdout
+    environment = os.environ.copy()
+    environment["LC_ALL"] = "C"
+    if cancel_event is None:
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=_command_directory.get(),
+                env=environment,
+                input=input_text,
+                timeout=timeout_seconds,
+            )
+        except subprocess.CalledProcessError as exc:
+            logger.error("Stitching command failed: %s\n%s", " ".join(cmd), exc.stdout)
+            raise
+        logger.info("%s", result.stdout)
+        return result.stdout
+
+    if cancel_event.is_set():
+        raise subprocess.SubprocessError("Stitching command cancelled")
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        cwd=_command_directory.get(),
+        env=environment,
+    )
+    deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+    pending_input = input_text
+    while True:
+        if cancel_event.is_set():
+            if process.poll() is None:
+                try:
+                    process.terminate()
+                except ProcessLookupError:
+                    pass
+            try:
+                process.communicate(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+            raise subprocess.SubprocessError("Stitching command cancelled")
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            process.kill()
+            output, _ = process.communicate()
+            raise subprocess.TimeoutExpired(cmd, timeout_seconds, output=output)
+        try:
+            output, _ = process.communicate(
+                input=pending_input,
+                timeout=min(0.05, remaining) if remaining is not None else 0.05,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            pending_input = None
+    if process.returncode:
+        error = subprocess.CalledProcessError(process.returncode, cmd, output=output)
+        logger.error("Stitching command failed: %s\n%s", " ".join(cmd), output)
+        raise error
+    logger.info("%s", output)
+    return output
 
 
 def get_tiff_tag_value(tiff_tag):
@@ -676,6 +778,54 @@ def _calibration_masks(game_dir: Union[str, Path]) -> list[Path]:
     ]
 
 
+def _remove_stitching_geometry_config(config: Dict[str, Any]) -> bool:
+    """Remove settings derived from a particular published panorama."""
+    changed = False
+    for path in _STITCH_GEOMETRY_CONFIG_PATHS:
+        changed |= _delete_nested_key(config, path)
+    return changed
+
+
+def _calibration_config_guard(config: Optional[Dict[str, Any]]) -> str:
+    """Fingerprint settings that must remain fixed after an exact preview."""
+    normalized = copy.deepcopy(config) if isinstance(config, dict) else {}
+    normalize_runtime_config(normalized)
+    stitching = normalized.get("stitching")
+    if not isinstance(stitching, dict):
+        return yaml.safe_dump({"stitching": stitching}, sort_keys=True)
+    relevant = {
+        key: copy.deepcopy(stitching[key]) for key in _CALIBRATION_CONFIG_KEYS if key in stitching
+    }
+    return yaml.safe_dump(relevant, sort_keys=True)
+
+
+def _private_config_path(game_id: str) -> Path:
+    return (Path(hmlib_config.GAME_DIR_BASE) / game_id).resolve() / "config.yaml"
+
+
+def _serialize_private_config(config: Dict[str, Any]) -> str:
+    normalized = copy.deepcopy(config)
+    normalize_runtime_config(normalized)
+    return yaml.dump(normalized, sort_keys=False)
+
+
+def _read_private_config_snapshot(path: Path) -> Tuple[Dict[str, Any], Optional[bytes]]:
+    """Read the exact private config generation that publication must replace."""
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError:
+        return {}, None
+    if len(payload) > 16 * 1024 * 1024:
+        raise ValueError(f"Private config is too large: {path}")
+    loaded = yaml.safe_load(payload)
+    if loaded is None:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Private config must contain a mapping: {path}")
+    normalize_runtime_config(loaded)
+    return loaded, payload
+
+
 def invalidate_stitching_geometry(
     game_dir: Union[str, Path],
     *,
@@ -683,25 +833,14 @@ def invalidate_stitching_geometry(
     game_config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Drop derived panorama caches only after a replacement has been validated."""
-    paths = (
-        ("stitching", "control_points"),
-        ("rink", "scoreboard", "perspective_polygon"),
-        ("rink", "ice_contours_mask_count"),
-        ("rink", "ice_contours_mask_centroid"),
-        ("rink", "ice_contours_combined_bbox"),
-    )
     with stitching_lock(game_dir):
         if game_id is not None:
             config = get_game_config_private(game_id=game_id) or {}
             normalize_runtime_config(config)
-            changed = False
-            for path in paths:
-                changed |= _delete_nested_key(config, path)
-            if changed:
+            if _remove_stitching_geometry_config(config):
                 save_private_config(game_id=game_id, data=config, verbose=True)
         if game_config is not None:
-            for path in paths:
-                _delete_nested_key(game_config, path)
+            _remove_stitching_geometry_config(game_config)
         for path in [*_calibration_masks(game_dir), Path(game_dir) / "xor_file.png"]:
             path.unlink(missing_ok=True)
 
@@ -805,6 +944,27 @@ def _output_scale_provenance(scale: Optional[float]) -> str:
     return format(1.0 if scale is None else float(scale), ".17g")
 
 
+CalibrationLevelingCallback = Callable[
+    [Path, Path, Sequence[str], StitchingSettings], StitchingSettings
+]
+
+
+def _apply_calibration_leveling_result(
+    result: CalibrationLevelingResult,
+    settings: StitchingSettings,
+) -> StitchingSettings:
+    """Apply an explicit selector outcome to the staged generation settings."""
+    if result.cancel_calibration:
+        raise CalibrationLevelingCancelled("Stitching calibration cancelled during rink leveling")
+    if not result.use_angles:
+        return settings
+    framing = replace(
+        settings.framing,
+        rotation_degrees=result.rotation_degrees,
+    )
+    return replace(settings, framing=framing)
+
+
 def build_stitching_project(
     project_file_path: str,
     image_files: List[str],
@@ -862,6 +1022,37 @@ def build_stitching_project(
         settings,
         lens_profile_fingerprint=lens_calibration.fingerprint if lens_calibration else None,
     )
+    effective_settings = [settings]
+    leveling_result: list[Optional[CalibrationLevelingResult]] = [None]
+    leveling_config_guard: list[Optional[Tuple[str, str]]] = [None]
+    calibration_leveling: Optional[CalibrationLevelingCallback] = None
+    if game_id is not None and settings.mapping_backend == "nona":
+
+        def calibration_leveling(
+            aligned_project: Path,
+            framed_project: Path,
+            staged_images: Sequence[str],
+            current_settings: StitchingSettings,
+        ) -> StitchingSettings:
+            private_config = copy.deepcopy(get_game_config_private(game_id=game_id) or {})
+            leveling_config_guard[0] = (
+                _calibration_config_guard(game_config),
+                _calibration_config_guard(private_config),
+            )
+            result = select_calibration_leveling(
+                aligned_project=aligned_project,
+                framed_project=framed_project,
+                image_files=staged_images,
+                settings=current_settings,
+                game_id=game_id,
+                run=_run_stitching_command,
+                resolve_binary=_resolve_stitching_binary,
+            )
+            selected = _apply_calibration_leveling_result(result, current_settings)
+            leveling_result[0] = result
+            effective_settings[0] = selected
+            return selected
+
     input_images = _image_content_provenance(image_files)
     provenance = {
         **(provenance if provenance is not None else {"input_images": input_images}),
@@ -913,6 +1104,7 @@ def build_stitching_project(
             lens_calibration=lens_calibration,
             lens_calibration_resolved=True,
             control_points=control_points,
+            calibration_leveling=calibration_leveling,
         )
         if not result:
             raise RuntimeError("Failed to build staged stitching project")
@@ -925,13 +1117,70 @@ def build_stitching_project(
             _rewrite_pto_sources(pto, source_directory=stage, target_directory=project.parent)
         (stage / _STITCH_ARTIFACT_MANIFEST).write_text(
             json.dumps(
-                {**settings.manifest(), **provenance, "reference_images": input_images},
+                {
+                    **effective_settings[0].manifest(),
+                    **provenance,
+                    "reference_images": input_images,
+                },
                 indent=2,
                 sort_keys=True,
             )
             + "\n",
             encoding="utf-8",
         )
+        staged_private_config = False
+        expected_private_config: Optional[bytes] = None
+        selected_result = leveling_result[0]
+        if game_id is not None:
+            private_config = copy.deepcopy(get_game_config_private(game_id=game_id) or {})
+            if selected_result is not None:
+                current_guard = (
+                    _calibration_config_guard(game_config),
+                    _calibration_config_guard(private_config),
+                )
+                if current_guard != leveling_config_guard[0]:
+                    raise ValueError(
+                        "Stitching calibration settings changed while rink leveling was open; "
+                        "restart calibration before using these angles"
+                    )
+            normalize_runtime_config(private_config)
+            private_config_changed = _remove_stitching_geometry_config(private_config)
+            if selected_result is not None and selected_result.use_angles:
+                set_nested_value(
+                    private_config,
+                    _STITCH_ROTATION_PATH,
+                    list(selected_result.rotation_degrees),
+                )
+                private_config_changed = True
+            if private_config_changed:
+                config_path = _private_config_path(game_id)
+                expected_path = project.parent.resolve() / "config.yaml"
+                if config_path != expected_path:
+                    raise ValueError(
+                        "Cannot atomically publish stitching settings outside the game's config directory"
+                    )
+                private_config, expected_private_config = _read_private_config_snapshot(config_path)
+                if selected_result is not None:
+                    current_guard = (
+                        _calibration_config_guard(game_config),
+                        _calibration_config_guard(private_config),
+                    )
+                    if current_guard != leveling_config_guard[0]:
+                        raise ValueError(
+                            "Stitching calibration settings changed while rink leveling was open; "
+                            "restart calibration before using these angles"
+                        )
+                _remove_stitching_geometry_config(private_config)
+                if selected_result is not None and selected_result.use_angles:
+                    set_nested_value(
+                        private_config,
+                        _STITCH_ROTATION_PATH,
+                        list(selected_result.rotation_degrees),
+                    )
+                (stage / "config.yaml").write_text(
+                    _serialize_private_config(private_config), encoding="utf-8"
+                )
+                staged_private_config = True
         names = sorted(
             path.name
             for path in stage.iterdir()
@@ -939,11 +1188,31 @@ def build_stitching_project(
         )
         # Make the provenance file the last replacement for tools that inspect it.
         names.remove(_STITCH_ARTIFACT_MANIFEST)
+        if staged_private_config:
+            names.remove("config.yaml")
+            names.append("config.yaml")
         names.append(_STITCH_ARTIFACT_MANIFEST)
         # Derived masks are safe to recompute if publication later rolls back.
         # Clear them only after every replacement artifact has passed validation.
-        invalidate_stitching_geometry(project.parent, game_id=game_id, game_config=game_config)
-        publish_artifacts(project.parent, stage, names)
+        invalidate_stitching_geometry(project.parent)
+        publish_artifacts(
+            project.parent,
+            stage,
+            names,
+            expected_old_contents=(
+                {"config.yaml": expected_private_config} if staged_private_config else None
+            ),
+        )
+        if staged_private_config:
+            logger.info("Published private config with stitching generation for %s", game_id)
+        if game_config is not None:
+            _remove_stitching_geometry_config(game_config)
+            if selected_result is not None and selected_result.use_angles:
+                set_nested_value(
+                    game_config,
+                    _STITCH_ROTATION_PATH,
+                    list(selected_result.rotation_degrees),
+                )
         return True
 
 
@@ -963,6 +1232,7 @@ def _build_stitching_project_in_place(
     lens_calibration: Optional[LensCalibrationPair] = None,
     lens_calibration_resolved: bool = False,
     control_points: Optional[Dict[str, torch.Tensor]] = None,
+    calibration_leveling: Optional[CalibrationLevelingCallback] = None,
 ):
     """Create or update a Hugin PTO project and seam masks for two images.
 
@@ -1069,6 +1339,7 @@ def _build_stitching_project_in_place(
             )
 
         def run_remap_pipeline(control_points: Dict[str, torch.Tensor]) -> bool:
+            nonlocal settings
             remove_remap_outputs()
             if mapping_backend == "nona":
                 cmd = [
@@ -1083,16 +1354,46 @@ def _build_stitching_project_in_place(
                 ]
                 _optimize_hugin_geometry(cmd, hm_project)
                 _set_hugin_optimization_variables(autooptimiser_out, ("r1", "p1", "y1"))
-                apply_projection(
+                aligned_project = Path(dir_name) / ".autooptimiser_out.aligned.pto"
+                shutil.copyfile(autooptimiser_out, aligned_project)
+                pano_modify = _resolve_stitching_binary("pano_modify")
+                apply_projection_framing(
                     autooptimiser_out,
                     settings,
                     _run_stitching_command,
-                    _resolve_local_binary("pano_modify") or "pano_modify",
+                    pano_modify,
+                )
+                if calibration_leveling is not None:
+                    selected_settings = calibration_leveling(
+                        aligned_project,
+                        Path(autooptimiser_out),
+                        image_files,
+                        settings,
+                    )
+                    if selected_settings.mapping_backend != "nona":
+                        raise ValueError("Rink leveling cannot change the mapping backend")
+                    if (
+                        selected_settings.framing.rotation_degrees
+                        != settings.framing.rotation_degrees
+                    ):
+                        shutil.copyfile(aligned_project, autooptimiser_out)
+                        apply_projection_framing(
+                            autooptimiser_out,
+                            selected_settings,
+                            _run_stitching_command,
+                            pano_modify,
+                        )
+                    settings = selected_settings
+                cap_projection_canvas(
+                    autooptimiser_out,
+                    settings,
+                    _run_stitching_command,
+                    pano_modify,
                     scale=scale,
                 )
 
                 cmd = [
-                    "nona",
+                    _resolve_stitching_binary("nona"),
                     "-m",
                     "TIFF_m",
                     "-z",

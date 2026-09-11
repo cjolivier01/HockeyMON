@@ -144,15 +144,13 @@ def _cap_panorama(
     validate_canvas_size(geometry.width, geometry.height, settings)
 
 
-def apply_projection(
+def apply_projection_framing(
     project: str | Path,
     settings: StitchingSettings,
     run: Callable[[Sequence[str]], None],
     binary: str = "pano_modify",
-    scale: float | None = None,
 ) -> PanoramaGeometry:
-    """Replace a PTO only after its converted projection and caps validate."""
-    validate_output_scale(scale, settings.mapping_backend)
+    """Apply exact projection/framing rules without limiting the output canvas."""
     project = Path(project)
     read_panorama_geometry(project)
     temporary = project.with_name(f".{project.stem}.projection.pto")
@@ -180,16 +178,41 @@ def apply_projection(
         run(command)
         geometry = read_panorama_geometry(temporary)
         _verify_projection(geometry, settings)
-        # Work on the validated temporary output until the cap also succeeds.
-        capped = project.with_name(f".{project.stem}.capped.pto")
-        try:
-            _cap_panorama(temporary, capped, settings, run, binary, scale)
-        finally:
-            capped.unlink(missing_ok=True)
         temporary.replace(project)
+        return geometry
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def cap_projection_canvas(
+    project: str | Path,
+    settings: StitchingSettings,
+    run: Callable[[Sequence[str]], None],
+    binary: str = "pano_modify",
+    scale: float | None = None,
+) -> PanoramaGeometry:
+    """Limit an already framed PTO while preserving its projection and crop."""
+    validate_output_scale(scale, settings.mapping_backend)
+    project = Path(project)
+    temporary = project.with_name(f".{project.stem}.capped.pto")
+    try:
+        _cap_panorama(project, temporary, settings, run, binary, scale)
         return read_panorama_geometry(project)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def apply_projection(
+    project: str | Path,
+    settings: StitchingSettings,
+    run: Callable[[Sequence[str]], None],
+    binary: str = "pano_modify",
+    scale: float | None = None,
+) -> PanoramaGeometry:
+    """Apply projection framing and then cap its canvas for compatibility."""
+    validate_output_scale(scale, settings.mapping_backend)
+    apply_projection_framing(project, settings, run, binary)
+    return cap_projection_canvas(project, settings, run, binary, scale)
 
 
 def set_source_horizontal_fov(project: str | Path, horizontal_fov: float) -> None:
