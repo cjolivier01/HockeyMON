@@ -31,6 +31,10 @@ class GameCsvPaths:
     camera_csv: str
     camera_fast_csv: Optional[str] = None
     pose_csv: Optional[str] = None
+    database_path: str = ""
+    run_id: str = ""
+    geometry_id: int = 0
+    source_game_id: str = ""
 
 
 def _read_tracking_dataframe(tracking_csv: str) -> pd.DataFrame:
@@ -272,12 +276,17 @@ def _load_game(
     rink_grid_width: int = 64,
     rink_grid: Optional[np.ndarray] = None,
 ) -> _LoadedGame:
-    tracks = _read_tracking_dataframe(paths.tracking_csv)
-    cams = _read_camera_dataframe(paths.camera_csv)
-    cams_fast = _read_camera_dataframe(paths.camera_fast_csv) if paths.camera_fast_csv else None
+    if paths.database_path:
+        from hmlib.camera.camera_database import load_database_frames
 
-    # Frames present in both tracking and (slow) camera.
-    frames_set = set(tracks["Frame"].unique()).intersection(set(cams["Frame"].unique()))
+        tracks, cams, cams_fast, frame_ids, policy_boundaries = load_database_frames(paths)
+        frames_set = frame_ids.intersection(set(cams["Frame"].unique()))
+    else:
+        tracks = _read_tracking_dataframe(paths.tracking_csv)
+        cams = _read_camera_dataframe(paths.camera_csv)
+        cams_fast = _read_camera_dataframe(paths.camera_fast_csv) if paths.camera_fast_csv else None
+        frames_set = set(tracks["Frame"].unique()).intersection(set(cams["Frame"].unique()))
+        policy_boundaries = read_camera_policy_boundaries(paths.camera_csv, cams["Frame"])
     if target_mode == "slow_fast_tlwh":
         if cams_fast is None:
             frames_set = set()
@@ -285,8 +294,7 @@ def _load_game(
             frames_set = frames_set.intersection(set(cams_fast["Frame"].unique()))
     frames = sorted(frames_set)
     frames_int = [int(f) for f in frames]
-    policy_boundaries = read_camera_policy_boundaries(paths.camera_csv, cams["Frame"])
-    if target_mode == "slow_fast_tlwh" and cams_fast is not None:
+    if target_mode == "slow_fast_tlwh" and cams_fast is not None and not paths.database_path:
         policy_boundaries.update(
             read_camera_policy_boundaries(paths.camera_fast_csv, cams_fast["Frame"])
         )
@@ -326,7 +334,17 @@ def _load_game(
             raise RuntimeError(f"Failed to parse pose CSV {paths.pose_csv!r}") from ex
 
     rink_feat = np.zeros((7,), dtype=np.float32)
-    if include_rink:
+    if include_rink and paths.database_path:
+        from hmlib.camera.camera_database import load_database_rink
+
+        rink_feat = (
+            rink_grid
+            if rink_grid is not None
+            else load_database_rink(
+                paths, norm, rink_grid_height, rink_grid_width, rink_input=rink_input
+            )
+        )
+    elif include_rink:
         rink_feat = (
             (
                 rink_grid
@@ -451,7 +469,11 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
         cached = self._cache.get(game_id)
         if cached is not None:
             return cached
-        if self._target_mode == "slow_fast_tlwh" and not paths.camera_fast_csv:
+        if (
+            self._target_mode == "slow_fast_tlwh"
+            and not paths.camera_fast_csv
+            and not paths.database_path
+        ):
             self._unusable_reasons[game_id] = "missing camera_fast.csv"
             return None
         try:
@@ -467,7 +489,7 @@ class CameraPanZoomGPTIterableDataset(IterableDataset):
                 rink_grid=self._rink_grids.get(paths.game_id),
             )
         except Exception as ex:
-            raise RuntimeError(f"Failed to load camera GPT CSVs for game {game_id!r}") from ex
+            raise RuntimeError(f"Failed to load camera GPT recording for game {game_id!r}") from ex
         longest_run = max((len(run) for run in loaded.frame_runs), default=0)
         if longest_run < self._seq_len:
             reason = f"longest contiguous run has {longest_run} frames for seq_len={self._seq_len}"

@@ -32,6 +32,13 @@ from hmlib.camera.camera_gpt_dataset import (
     validate_csv_paths,
 )
 from hmlib.camera.camera_training_config import catalog_split, expand_training_config
+from hmlib.camera.camera_database import (
+    discover_database_games,
+    geometry as database_geometry,
+    load_database_rink,
+    scan_database_max_xy,
+    split_database_games,
+)
 from hmlib.camera.camera_transformer import CameraNorm
 from hmlib.camera.rink_context import (
     file_sha256,
@@ -340,7 +347,11 @@ def _scan_games_max_xy(game_csvs: List[GameCsvPaths]) -> Tuple[float, float]:
     max_x = 0.0
     max_y = 0.0
     for p in game_csvs:
-        mx, my = scan_game_max_xy(p.tracking_csv, p.camera_csv, p.camera_fast_csv)
+        mx, my = (
+            scan_database_max_xy(p)
+            if p.database_path
+            else scan_game_max_xy(p.tracking_csv, p.camera_csv, p.camera_fast_csv)
+        )
         max_x = max(max_x, float(mx))
         max_y = max(max_y, float(my))
     return max_x, max_y
@@ -724,6 +735,12 @@ def main(argv: Optional[List[str]] = None):
     ap = argparse.ArgumentParser("Train GPT camera model from saved tracking/camera CSVs")
     ap.add_argument(
         "--config", type=str, help="Training YAML; explicit CLI arguments override YAML"
+    )
+    ap.add_argument(
+        "--database",
+        action="append",
+        default=[],
+        help="Telemetry database, directory, or glob (repeatable; merged and single-run files may be mixed)",
     )
     ap.add_argument("--dataset-config", type=str, help="Dataset catalog/selection YAML")
     ap.add_argument("--dataset-root", type=str, help="Override the dataset YAML root on this host")
@@ -1176,7 +1193,7 @@ def main(argv: Optional[List[str]] = None):
     data_identity = None
 
     if args.dataset_config:
-        if args.file_list or args.game_id or args.game_ids or args.game_ids_file:
+        if args.database or args.file_list or args.game_id or args.game_ids or args.game_ids_file:
             ap.error("--dataset-config cannot be combined with legacy game/file-list selection")
         catalog_error = None
         try:
@@ -1202,6 +1219,17 @@ def main(argv: Optional[List[str]] = None):
             ap.error("The official catalog omits pose data; use --no-pose")
         if args.max_games:
             ap.error("Use dataset YAML include/exclude selectors instead of --max-games")
+    elif args.database:
+        if args.file_list or args.game_id or args.game_ids or args.game_ids_file:
+            ap.error("--database cannot be combined with game/file-list selection")
+        if args.include_pose:
+            ap.error("Database recordings do not yet contain pose features; use --no-pose")
+        game_csvs, data_identity = discover_database_games(args.database)
+        train_games, val_games = split_database_games(
+            game_csvs, float(args.val_split), int(args.seed)
+        )
+        data_identity["train_games"] = [game.game_id for game in train_games]
+        data_identity["validation_games"] = [game.game_id for game in val_games]
     elif args.file_list:
         game_dirs = _load_game_dirs_from_list(args.file_list)
         if int(args.max_games) > 0:
@@ -1212,6 +1240,13 @@ def main(argv: Optional[List[str]] = None):
         for game_dir in game_dirs:
             if not game_dir.is_dir():
                 logger.warning("Skipping missing game dir: %s", game_dir)
+                continue
+            databases = sorted(game_dir.glob("hstream_telemetry*.db"))
+            if databases and not (
+                args.camera_csv_name or args.camera_fast_csv_name or args.pose_csv_name
+            ):
+                selected, _ = discover_database_games(databases)
+                game_csvs.extend(selected)
                 continue
             paths = resolve_csv_paths(
                 game_id=game_dir.name,
@@ -1252,6 +1287,13 @@ def main(argv: Optional[List[str]] = None):
             if not gdir.is_dir():
                 logger.warning("Skipping %s (missing dir %s)", gid, gdir)
                 continue
+            databases = sorted(gdir.glob("hstream_telemetry*.db"))
+            if databases and not (
+                args.camera_csv_name or args.camera_fast_csv_name or args.pose_csv_name
+            ):
+                selected, _ = discover_database_games(databases)
+                game_csvs.extend(selected)
+                continue
             paths = resolve_csv_paths(
                 game_id=gid,
                 game_dir=str(gdir),
@@ -1279,6 +1321,21 @@ def main(argv: Optional[List[str]] = None):
             "No usable games found (need tracking.csv + camera.csv [+ camera_fast.csv])."
         )
 
+    if data_identity is None and any(game.database_path for game in game_csvs):
+        if not all(game.database_path for game in game_csvs):
+            ap.error(
+                "Mixed legacy CSV and database game selection is ambiguous; select databases explicitly"
+            )
+        if args.include_pose:
+            ap.error("Database recordings do not yet contain pose features; use --no-pose")
+        game_csvs, data_identity = discover_database_games(
+            sorted({game.database_path for game in game_csvs})
+        )
+        train_games, val_games = split_database_games(
+            game_csvs, float(args.val_split), int(args.seed)
+        )
+        data_identity["train_games"] = [game.game_id for game in train_games]
+        data_identity["validation_games"] = [game.game_id for game in val_games]
     if data_identity is None:
         rng = random.Random(int(args.seed))
         rng.shuffle(game_csvs)
@@ -1298,7 +1355,14 @@ def main(argv: Optional[List[str]] = None):
         max_x, max_y = _scan_games_max_xy(train_games)
         if args.include_rink and args.rink_input == "grid":
             # Frame geometry, rather than observed player extrema, defines the world.
-            contexts = {game.game_id: read_rink_context(game.tracking_csv) for game in game_csvs}
+            contexts = {
+                game.game_id: (
+                    {"frame_size": scan_database_max_xy(game)}
+                    if game.database_path
+                    else read_rink_context(game.tracking_csv)
+                )
+                for game in game_csvs
+            }
             max_x = max(max_x, *(contexts[game.game_id]["frame_size"][0] for game in train_games))
             max_y = max(max_y, *(contexts[game.game_id]["frame_size"][1] for game in train_games))
             for game in val_games:
@@ -1308,7 +1372,11 @@ def main(argv: Optional[List[str]] = None):
                         f"Validation rink exceeds training coordinate extent: {game.game_id}"
                     )
             data_identity["rink_contexts"] = {
-                game.game_id: file_sha256(rink_context_path(game.tracking_csv))
+                game.game_id: (
+                    database_geometry(game)["mask_sha256"]
+                    if game.database_path
+                    else file_sha256(rink_context_path(game.tracking_csv))
+                )
                 for game in game_csvs
             }
         norm = CameraNorm(scale_x=max_x, scale_y=max_y, max_players=int(args.max_players))
@@ -1316,8 +1384,12 @@ def main(argv: Optional[List[str]] = None):
 
         rink_grids = (
             {
-                game.game_id: load_rink_grid(
-                    game.tracking_csv, norm, args.rink_grid_height, args.rink_grid_width
+                game.game_id: (
+                    load_database_rink(game, norm, args.rink_grid_height, args.rink_grid_width)
+                    if game.database_path
+                    else load_rink_grid(
+                        game.tracking_csv, norm, args.rink_grid_height, args.rink_grid_width
+                    )
                 )
                 for game in game_csvs
             }
