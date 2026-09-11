@@ -5,6 +5,8 @@ import json
 import math
 import shutil
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -137,6 +139,8 @@ def should_run_selector_tools_with_final_calibration_locale_and_context(monkeypa
 
 class _SelectorSession:
     published_rotation = (17.0, -9.0, 2.0)
+    prepared = SimpleNamespace(image_sizes=((160, 100), (160, 100)))
+    source_images = [b"left", b"right"]
 
 
 def should_distinguish_use_skip_cancel_and_backend_close():
@@ -158,6 +162,31 @@ def should_distinguish_use_skip_cancel_and_backend_close():
     selector = CalibrationLevelingSelector(_SelectorSession(), game_id="demo")
     selector.close()
     assert selector.result.cancel_calibration
+
+
+def should_authenticate_selector_images_and_reject_dns_rebinding():
+    selector = CalibrationLevelingSelector(
+        _SelectorSession(), game_id="demo", bind_host="127.0.0.1", open_browser=False
+    )
+    selector._start_server()
+    base = f"http://127.0.0.1:{selector.port}"
+    try:
+        with urllib.request.urlopen(base + "/", timeout=2) as response:
+            assert b"Level the rink" in response.read()
+        with pytest.raises(urllib.error.HTTPError) as unauthorized:
+            urllib.request.urlopen(base + "/image/0", timeout=2)
+        assert unauthorized.value.code == 403
+        request = urllib.request.Request(
+            base + "/image/0", headers={"X-Editor-Token": selector._token}
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            assert response.read() == b"left"
+        rebound = urllib.request.Request(base + "/", headers={"Host": "attacker.example"})
+        with pytest.raises(urllib.error.HTTPError) as forbidden:
+            urllib.request.urlopen(rebound, timeout=2)
+        assert forbidden.value.code == 403
+    finally:
+        selector.close()
 
 
 def _calibration_leveling_session(tmp_path):
