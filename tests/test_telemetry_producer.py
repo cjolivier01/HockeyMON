@@ -263,6 +263,7 @@ def should_integrate_with_pipeline_and_keep_failed_shutdown_incomplete(
         "game_id": "test",
         "game_dir": str(tmp_path),
         "work_dir": str(tmp_path),
+        "output_label": "variant",
         "aspen": {
             "threaded_trunks": threaded,
             "pipeline": {
@@ -277,7 +278,12 @@ def should_integrate_with_pipeline_and_keep_failed_shutdown_incomplete(
                     "class": "hmlib.aspen.plugins.save_plugins.SaveTrackingPlugin",
                     "depends": [],
                     "params": {},
-                }
+                },
+                "save_pose": {
+                    "class": "hmlib.aspen.plugins.save_plugins.SavePosePlugin",
+                    "depends": ["save_tracking"],
+                    "params": {},
+                },
             },
         },
     }
@@ -286,7 +292,9 @@ def should_integrate_with_pipeline_and_keep_failed_shutdown_incomplete(
             run_mmtrack(None, cfg, Loader(), None, device=device, no_cuda_streams=True)
         path = tmp_path / "hm_telemetry.db"
     else:
-        path = run_mmtrack(None, cfg, Loader(), None, device=device, no_cuda_streams=True)
+        artifacts = run_mmtrack(None, cfg, Loader(), None, device=device, no_cuda_streams=True)
+        path = artifacts.telemetry_path
+        assert artifacts.supplementary_paths == (tmp_path / "variant_pose.csv",)
     with read_database(path) as db:
         assert db.execute("SELECT completed FROM runs").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM frames").fetchone()[0] == 4
@@ -318,3 +326,67 @@ def should_keep_loaded_tracks_in_experiment_recording_graph():
     assert plugins["save_tracking"]["enabled"]
     assert plugins["save_tracking"]["depends"] == ["load_tracking"]
     assert not plugins["tracker"]["enabled"]
+
+
+def should_publish_exact_labeled_supplements_without_stale_outputs(tmp_path):
+    from hmlib.cli.hmtrack import _deploy_output_artifacts
+
+    work, game = tmp_path / "work", tmp_path / "game"
+    writer = TelemetryRecorder(work, "game", {}, {"tracks"})
+    capture(writer, context(), stages=("tracks",))
+    writer.close()
+    complete_recording(writer.path)
+    pose = work / "variant_pose.csv"
+    action = work / "variant_actions.csv"
+    pose.write_text("current pose")
+    action.write_text("current actions")
+    (work / "pose.csv").write_text("stale pose")
+    (work / "actions.csv").write_text("stale actions")
+    _deploy_output_artifacts(
+        output_video_path=None,
+        output_video=None,
+        results_folder=str(work),
+        target_deploy_dir=str(game),
+        game_id="game",
+        telemetry_path=writer.path,
+        supplementary_paths=(pose, action),
+    )
+    assert (game / "variant_pose-1.csv").read_text() == "current pose"
+    assert (game / "variant_actions-1.csv").read_text() == "current actions"
+    assert not (game / "pose-1.csv").exists()
+    assert not (game / "actions-1.csv").exists()
+
+
+def should_capture_real_instance_metadata_and_mask(tmp_path):
+    from mmdet.structures import DetDataSample, TrackDataSample
+    from mmengine.structures import InstanceData
+
+    writer = TelemetryRecorder(tmp_path, "game", {}, {"detections", "tracks"})
+    ctx = context((0,))
+    sample = DetDataSample()
+    detection = InstanceData()
+    detection.bboxes = torch.tensor([[1.0, 2.0, 8.0, 12.0], [0.0, 0.0, 0.0, 0.0]])
+    detection.scores = torch.tensor([0.9, 0.0])
+    detection.labels = torch.tensor([0, -1])
+    detection.set_metainfo({"num_valid_after_nms": torch.tensor(1)})
+    tracks = InstanceData()
+    tracks.bboxes = detection.bboxes.clone()
+    tracks.scores = detection.scores.clone()
+    tracks.labels = detection.labels.clone()
+    tracks.instances_id = torch.tensor([99, -1])
+    tracks.set_metainfo({"num_tracks": torch.tensor(1)})
+    sample.pred_instances = detection
+    sample.pred_track_instances = tracks
+    sample.set_metainfo({"frame_id": 0})
+    clip = TrackDataSample()
+    clip.video_data_samples = [sample]
+    ctx["data_samples"] = [clip]
+    capture(writer, ctx, stages=("detections", "tracks"))
+    writer.close()
+    complete_recording(writer.path)
+    with read_database(writer.path) as db:
+        assert tuple(db.execute("SELECT detection_count,track_count FROM frames").fetchone()) == (
+            1,
+            1,
+        )
+        assert db.execute("SELECT tracking_id FROM tracks").fetchone()[0] == "99"

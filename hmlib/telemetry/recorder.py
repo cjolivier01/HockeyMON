@@ -12,6 +12,7 @@ import json
 import queue
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,12 @@ import numpy as np
 import yaml
 
 from hmlib.telemetry.database import create_database, read_database
+
+
+@dataclass(frozen=True)
+class RecordingArtifacts:
+    telemetry_path: Path | None
+    supplementary_paths: tuple[Path, ...] = ()
 
 
 def configuration_snapshot(value, active=None, path="root"):

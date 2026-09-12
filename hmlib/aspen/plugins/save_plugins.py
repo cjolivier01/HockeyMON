@@ -456,6 +456,12 @@ class SavePosePlugin(SavePluginBase):
     def output_keys(self):
         return {"pose_dataframe"}
 
+    def supplementary_paths(self):
+        dataframe = self._pose_dataframe
+        return (
+            [Path(dataframe.output_file)] if dataframe is not None and dataframe.output_file else []
+        )
+
     def finalize(self):
         if self._pose_dataframe is not None:
             self._pose_dataframe.close()
@@ -563,6 +569,12 @@ class SaveActionsPlugin(SavePluginBase):
 
     def output_keys(self):
         return {"action_dataframe"}
+
+    def supplementary_paths(self):
+        dataframe = self._action_dataframe
+        return (
+            [Path(dataframe.output_file)] if dataframe is not None and dataframe.output_file else []
+        )
 
     def finalize(self):
         if self._action_dataframe is not None:

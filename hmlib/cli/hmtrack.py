@@ -2335,6 +2335,7 @@ def _main(args, num_gpu):
                 pass
 
         telemetry_path = None
+        supplementary_paths = ()
         if not args.audio_only:
 
             if not args.no_play_tracking:
@@ -2364,7 +2365,7 @@ def _main(args, num_gpu):
                 "source_video_paths": source_video_paths,
             }
 
-            telemetry_path = run_mmtrack(
+            recording_artifacts = run_mmtrack(
                 model=model,
                 config=vars(args),
                 device=main_device,
@@ -2375,6 +2376,8 @@ def _main(args, num_gpu):
                 profiler=getattr(args, "profiler", None),
                 **other_kwargs,
             )
+            telemetry_path = recording_artifacts.telemetry_path
+            supplementary_paths = recording_artifacts.supplementary_paths
 
     except Exception as ex:
         print(ex)
@@ -2411,6 +2414,7 @@ def _main(args, num_gpu):
         target_deploy_dir=target_deploy_dir,
         game_id=args.game_id,
         telemetry_path=telemetry_path,
+        supplementary_paths=supplementary_paths,
     )
     logger.info("Completed")
     return telemetry_path
@@ -2424,6 +2428,7 @@ def _deploy_output_artifacts(
     target_deploy_dir: Optional[str],
     game_id: Optional[str],
     telemetry_path: Optional[Path] = None,
+    supplementary_paths: Tuple[Path, ...] = (),
 ) -> Optional[Path]:
     """Publish a completed run with one suffix for its video, CSVs, and rink mask."""
     sources = {}
@@ -2440,9 +2445,7 @@ def _deploy_output_artifacts(
             completed_runs(database)
         # Only this run's database; stale CSVs and masks in reused work dirs
         # must never masquerade as companions of the new telemetry generation.
-        sources = {
-            name: path for name, path in sources.items() if name in {"pose.csv", "actions.csv"}
-        }
+        sources = {path.name: path for path in supplementary_paths}
         sources["hm_telemetry.db"] = Path(telemetry_path)
     source_video = Path(output_video_path) if output_video_path else None
     if source_video is not None and not source_video.is_file():

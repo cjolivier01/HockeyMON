@@ -13,7 +13,7 @@ from hmlib.aspen import AspenNet
 from hmlib.config import get_game_dir, get_nested_value
 from hmlib.datasets.dataframe import find_latest_dataframe_file
 from hmlib.log import logger
-from hmlib.telemetry.recorder import TelemetryRecorder
+from hmlib.telemetry.recorder import RecordingArtifacts, TelemetryRecorder
 from hmlib.tracking_utils.timer import Timer
 from hmlib.utils import MeanTracker
 from hmlib.utils.finalization import finalize_resources
@@ -47,6 +47,7 @@ def run_mmtrack(
     aspen_net: Optional[AspenNet] = None
     work_dir: Optional[str] = None
     telemetry = None
+    supplementary_paths = []
     if config is None:
         config = {}
     try:
@@ -668,6 +669,7 @@ def run_mmtrack(
                 if label:
                     pose_name = str(add_prefix_to_filename(pose_name, str(label)))
                 (Path(work_dir) / pose_name).touch(exist_ok=True)
+                supplementary_paths.append(Path(work_dir) / pose_name)
 
             actions.append(("pose output", finalize_pose_file))
         if aspen_net is not None:
@@ -681,4 +683,11 @@ def run_mmtrack(
         if telemetry is not None:
             actions.append(("telemetry database", telemetry.close))
         finalize_resources(actions, primary_error=sys.exc_info()[1])
-    return telemetry.path if telemetry is not None else None
+    if aspen_net is not None and work_dir:
+        for node in aspen_net.exec_order:
+            if node.module.enabled and hasattr(node.module, "supplementary_paths"):
+                supplementary_paths.extend(node.module.supplementary_paths())
+    return RecordingArtifacts(
+        telemetry.path if telemetry is not None else None,
+        tuple(dict.fromkeys(supplementary_paths)),
+    )
