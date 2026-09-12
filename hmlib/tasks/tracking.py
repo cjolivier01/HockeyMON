@@ -13,6 +13,7 @@ from hmlib.aspen import AspenNet
 from hmlib.config import get_game_dir, get_nested_value
 from hmlib.datasets.dataframe import find_latest_dataframe_file
 from hmlib.log import logger
+from hmlib.telemetry.recorder import TelemetryRecorder
 from hmlib.tracking_utils.timer import Timer
 from hmlib.utils import MeanTracker
 from hmlib.utils.finalization import finalize_resources
@@ -45,6 +46,7 @@ def run_mmtrack(
     mean_tracker: Optional[MeanTracker] = None
     aspen_net: Optional[AspenNet] = None
     work_dir: Optional[str] = None
+    telemetry = None
     if config is None:
         config = {}
     try:
@@ -388,6 +390,28 @@ def run_mmtrack(
                 aspen_name = aspen_cfg.get("name") or config.get("game_id") or "aspen"
                 aspen_net = AspenNet(aspen_name, aspen_cfg, shared=shared)
                 aspen_net = aspen_net.to(device)
+                stages = [
+                    node.module.telemetry_kind
+                    for node in (aspen_net.exec_order if work_dir else [])
+                    if node.module.enabled and hasattr(node.module, "telemetry_kind")
+                ]
+                if len(stages) != len(set(stages)):
+                    raise ValueError(
+                        "Telemetry requires at most one save plugin per observation kind"
+                    )
+                if work_dir and stages:
+                    telemetry = TelemetryRecorder(
+                        work_dir,
+                        config.get("game_id") or Path(work_dir).name,
+                        {
+                            "game_config": config.get("game_config"),
+                            "aspen": aspen_cfg,
+                            "source_video_paths": source_video_paths or [],
+                            "timestamp_source": "source frame / source FPS unless explicit pts_ns",
+                            "native_replay": "unavailable in HM producer",
+                        },
+                        stages,
+                    )
                 if display_plugin_profile:
                     plugin_names = [node.name for node in aspen_net.exec_order]
                     plugin_display_names = []
@@ -545,6 +569,8 @@ def run_mmtrack(
                             iter_context["frame_id"] = int(frame_id)
                         # Merge shared into context for plugins convenience
                         iter_context.update(aspen_net.shared)
+                        if telemetry is not None:
+                            iter_context["telemetry_batch"] = telemetry.new_batch()
                         if dataset_results:
                             iter_context["dataset_results"] = dataset_results
 
@@ -652,4 +678,7 @@ def run_mmtrack(
                 actions.append(("Aspen audit output", close_fn))
         if mean_tracker is not None:
             actions.append(("mean tracker", mean_tracker.close))
+        if telemetry is not None:
+            actions.append(("telemetry database", telemetry.close))
         finalize_resources(actions, primary_error=sys.exc_info()[1])
+    return telemetry.path if telemetry is not None else None

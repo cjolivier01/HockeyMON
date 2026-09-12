@@ -180,7 +180,12 @@ class LoadTrackingPlugin(Plugin):
                 logger.info("LoadTrackingPlugin: no %s CSV found; skipping load", self._file_stem)
                 self._warned_missing = True
             return None
-        self._tracking_dataframe = TrackingDataFrame(
+        dataframe_class = TrackingDataFrame
+        if str(path).endswith((".db", ".sqlite")):
+            from hmlib.telemetry.tracking import DatabaseTrackingDataFrame
+
+            dataframe_class = DatabaseTrackingDataFrame
+        self._tracking_dataframe = dataframe_class(
             input_file=path,
             input_batch_size=self._input_batch_size,
             write_interval=100,
@@ -213,12 +218,11 @@ class LoadTrackingPlugin(Plugin):
         for i in range(video_len):
             img_data_sample = track_data_sample[i]
             ds = getattr(df, "get_sample_by_frame", None)
-            fid: int = frame_id0 + i
+            source_ids = context.get("frame_ids", context.get("ids"))
+            fid: int = int(source_ids[i]) if source_ids is not None else frame_id0 + i
+            img_data_sample.set_metainfo({"frame_id": fid})
             rec = None
-            try:
-                rec = df.get_data_dict_by_frame(frame_id=fid)
-            except Exception:
-                rec = None
+            rec = df.get_data_dict_by_frame(frame_id=fid)
             jersey_results: List[Any] = []
             if isinstance(rec, dict):
                 for info in rec.get("jersey_info") or []:
@@ -314,7 +318,7 @@ class LoadTrackingPlugin(Plugin):
         return out
 
     def input_keys(self):
-        return {"data_samples", "frame_id"}
+        return {"data_samples", "frame_id", "frame_ids", "ids", "shared"}
 
     def output_keys(self):
         return {"jersey_results", "nr_tracks", "max_tracking_id", "tracking_dataframe"}

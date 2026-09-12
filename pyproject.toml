@@ -34,6 +34,7 @@ hmlib = [
     "images/*.svg",
     "images/*.png",
     "config/**/*.yaml",
+    "telemetry/schema.sql",
 ]
 hockeymon = [
     "core.pyi",

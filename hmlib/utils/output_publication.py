@@ -33,7 +33,11 @@ def artifact_name(name: str, suffix: int) -> str:
 
 def _is_discovery_marker(name: str) -> bool:
     stem = re.sub(r"-\d+$", "", Path(name).stem)
-    return stem == "tracking" or stem.endswith("-tracking")
+    return (
+        stem == "tracking"
+        or stem.endswith("-tracking")
+        or (Path(name).suffix == ".db" and stem in {"hm_telemetry", "hstream_telemetry"})
+    )
 
 
 def _sync_directory(directory: Path) -> None:
@@ -139,6 +143,7 @@ def publish_artifacts(
                     ),
                 ]
             )
+            patterns.append(re.compile(r"^(?:hm|hstream)_telemetry(?:-(\d+))?\.db$"))
             for history in {directory, *(Path(path) for path in generation_directories)}:
                 if not history.exists():
                     continue

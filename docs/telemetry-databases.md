@@ -2,6 +2,46 @@
 
 Hstream records one `hstream_telemetry.db` (or numbered `hstream_telemetry-N.db`) in its working directory. Publication copies a completed, closed database to the game directory using the finalized video's suffix, such as `hstream_telemetry-2.db`. Capture without a saved video publishes the next available numbered generation.
 
+
+HM's `hmtrack` also records SQLite telemetry. Enabled `SaveDetectionsPlugin`,
+`SaveTrackingPlugin`, and `SaveCameraPlugin` stages write one `hm_telemetry.db`
+(or a fresh `hm_telemetry-N.db` in a reused working directory) instead of their
+observation CSVs. The normal publication policy copies the current closed
+recording to the game/deploy directory as `hm_telemetry-N.db`, using the video's
+suffix when video is saved. Time-limited runs stay in the working directory
+unless `--deploy-dir` is supplied, as before. Enabled pose/action outputs remain
+supplementary CSV files; older CSV inputs remain readable.
+
+Both producers still save calibration `rink_mask_*.png` files in the game
+directory. HM archives the run's actual CPU calibration mask inside each database
+geometry as lossless PNG, without writing an additional run mask companion.
+Encoding and hashing happen once per geometry on the metadata writer thread.
+Recording observes only image dimensions; it never downloads video pixels.
+Small detection/tracking/camera metadata is copied at the existing save stages,
+before downstream mutation, into a bounded queue. Separate stages and concurrent
+batches are matched and ordered before writing. Missing stages, invalid geometry,
+or writer errors fail the run rather than dropping telemetry. A stalled batch
+that exceeds the bounded reorder window also fails explicitly.
+
+HM stores source frame IDs separately from positive, sequential sample IDs.
+When explicit source `pts_ns` are unavailable, timestamps are derived from source
+frame IDs and source FPS; the configuration archive records this provenance.
+Discontinuities and camera policy changes create training boundaries. HM has no
+native replay checkpoint producer, so its native replay/checkpoint tables remain
+empty. The complete flag is set only after Aspen, video output, and the remaining
+pipeline resources have successfully shut down; failed/interrupted recordings
+remain incomplete and cannot be trained on or published as completed runs.
+
+Experiment `reuse_tracking` passes the exact first variant's completed database
+to later variants and records the reused tracks with their new camera outputs.
+An explicit `--input-tracking-data=/path/to/hm_telemetry-N.db` also works with
+`LoadTrackingPlugin`. Reuse requires one completed run with one unambiguous
+geometry/source/epoch and unique source frame IDs. Merged or discontinuous inputs
+must be selected separately; missing frames are errors, while recorded empty
+frames remain valid. Other legacy CSV-only loaders and analysis commands retain
+their existing input formats. Database training and publication use the same
+commands below for either producer.
+
 The database includes the original stitched canvas dimensions, lossless rink mask, mask transform/hash/revision, ordered detections and tracks, fast/Program camera outputs, timestamps and source/reset identities, configuration history, exact native replay inputs, and periodic native checkpoints. Panorama pixels and encoded video are not stored. A 16,000 × 6,500 recording retains native coordinates regardless of the saved video's dimensions.
 
 New hstream recordings also archive the complete resolved launch configuration, the loaded baseline/user/game layers, app and subconfiguration documents, and the contents of referenced text configuration files. This `hstream-run-configuration-v1` YAML archive is stored in `config_events` with `kind='run-configuration'`, `key='startup'`, and `artifact_name='run-config.yaml'`. Layer snapshots preserve parsed values; referenced files preserve their text. Directory references and unavailable optional files are recorded explicitly. Masks are stored separately in `geometries`; model/video binaries remain external. Copying, merging, fingerprinting, and dataset publication preserve the archive with its run GUID.

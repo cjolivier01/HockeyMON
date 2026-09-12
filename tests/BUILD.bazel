@@ -898,3 +898,15 @@ sh_test(
         "test_telemetry_database.py",
     ],
 )
+
+sh_test(
+    name = "test_telemetry_producer",
+    srcs = ["test_camera_datasets.sh"],
+    args = ["test_telemetry_producer.py"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_telemetry_producer.py",
+    ],
+)
