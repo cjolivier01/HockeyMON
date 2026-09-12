@@ -259,11 +259,13 @@ def should_integrate_with_pipeline_and_keep_failed_shutdown_incomplete(
 
         monkeypatch.setattr(AspenNet, "finalize", fail)
     device = torch.device("cuda" if threaded and torch.cuda.is_available() else "cpu")
+    (tmp_path / "variant_pose.csv").write_text("previous run pose")
     cfg = {
         "game_id": "test",
         "game_dir": str(tmp_path),
         "work_dir": str(tmp_path),
         "output_label": "variant",
+        "save_pose_data": True,
         "aspen": {
             "threaded_trunks": threaded,
             "pipeline": {
@@ -282,7 +284,7 @@ def should_integrate_with_pipeline_and_keep_failed_shutdown_incomplete(
                 "save_pose": {
                     "class": "hmlib.aspen.plugins.save_plugins.SavePosePlugin",
                     "depends": ["save_tracking"],
-                    "params": {},
+                    "params": {"output_filename": "custom_pose.csv"},
                 },
             },
         },
@@ -294,7 +296,8 @@ def should_integrate_with_pipeline_and_keep_failed_shutdown_incomplete(
     else:
         artifacts = run_mmtrack(None, cfg, Loader(), None, device=device, no_cuda_streams=True)
         path = artifacts.telemetry_path
-        assert artifacts.supplementary_paths == (tmp_path / "variant_pose.csv",)
+        assert artifacts.supplementary_paths == (tmp_path / "variant_custom_pose.csv",)
+        assert (tmp_path / "variant_pose.csv").read_text() == "previous run pose"
     with read_database(path) as db:
         assert db.execute("SELECT completed FROM runs").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM frames").fetchone()[0] == 4

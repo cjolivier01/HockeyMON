@@ -669,7 +669,6 @@ def run_mmtrack(
                 if label:
                     pose_name = str(add_prefix_to_filename(pose_name, str(label)))
                 (Path(work_dir) / pose_name).touch(exist_ok=True)
-                supplementary_paths.append(Path(work_dir) / pose_name)
 
             actions.append(("pose output", finalize_pose_file))
         if aspen_net is not None:
