@@ -61,6 +61,11 @@ runtime:
   # Valid values: nvvideoconvert, dsxvideoconvert.
   video_converter: "nvvideoconvert"
 
+hstream_ui:
+  drivegpt_database:
+    # Initial checkbox state; capture disables seeking for the run.
+    enabled: false
+
 apply_camera:
   crop_play_box: false
   crop_output_image: true
