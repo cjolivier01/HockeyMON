@@ -389,7 +389,7 @@ class IceRinkSegmConfigPlugin(Plugin):
         geometry = context.get("camera_input_geometry") or {}
         revision = (
             geometry.get("stitched_geometry_revision")
-            if self._require_geometry_provenance
+            if self._require_geometry_provenance or "telemetry_batch" in context
             else None
         )
         if self._require_geometry_provenance and revision is None:
@@ -444,7 +444,7 @@ class IceRinkSegmConfigPlugin(Plugin):
                 ).hexdigest()
             self._rink_geometry_key = geometry_key
             work_dir = context.get("work_dir") or context.get("shared", {}).get("work_dir")
-            if self._rink_profile is not None and work_dir:
+            if self._rink_profile is not None and work_dir and "telemetry_batch" not in context:
                 from hmlib.segm.ice_rink import save_boolean_tensor_as_png
 
                 # configure_ice_rink_mask returns a CPU mask. Preserve that
@@ -476,6 +476,7 @@ class IceRinkSegmConfigPlugin(Plugin):
 
     def input_keys(self):
         return {
+            "telemetry_batch",
             "data_samples",
             "original_images",
             "img",

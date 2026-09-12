@@ -10,6 +10,7 @@ import torch
 
 from hmlib.camera.camera_dataframe import CameraPolicyDataFrame, CameraTrackingDataFrame
 from hmlib.camera.camera_policy import POLICY_SCHEMA, camera_policy_path
+from hmlib.telemetry.capture import CAPTURE_KEYS
 from hmlib.tracking_utils.action_dataframe import ActionDataFrame
 from hmlib.tracking_utils.detection_dataframe import DetectionDataFrame
 from hmlib.tracking_utils.pose_dataframe import PoseDataFrame
@@ -104,6 +105,8 @@ class SaveDetectionsPlugin(SavePluginBase):
       - detection_dataframe: DetectionDataFrame
     """
 
+    telemetry_kind = "detections"
+
     def __init__(
         self,
         enabled: bool = True,
@@ -132,6 +135,10 @@ class SaveDetectionsPlugin(SavePluginBase):
 
     def forward(self, context: Dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
+            return {}
+
+        if "telemetry_batch" in context:
+            context["telemetry_batch"].capture("detections", context)
             return {}
 
         df = self._ensure_dataframe(context)
@@ -187,7 +194,7 @@ class SaveDetectionsPlugin(SavePluginBase):
         return {"detection_dataframe": df}
 
     def input_keys(self):
-        return {"data_samples", "frame_id"}
+        return CAPTURE_KEYS | {"data_samples", "frame_id"}
 
     def output_keys(self):
         return {"detection_dataframe"}
@@ -208,6 +215,8 @@ class SaveTrackingPlugin(SavePluginBase):
       - jersey_results: Optional per-frame jersey info list
       - action_results: Optional per-frame action result list (from ActionFromPosePlugin)
     """
+
+    telemetry_kind = "tracks"
 
     def __init__(
         self,
@@ -239,6 +248,10 @@ class SaveTrackingPlugin(SavePluginBase):
 
     def forward(self, context: Dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
+            return {}
+
+        if "telemetry_batch" in context:
+            context["telemetry_batch"].capture("tracks", context)
             return {}
 
         df = self._ensure_dataframe(context)
@@ -318,7 +331,7 @@ class SaveTrackingPlugin(SavePluginBase):
         return {"tracking_dataframe": df}
 
     def input_keys(self):
-        return {"data_samples", "frame_id", "jersey_results", "action_results"}
+        return CAPTURE_KEYS | {"data_samples", "frame_id", "jersey_results", "action_results"}
 
     def output_keys(self):
         return {"tracking_dataframe"}
@@ -443,6 +456,12 @@ class SavePosePlugin(SavePluginBase):
     def output_keys(self):
         return {"pose_dataframe"}
 
+    def supplementary_paths(self):
+        dataframe = self._pose_dataframe
+        return (
+            [Path(dataframe.output_file)] if dataframe is not None and dataframe.output_file else []
+        )
+
     def finalize(self):
         if self._pose_dataframe is not None:
             self._pose_dataframe.close()
@@ -551,6 +570,12 @@ class SaveActionsPlugin(SavePluginBase):
     def output_keys(self):
         return {"action_dataframe"}
 
+    def supplementary_paths(self):
+        dataframe = self._action_dataframe
+        return (
+            [Path(dataframe.output_file)] if dataframe is not None and dataframe.output_file else []
+        )
+
     def finalize(self):
         if self._action_dataframe is not None:
             self._action_dataframe.close()
@@ -565,6 +590,8 @@ class SaveCameraPlugin(SavePluginBase):
       - current_box: TLBR camera box tensor or array
       - work_dir: output directory for camera.csv
     """
+
+    telemetry_kind = "cameras"
 
     def __init__(
         self,
@@ -623,6 +650,10 @@ class SaveCameraPlugin(SavePluginBase):
 
     def forward(self, context: Dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
+            return {}
+
+        if "telemetry_batch" in context:
+            context["telemetry_batch"].capture("cameras", context)
             return {}
 
         df = self._ensure_dataframe(context)
@@ -735,7 +766,7 @@ class SaveCameraPlugin(SavePluginBase):
         self._last_camera_frame = frame_ids[-1]
 
     def input_keys(self):
-        return {
+        return CAPTURE_KEYS | {
             "frame_id",
             "frame_ids",
             "current_box",

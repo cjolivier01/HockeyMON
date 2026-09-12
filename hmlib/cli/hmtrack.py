@@ -779,7 +779,8 @@ def _enable_load_tracking_plugin(
 
     save_tracking = plugins.get("save_tracking")
     if isinstance(save_tracking, dict):
-        save_tracking["enabled"] = False
+        save_tracking["enabled"] = True
+        save_tracking["depends"] = ["load_tracking"]
         plugins["save_tracking"] = save_tracking
 
     save_detections = plugins.get("save_detections")
@@ -1258,7 +1259,7 @@ def _run_experiment(
         pass
 
     variant_outputs: List[str] = []
-    first_tracking_csv: Optional[str] = None
+    first_tracking_data: Optional[str] = None
 
     for idx, variant in enumerate(variants):
         if not isinstance(variant, dict):
@@ -1321,8 +1322,8 @@ def _run_experiment(
                 variant_args.overlay_text_max_lines = overlay_cfg["overlay_text_max_lines"]
 
         if reuse_tracking and idx > 0:
-            if first_tracking_csv and not getattr(variant_args, "input_tracking_data", None):
-                variant_args.input_tracking_data = first_tracking_csv
+            if first_tracking_data and not getattr(variant_args, "input_tracking_data", None):
+                variant_args.input_tracking_data = first_tracking_data
             if getattr(variant_args, "input_tracking_data", None):
                 _enable_load_tracking_plugin(
                     variant_config,
@@ -1364,7 +1365,7 @@ def _run_experiment(
             num_gpus = len(variant_args.gpus) if variant_args.gpus else 0
             num_gpus = min(num_gpus, torch.cuda.device_count())
 
-        _main(variant_args, num_gpus)
+        variant_telemetry = _main(variant_args, num_gpus)
 
         work_dir = os.path.join(".", "output_workdirs", variant_args.game_id)
         base_out = _resolve_base_output_path(variant_config, work_dir)
@@ -1375,16 +1376,9 @@ def _run_experiment(
             logger.warning("Expected output not found for variant '%s': %s", name, out_path)
 
         if reuse_tracking and idx == 0:
-            tracking_csv = os.path.join(work_dir, f"{safe_label}_tracking.csv")
-            if os.path.exists(tracking_csv):
-                first_tracking_csv = tracking_csv
-            else:
-                logger.warning("Expected tracking CSV not found: %s", tracking_csv)
-
-        if reuse_tracking and idx == 0 and not first_tracking_csv:
-            logger.warning(
-                "reuse_tracking requested but no tracking CSV was produced; subsequent runs will not reuse tracks."
-            )
+            if variant_telemetry is None:
+                raise ValueError("reuse_tracking requires the first variant to record telemetry")
+            first_tracking_data = str(variant_telemetry)
 
     if not variant_outputs:
         raise ValueError("No variant outputs were produced; cannot combine.")
@@ -2340,6 +2334,8 @@ def _main(args, num_gpu):
             except Exception:
                 pass
 
+        telemetry_path = None
+        supplementary_paths = ()
         if not args.audio_only:
 
             if not args.no_play_tracking:
@@ -2369,7 +2365,7 @@ def _main(args, num_gpu):
                 "source_video_paths": source_video_paths,
             }
 
-            run_mmtrack(
+            recording_artifacts = run_mmtrack(
                 model=model,
                 config=vars(args),
                 device=main_device,
@@ -2380,23 +2376,9 @@ def _main(args, num_gpu):
                 profiler=getattr(args, "profiler", None),
                 **other_kwargs,
             )
+            telemetry_path = recording_artifacts.telemetry_path
+            supplementary_paths = recording_artifacts.supplementary_paths
 
-        #
-        # Deploy output video and CSV artifacts to --deploy-dir (explicit) or the
-        # game directory (full run).
-        #
-        target_deploy_dir = args.deploy_dir
-        if not target_deploy_dir and not is_truncated_run:
-            target_deploy_dir = (
-                args.game_dir if args.game_dir and os.path.isdir(args.game_dir) else None
-            )
-        _deploy_output_artifacts(
-            output_video_path=output_video_path,
-            output_video=args.output_video,
-            results_folder=results_folder,
-            target_deploy_dir=target_deploy_dir,
-            game_id=args.game_id,
-        )
     except Exception as ex:
         print(ex)
         traceback.print_exc()
@@ -2410,7 +2392,32 @@ def _main(args, num_gpu):
         if mux_audio_temp_file is not None:
             actions.append(("temporary mux audio", mux_audio_temp_file.close))
         finalize_resources(actions, primary_error=sys.exc_info()[1])
+    if telemetry_path is not None:
+        from hmlib.telemetry.recorder import complete_recording
+
+        complete_recording(
+            telemetry_path, outcome="intentional-stop" if is_truncated_run else "end-of-stream"
+        )
+    #
+    # Deploy output video and telemetry artifacts to --deploy-dir (explicit) or the
+    # game directory (full run).
+    #
+    target_deploy_dir = args.deploy_dir
+    if not target_deploy_dir and not is_truncated_run:
+        target_deploy_dir = (
+            args.game_dir if args.game_dir and os.path.isdir(args.game_dir) else None
+        )
+    _deploy_output_artifacts(
+        output_video_path=output_video_path,
+        output_video=args.output_video,
+        results_folder=results_folder,
+        target_deploy_dir=target_deploy_dir,
+        game_id=args.game_id,
+        telemetry_path=telemetry_path,
+        supplementary_paths=supplementary_paths,
+    )
     logger.info("Completed")
+    return telemetry_path
 
 
 def _deploy_output_artifacts(
@@ -2420,6 +2427,8 @@ def _deploy_output_artifacts(
     results_folder: str,
     target_deploy_dir: Optional[str],
     game_id: Optional[str],
+    telemetry_path: Optional[Path] = None,
+    supplementary_paths: Tuple[Path, ...] = (),
 ) -> Optional[Path]:
     """Publish a completed run with one suffix for its video, CSVs, and rink mask."""
     sources = {}
@@ -2429,6 +2438,15 @@ def _deploy_output_artifacts(
             for path in sorted(Path(results_folder).iterdir())
             if (path.suffix == ".csv" or path.name == "rink_mask_0.png") and path.is_file()
         }
+    if target_deploy_dir and telemetry_path is not None:
+        from hmlib.telemetry.database import completed_runs, read_database
+
+        with read_database(telemetry_path) as database:
+            completed_runs(database)
+        # Only this run's database; stale CSVs and masks in reused work dirs
+        # must never masquerade as companions of the new telemetry generation.
+        sources = {path.name: path for path in supplementary_paths}
+        sources["hm_telemetry.db"] = Path(telemetry_path)
     source_video = Path(output_video_path) if output_video_path else None
     if source_video is not None and not source_video.is_file():
         source_video = None
