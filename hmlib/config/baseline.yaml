@@ -125,10 +125,10 @@ stitching:
   rink_configs:
     vallco:
       display_name: "Vallco"
-      rotation_degrees: [0, -35, 0]
+      rotation_degrees: [0, -23.8, 4.3]
     sharks-ice:
       display_name: "Sharks Ice"
-      rotation_degrees: [0, -25, 0]
+      rotation_degrees: [0, -15, 0]
   # Unselected keeps legacy zero rotation; select a venue in the game config.
   rink_config: null
   pto_project_file: null
