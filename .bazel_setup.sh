@@ -221,6 +221,8 @@ if [ "${TORCH_BACKEND}" = "rocm" ]; then
       BAZEL_FLAGS="${BAZEL_FLAGS} --override_repository=${sibling_repo}=${sibling_path}"
     fi
   done
+elif [ "${TORCH_BACKEND}" = "cuda" ]; then
+  BAZEL_FLAGS="${BAZEL_FLAGS} --define=backend=cuda --define=jetson_use_hip=false --repo_env=GPU_BACKEND=cuda"
 fi
 normalize_cuda_arch_for_rules_cuda() {
   local arch="$1"

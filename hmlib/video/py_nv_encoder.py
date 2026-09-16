@@ -18,7 +18,14 @@ from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor
 from hmlib.video.ffmpeg import build_ffmpeg_output_handler, iter_ffmpeg_output_lines
 from hmlib.video.ffmpeg_mux_cmd import build_ffmpeg_raw_bitstream_mux_cmd
-from hockeymon import bgr_to_i420_cuda
+
+try:
+    from hockeymon import bgr_to_i420_cuda as _bgr_to_i420_cuda
+except ImportError as exc:  # pragma: no cover - native extension may be absent for mux-only callers
+    _bgr_to_i420_cuda = None
+    _bgr_to_i420_cuda_import_error = exc
+else:
+    _bgr_to_i420_cuda_import_error = None
 
 try:
     import PyNvVideoCodec as nvc  # type: ignore[import-not-found]
@@ -836,7 +843,11 @@ class PyNvVideoEncoder:
 
         # Delegate BGR -> I420 conversion to jetson-utils via hockeymon binding.
         with self._bgr_to_i420_cuda:
-            yuv420 = bgr_to_i420_cuda(frame)
+            if _bgr_to_i420_cuda is None:
+                raise ImportError(
+                    "PyNvVideoEncoder requires hockeymon.bgr_to_i420_cuda to convert BGR frames."
+                ) from _bgr_to_i420_cuda_import_error
+            yuv420 = _bgr_to_i420_cuda(frame)
 
         if yuv420.dim() != 2 or yuv420.size(0) != h * 3 // 2 or yuv420.size(1) != w:
             raise RuntimeError(

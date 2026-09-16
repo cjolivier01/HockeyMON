@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -11,6 +12,8 @@ from hmlib.utils.cuda_graph import CudaGraphCallable
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor, wrap_tensor
 
 from .base import Plugin
+
+logger = logging.getLogger(__name__)
 
 
 class IceRinkSegmBoundariesPlugin(Plugin):
@@ -369,6 +372,7 @@ class IceRinkSegmConfigPlugin(Plugin):
         self._rink_profile = None
         self._rink_geometry_key = None
         self._snapshot_mask = None
+        self._missing_game_id_warned = False
 
     def forward(self, context: Dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
@@ -392,6 +396,16 @@ class IceRinkSegmConfigPlugin(Plugin):
             if self._require_geometry_provenance or "telemetry_batch" in context
             else None
         )
+        if not game_id:
+            if not self._missing_game_id_warned:
+                logger.warning(
+                    "No game_id is available; skipping rink mask configuration for this run."
+                )
+                self._missing_game_id_warned = True
+            self._rink_profile = None
+            self._rink_geometry_key = (game_id, revision, None)
+            return {}
+        self._missing_game_id_warned = False
         if self._require_geometry_provenance and revision is None:
             raise ValueError("Static rink provenance requires a stitched geometry revision")
         img = unwrap_tensor(context.get("original_images"))

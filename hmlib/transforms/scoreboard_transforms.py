@@ -7,7 +7,7 @@ from mmengine.registry import TRANSFORMS
 from hmlib.config import get_clip_box, get_config, get_nested_value
 from hmlib.scoreboard.scoreboard import Scoreboard
 from hmlib.scoreboard.selector import configure_scoreboard
-from hmlib.utils.image import make_channels_last
+from hmlib.utils.image import image_height, image_width, make_channels_last
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,35 @@ def _try_pop(d: dict[str, Any], k: str) -> Any | None:
 
 def _is_rocm_runtime() -> bool:
     return bool(getattr(torch.version, "hip", None))
+
+
+def _scoreboard_bbox(
+    scoreboard_points: torch.Tensor | list[list[float]],
+) -> tuple[int, int, int, int]:
+    if isinstance(scoreboard_points, torch.Tensor):
+        points = scoreboard_points.detach().to(dtype=torch.float32)
+    else:
+        points = torch.tensor(scoreboard_points, dtype=torch.float32)
+    if points.shape != (4, 2):
+        raise ValueError(
+            "Scoreboard perspective polygon must contain exactly four [x, y] points; "
+            f"got shape {tuple(points.shape)}"
+        )
+
+    mins = torch.floor(torch.min(points, dim=0).values)
+    maxs = torch.ceil(torch.max(points, dim=0).values)
+    return tuple(int(v) for v in torch.cat((mins, maxs), dim=0).tolist())
+
+
+def _scoreboard_is_inside_image(
+    scoreboard_points: torch.Tensor | list[list[float]],
+    img: torch.Tensor,
+) -> tuple[bool, tuple[int, int, int, int], tuple[int, int]]:
+    x0, y0, x1, y1 = _scoreboard_bbox(scoreboard_points)
+    img_w = image_width(img)
+    img_h = image_height(img)
+    is_inside = 0 <= x0 < x1 <= img_w and 0 <= y0 < y1 <= img_h
+    return is_inside, (x0, y0, x1, y1), (img_w, img_h)
 
 
 @TRANSFORMS.register_module()
@@ -92,13 +121,28 @@ class HmCaptureScoreboard:
     ):
         self._scoreboard = None
         self._scoreboard_scale = scoreboard_scale
+        self._skip_capture = False
 
     def __call__(self, results: dict[str, Any]) -> dict[str, Any]:
         scoreboard = results.get("scoreboard_cfg")
-        if not scoreboard:
+        if not scoreboard or self._skip_capture:
+            results.pop("scoreboard_cfg", None)
             return results
         img = results["img"]
         if self._scoreboard is None:
+            scoreboard_points = scoreboard["scoreboard_points"]
+            is_inside, bbox, image_size = _scoreboard_is_inside_image(scoreboard_points, img)
+            if not is_inside:
+                logger.warning(
+                    "Scoreboard polygon bbox %s is outside current frame size %s; "
+                    "skipping scoreboard capture for this run.",
+                    bbox,
+                    image_size,
+                )
+                self._skip_capture = True
+                results.pop("scoreboard_cfg", None)
+                return results
+
             dest_width = scoreboard.pop("dest_width")
             if isinstance(dest_width, str) and dest_width.startswith("%"):
                 ratio = float(dest_width[1:]) / 100
@@ -116,7 +160,7 @@ class HmCaptureScoreboard:
                     dh = results["ori_shape"][-2]
                 dest_height = dh * ratio
             self._scoreboard = Scoreboard(
-                src_pts=scoreboard["scoreboard_points"],
+                src_pts=scoreboard_points,
                 dest_width=int(dest_width),
                 dest_height=int(dest_height),
                 scoreboard_scale=self._scoreboard_scale,

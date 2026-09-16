@@ -1659,6 +1659,7 @@ class _NoOpPlugin(torch.nn.Module):
     def __init__(self, name: str):
         super().__init__()
         self._name = name
+        self.enabled = False
 
     def forward(self, context: Dict[str, Any]):  # type: ignore[override]
         # Intentionally does nothing

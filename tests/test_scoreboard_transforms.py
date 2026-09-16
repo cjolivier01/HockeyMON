@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 
-from hmlib.transforms.scoreboard_transforms import HmConfigureScoreboard
+from hmlib.transforms.scoreboard_transforms import HmCaptureScoreboard, HmConfigureScoreboard
 
 
 def _scoreboard_game_config() -> dict[str, Any]:
@@ -165,3 +165,77 @@ def should_allow_interactive_scoreboard_setup_by_default_off_rocm(monkeypatch):
         [3, 4],
         [1, 4],
     ]
+
+
+def should_skip_scoreboard_capture_when_polygon_is_outside_frame(caplog):
+    capture = HmCaptureScoreboard()
+    image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+    results = {
+        "img": image,
+        "scoreboard_cfg": {
+            "scoreboard_points": [
+                [1000, 10],
+                [1100, 10],
+                [1100, 40],
+                [1000, 40],
+            ],
+            "dest_width": 64,
+            "dest_height": 32,
+        },
+    }
+
+    with caplog.at_level("WARNING"):
+        captured = capture(results)
+
+    assert captured is results
+    assert "scoreboard_img" not in captured
+    assert "scoreboard_cfg" not in captured
+    assert "is outside current frame size" in caplog.text
+
+    caplog.clear()
+    next_results = {
+        "img": image,
+        "scoreboard_cfg": {
+            "scoreboard_points": [
+                [1000, 10],
+                [1100, 10],
+                [1100, 40],
+                [1000, 40],
+            ],
+            "dest_width": 64,
+            "dest_height": 32,
+        },
+    }
+
+    with caplog.at_level("WARNING"):
+        captured = capture(next_results)
+
+    assert "scoreboard_img" not in captured
+    assert "scoreboard_cfg" not in captured
+    assert caplog.text == ""
+
+
+def should_skip_scoreboard_capture_when_polygon_is_partially_outside_frame(caplog):
+    capture = HmCaptureScoreboard()
+    image = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+    results = {
+        "img": image,
+        "scoreboard_cfg": {
+            "scoreboard_points": [
+                [-10, 10],
+                [20, 10],
+                [20, 40],
+                [-10, 40],
+            ],
+            "dest_width": 64,
+            "dest_height": 32,
+        },
+    }
+
+    with caplog.at_level("WARNING"):
+        captured = capture(results)
+
+    assert captured is results
+    assert "scoreboard_img" not in captured
+    assert "scoreboard_cfg" not in captured
+    assert "is outside current frame size" in caplog.text

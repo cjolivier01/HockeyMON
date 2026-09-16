@@ -112,6 +112,69 @@ def should_pad_static_outputs():
     assert torch.isfinite(static._track_covariance).all()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA/ROCm")
+@pytest.mark.parametrize("tracker_name", ["HmByteTrackerCuda", "HmByteTrackerCudaStatic"])
+def should_track_on_gpu_without_cholesky(tracker_name, monkeypatch):
+    from hmlib.tracking_utils import bytetrack
+
+    def reject_cholesky(*args, **kwargs):
+        raise AssertionError("GPU tracking must not require Cholesky/MAGMA support")
+
+    monkeypatch.setattr(torch.linalg, "cholesky_ex", reject_cholesky)
+    monkeypatch.setattr(torch, "cholesky_solve", reject_cholesky)
+
+    if tracker_name == "HmByteTrackerCudaStatic":
+        tracker = bytetrack.HmByteTrackerCudaStatic(
+            max_detections=8,
+            max_tracks=8,
+            device="cuda:0",
+        )
+    else:
+        tracker = bytetrack.HmByteTrackerCuda(device="cuda:0")
+
+    frames = [
+        (
+            [[10.0, 10.0, 30.0, 40.0], [100.0, 100.0, 140.0, 160.0]],
+            [1, 1],
+            [0.9, 0.85],
+        ),
+        (
+            [[12.0, 12.0, 32.0, 42.0], [103.0, 103.0, 143.0, 163.0]],
+            [1, 1],
+            [0.92, 0.8],
+        ),
+    ]
+
+    for frame_id, (boxes, labels, scores) in enumerate(frames):
+        if tracker_name == "HmByteTrackerCudaStatic":
+            data = {
+                "frame_id": torch.tensor([frame_id], dtype=torch.long, device="cuda"),
+                "bboxes": torch.zeros((8, 4), dtype=torch.float32, device="cuda"),
+                "labels": torch.zeros((8,), dtype=torch.long, device="cuda"),
+                "scores": torch.zeros((8,), dtype=torch.float32, device="cuda"),
+                "num_detections": torch.tensor([len(boxes)], dtype=torch.long, device="cuda"),
+            }
+            data["bboxes"][: len(boxes)] = torch.tensor(boxes, dtype=torch.float32, device="cuda")
+            data["labels"][: len(labels)] = torch.tensor(labels, dtype=torch.long, device="cuda")
+            data["scores"][: len(scores)] = torch.tensor(scores, dtype=torch.float32, device="cuda")
+        else:
+            data = {
+                "frame_id": torch.tensor([frame_id], dtype=torch.long, device="cuda"),
+                "bboxes": torch.tensor(boxes, dtype=torch.float32, device="cuda"),
+                "labels": torch.tensor(labels, dtype=torch.long, device="cuda"),
+                "scores": torch.tensor(scores, dtype=torch.float32, device="cuda"),
+            }
+
+        result = tracker.track(data)
+        ids = result["ids"]
+        if tracker_name == "HmByteTrackerCudaStatic":
+            ids = ids[: int(result["num_tracks"].item())]
+        else:
+            ids = ids[ids.ge(0)]
+        assert ids.device.type == "cuda"
+        assert torch.equal(ids.cpu(), torch.tensor([0, 1], dtype=torch.long))
+
+
 @pytest.mark.parametrize("tracker_name", ["HmByteTrackerCuda", "HmByteTrackerCudaStatic"])
 def should_match_dense_kalman_updates_without_cpu_lapack(tracker_name, monkeypatch):
     from hmlib.tracking_utils import bytetrack

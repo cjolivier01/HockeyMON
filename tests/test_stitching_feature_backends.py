@@ -11,9 +11,8 @@ import tifffile
 import torch
 from stitching_fixtures import write_mapping_files, write_seam
 
-from hmlib.stitching import configure_stitching
+from hmlib.stitching import configure_stitching, homography_maps
 from hmlib.stitching import control_points as control_points_module
-from hmlib.stitching import homography_maps
 
 
 def should_normalize_control_point_matcher_aliases() -> None:
@@ -50,6 +49,21 @@ def should_resize_dedode_inputs_to_1920_and_restore_original_coordinates() -> No
     resized_point = torch.tensor([1234.5, 678.25])
     original_point = resized_point * resized_point.new_tensor([scale_x, scale_y])
     torch.testing.assert_close(original_point, torch.tensor([4938.0, 2713.0]))
+
+
+def should_resize_superpoint_inputs_to_2048_and_restore_original_coordinates() -> None:
+    image = torch.empty((3, 4320, 7680), device="meta")
+    resized, scale_x, scale_y = control_points_module._resize_for_matching(
+        image,
+        max_dimension=control_points_module._SUPERPOINT_MAX_IMAGE_DIMENSION,
+    )
+
+    assert resized.shape == (3, 1152, 2048)
+    assert scale_x == pytest.approx(3.75)
+    assert scale_y == pytest.approx(3.75)
+    resized_point = torch.tensor([1024.0, 576.0])
+    original_point = resized_point * resized_point.new_tensor([scale_x, scale_y])
+    torch.testing.assert_close(original_point, torch.tensor([3840.0, 2160.0]))
 
 
 @pytest.mark.parametrize(

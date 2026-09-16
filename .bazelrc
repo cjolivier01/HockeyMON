@@ -31,6 +31,20 @@ build --define=target_platform=jetson
 build --action_env=target_platform="jetson"
 build --define=multiarch=x86_64-linux-gnu
 
+# Direct bazelisk invocations do not source .bazel_setup.sh. This ROCm
+# workstation defaults plain Bazel to the HIP backend; CUDA environments can use
+# --config=cuda or ./bazel/bazel.sh, which appends detected backend flags after
+# these rc defaults.
+build --config=rocm
+
+build:rocm --define=backend=hip
+build:rocm --define=jetson_use_hip=true
+build:rocm --repo_env=GPU_BACKEND=rocm
+
+build:cuda --define=backend=cuda
+build:cuda --define=jetson_use_hip=false
+build:cuda --repo_env=GPU_BACKEND=cuda
+
 build:jetson --cpu=k8
 build:jetson --repo_env=CC=/usr/bin/aarch64-linux-gnu-gcc
 build:jetson --repo_env=CXX=/usr/bin/aarch64-linux-gnu-g++

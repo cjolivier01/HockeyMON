@@ -513,7 +513,7 @@ def configure_ice_rink_mask(
     device: Optional[torch.device] = None,
     force: bool = False,
     show: bool = False,
-    image: torch.Tensor = None,
+    image: Union[torch.Tensor, np.ndarray, StreamTensorBase, None] = None,
     scale: Optional[float] = None,
     persist: bool = True,
 ) -> Optional[torch.Tensor]:
@@ -558,7 +558,11 @@ def configure_ice_rink_mask(
         if expected_shape is not None:
             assert image_width(image_frame) == expected_shape[-1]
             assert image_height(image_frame) == expected_shape[-2]
-        if device is not None and image_frame.device != device:
+        if (
+            isinstance(image_frame, torch.Tensor)
+            and device is not None
+            and image_frame.device != device
+        ):
             # Just synchronize everyone since this only happens once
             if image_frame.is_cuda and device.type == "cuda":
                 torch.cuda.synchronize()
@@ -569,13 +573,17 @@ def configure_ice_rink_mask(
         assert image_width(image) == expected_shape[-1]
         assert image_height(image) == expected_shape[-2]
         image_frame = image
-        if device is not None and image_frame.device != device:
-            if isinstance(image_frame, StreamTensorBase):
-                image_frame = image_frame.get()
-                assert image_frame.ndim == 4
-                image_frame = image_frame[0]
-                # Just synchronize everyone since this only happens once
-                torch.cuda.synchronize()
+        if isinstance(image_frame, StreamTensorBase):
+            image_frame = image_frame.get()
+            assert image_frame.ndim == 4
+            image_frame = image_frame[0]
+            # Just synchronize everyone since this only happens once
+            torch.cuda.synchronize()
+        if (
+            isinstance(image_frame, torch.Tensor)
+            and device is not None
+            and image_frame.device != device
+        ):
             image_frame = image_frame.to(device)
     else:
         image_frame = _get_first_frame(image_file)

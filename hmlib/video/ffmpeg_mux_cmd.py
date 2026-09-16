@@ -31,9 +31,6 @@ def build_ffmpeg_raw_bitstream_mux_cmd(
         if fps_frac.denominator != 1
         else str(fps_frac.numerator)
     )
-    time_base = Fraction(fps_frac.denominator, fps_frac.numerator)
-    time_base_str = f"{time_base.numerator}/{time_base.denominator}"
-    setts_bsf = f"setts=pts=N:dts=N:duration=1:time_base={time_base_str}"
 
     cmd: List[str] = [
         ffmpeg,
@@ -59,7 +56,7 @@ def build_ffmpeg_raw_bitstream_mux_cmd(
         cmd += ["-i", str(audio_file)]
         cmd += ["-map", "0:v:0", "-map", f"1:a:{int(audio_stream)}"]
 
-    cmd += ["-c:v", "copy", "-bsf:v", setts_bsf]
+    cmd += ["-c:v", "copy"]
 
     if audio_file:
         # If the audio codec is already AAC, stream copy; otherwise re-encode to AAC.

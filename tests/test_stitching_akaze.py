@@ -160,7 +160,12 @@ def should_pin_lens_profile_through_matching_worker(monkeypatch, tmp_path):
         "left",
         "right",
         100,
-        game_config={"stitching": {"control_point_matcher": "akaze"}},
+        game_config={
+            "stitching": {
+                "control_point_matcher": "akaze",
+                "mapping_backend": "opencv-magsac",
+            }
+        },
     )
     assert (
         captured["settings"].lens_profile_fingerprint

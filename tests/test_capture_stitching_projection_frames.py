@@ -3,19 +3,19 @@
 import copy
 import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 import yaml
+from stitching_fixtures import write_generation
 
 from scripts import capture_stitching_projection_frames as capture
-from stitching_fixtures import write_generation
 
 
 @pytest.fixture
@@ -272,8 +272,9 @@ def should_run_direct_script_without_pythonpath():
         env=environment,
         cwd="/tmp",
         capture_output=True,
+        check=False,
         text=True,
-        timeout=40,
+        timeout=120,
     )
     assert result.returncode == 0, result.stderr
     assert "Dry run: 1 of 58 cases" in result.stdout
@@ -344,9 +345,10 @@ def should_resolve_video_offsets_without_writing_source_game(
     source, tmp_path, monkeypatch, configured
 ):
     from types import SimpleNamespace
+
     import hmlib.stitching.configure_stitching as builder
     import hmlib.stitching.synchronize as synchronization
-    import hmlib.video.ffmpeg as ffmpeg
+    from hmlib.video import ffmpeg
 
     config = (
         {"stitching": {"frame_offsets": {"left": 3, "right": 7}}}

@@ -626,16 +626,22 @@ def _apply_single_lowmem_gpu_overrides(
             args.output_width = lowmem_max_output_width
             set_nested_value(game_config, "video_out.output_width", lowmem_max_output_width)
             set_nested_value(game_config, "stitching.max_output_width", lowmem_max_output_width)
-            set_nested_value(
-                game_config,
-                "aspen.plugins.stitching.params.max_output_width",
-                lowmem_max_output_width,
+            stitching_plugin = get_nested_value(game_config, "aspen.plugins.stitching", None)
+            if isinstance(stitching_plugin, dict):
+                set_nested_value(
+                    game_config,
+                    "aspen.plugins.stitching.params.max_output_width",
+                    lowmem_max_output_width,
+                )
+            video_out_prep_plugin = get_nested_value(
+                game_config, "aspen.plugins.video_out_prep", None
             )
-            set_nested_value(
-                game_config,
-                "aspen.plugins.video_out_prep.params.output_width",
-                lowmem_max_output_width,
-            )
+            if isinstance(video_out_prep_plugin, dict):
+                set_nested_value(
+                    game_config,
+                    "aspen.plugins.video_out_prep.params.output_width",
+                    lowmem_max_output_width,
+                )
 
     if "aspen_max_concurrent" not in explicit_arg_names and not _config_override_was_explicit(
         args, "aspen.pipeline.max_concurrent"
@@ -1581,7 +1587,8 @@ def _main(args, num_gpu):
                     else:
                         args.input_video = game_video_dir
 
-        results_folder = os.path.join(".", "output_workdirs", args.game_id)
+        work_dir_id = args.game_id or "input-video"
+        results_folder = os.path.join(".", "output_workdirs", work_dir_id)
         os.makedirs(results_folder, exist_ok=True)
         args.work_dir = results_folder
         # The rink plugin snapshots the mask it actually loads this run.
@@ -1848,6 +1855,7 @@ def _main(args, num_gpu):
 
             # Build inference pipeline from Aspen YAML if provided
             pipeline = None
+            orig_clip_box = None
             if aspen_cfg_for_pipeline and "inference_pipeline" in aspen_cfg_for_pipeline:
                 pipeline = aspen_cfg_for_pipeline["inference_pipeline"]
                 # first transform should be HmLoadImageFromWebcam in streaming
@@ -1873,7 +1881,11 @@ def _main(args, num_gpu):
                         ),
                     )
                 # Apply clip box if present
-                orig_clip_box = get_clip_box(game_id=args.game_id, root_dir=args.root_dir)
+                orig_clip_box = (
+                    get_clip_box(game_id=args.game_id, root_dir=args.root_dir)
+                    if args.game_id
+                    else None
+                )
                 if orig_clip_box:
                     hm_crop = get_pipeline_item(pipeline, "HmCrop")
                     if hm_crop is not None:
@@ -1926,9 +1938,7 @@ def _main(args, num_gpu):
             args.initial_args = vars(args)
             args.initial_args["top_border_lines"] = top_border_lines
             args.initial_args["bottom_border_lines"] = bottom_border_lines
-            args.initial_args["original_clip_box"] = get_clip_box(
-                game_id=args.game_id, root_dir=args.root_dir
-            )
+            args.initial_args["original_clip_box"] = orig_clip_box
             # Keep a copy under game_config for Aspen plugins that read from game_config.initial_args
             if hasattr(args, "game_config") and isinstance(args.game_config, dict):
                 args.game_config["initial_args"] = args.initial_args

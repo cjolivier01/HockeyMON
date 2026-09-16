@@ -30,6 +30,7 @@ _MATCHER_ALIASES = {
     "dedode": "dedode-lightglue",
     "akaze": "akaze-hamming",
 }
+_SUPERPOINT_MAX_IMAGE_DIMENSION = 2048
 _DEDODE_MAX_IMAGE_DIMENSION = 1920
 _LOFTR_MAX_IMAGE_DIMENSION = 1600
 
@@ -146,14 +147,26 @@ def _match_superpoint_lightglue(
         .eval()
         .to(device)
     )
-    feats0 = extractor.extract(image0)
-    feats1 = extractor.extract(image1)
+    resized0, scale_x0, scale_y0 = _resize_for_matching(
+        image0,
+        max_dimension=_SUPERPOINT_MAX_IMAGE_DIMENSION,
+    )
+    resized1, scale_x1, scale_y1 = _resize_for_matching(
+        image1,
+        max_dimension=_SUPERPOINT_MAX_IMAGE_DIMENSION,
+    )
+    feats0 = extractor.extract(resized0)
+    feats1 = extractor.extract(resized1)
     matches01 = matcher({"image0": feats0, "image1": feats1})
     feats0, feats1, matches01 = [rbd(value) for value in (feats0, feats1, matches01)]
     matches = matches01["matches"]
+    points0 = feats0["keypoints"][matches[..., 0]]
+    points1 = feats1["keypoints"][matches[..., 1]]
+    points0 = points0 * points0.new_tensor([scale_x0, scale_y0])
+    points1 = points1 * points1.new_tensor([scale_x1, scale_y1])
     return (
-        feats0["keypoints"][matches[..., 0]],
-        feats1["keypoints"][matches[..., 1]],
+        points0,
+        points1,
     )
 
 

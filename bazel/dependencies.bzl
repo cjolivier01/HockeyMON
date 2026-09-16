@@ -203,7 +203,7 @@ def _render_libtorch_build_file(ctx, conda_root):
     }
     backend_prefixes = {
         "cuda": ["libtorch_cuda"],
-        "rocm": ["libtorch_hip"],
+        "rocm": ["libaotriton", "libtorch_hip"],
         "cpu": [],
     }
 
@@ -211,13 +211,17 @@ def _render_libtorch_build_file(ctx, conda_root):
         if name in backend_exact.get(metadata.backend, []):
             backend_srcs.append("lib/" + name)
             continue
-        if name.endswith(".so") and _starts_with_any(name, backend_prefixes.get(metadata.backend, [])):
+        if ".so" in name and _starts_with_any(name, backend_prefixes.get(metadata.backend, [])):
             backend_srcs.append("lib/" + name)
 
     libtorch_srcs = ["lib/" + name for name in required_common] + backend_srcs
-    return template.replace("%{LIBTORCH_SO_FILES}", _format_build_string_list(libtorch_srcs)).replace(
+    build_file = template.replace("%{LIBTORCH_SO_FILES}", _format_build_string_list(libtorch_srcs)).replace(
         "%{GLIBCXX_USE_CXX11_ABI}",
         metadata.abi,
+    )
+    return struct(
+        backend = metadata.backend,
+        build_file = build_file,
     )
 
 # Implementation of the conda repository rule.
@@ -275,7 +279,9 @@ def conda_repo_setup(ctx):
     # Finally, generate the BUILD and WORKSPACE files in this repository.
     _write_workspace_file(ctx)
     if ctx.attr.torch_aware:
-        ctx.file("BUILD.bazel", _render_libtorch_build_file(ctx, conda_root))
+        rendered = _render_libtorch_build_file(ctx, conda_root)
+        ctx.file("BUILD.bazel", rendered.build_file)
+        ctx.file("torch_backend.bzl", 'TORCH_BACKEND = "%s"\n' % rendered.backend)
     else:
         ctx.file(
             "BUILD.bazel",
@@ -322,4 +328,75 @@ conda_repository = repository_rule(
         "torch_aware": attr.bool(default = False),
     },
     environ = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+def _valid_rocm_sdk_root(ctx, root):
+    if not root:
+        return False
+    return (
+        ctx.path(root + "/bin/hipcc").exists and
+        ctx.path(root + "/include/hip/hip_runtime.h").exists
+    )
+
+def _detect_rocm_sdk_root(ctx):
+    candidates = [
+        ctx.os.environ.get("ROCM_PATH", ""),
+        ctx.os.environ.get("HIP_PATH", ""),
+    ]
+
+    hipcc = ctx.which("hipcc")
+    if hipcc != None:
+        candidates.append(str(hipcc.dirname.dirname))
+
+    candidates.append("/opt/rocm")
+    opt = ctx.path("/opt")
+    if opt.exists:
+        for entry in opt.readdir():
+            basename = entry.basename
+            if basename.startswith("rocm-"):
+                candidates.append(str(entry))
+
+    seen = {}
+    for candidate in candidates:
+        if not candidate or seen.get(candidate):
+            continue
+        seen[candidate] = True
+        if _valid_rocm_sdk_root(ctx, candidate):
+            return candidate
+
+    fail("Could not locate a ROCm SDK root. Set ROCM_PATH or HIP_PATH to a directory containing bin/hipcc and include/hip/hip_runtime.h.")
+
+def _local_rocm_sdk_bridge_repository_impl(ctx):
+    rocm_root = _detect_rocm_sdk_root(ctx)
+    ctx.symlink(rocm_root + "/include", "include")
+    ctx.symlink(rocm_root + "/bin", "bin")
+    ctx.file(
+        "BUILD.bazel",
+        """
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "hipcc",
+    srcs = ["bin/hipcc"],
+)
+
+cc_library(
+    name = "rocm_sdk_core",
+    srcs = [],
+    hdrs = [],
+    includes = ["include"],
+)
+
+alias(
+    name = "amdhip64",
+    actual = "@local_rocm//:amdhip64",
+)
+""",
+    )
+
+local_rocm_sdk_bridge_repository = repository_rule(
+    implementation = _local_rocm_sdk_bridge_repository_impl,
+    environ = ["ROCM_PATH", "HIP_PATH", "PATH"],
 )
