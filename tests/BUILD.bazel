@@ -1,7 +1,10 @@
 load("@rules_python//python:defs.bzl", "py_test")
 load("@python_deps//:requirements.bzl", "requirement")
 load("//tools/python/pytest:defs.bzl", "pytest_test")
+load("@libtorch//:torch_backend.bzl", "TORCH_BACKEND")
 
+CUDA_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "cuda" else ["@platforms//:incompatible"]
+ROCM_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "rocm" else ["@platforms//:incompatible"]
 
 py_test(
     name="simple_run",
@@ -162,10 +165,7 @@ sh_test(
         "python_runtime.sh",
         "test_bytetrack_cuda.py",
     ],
-    target_compatible_with = select({
-        "//bazel:torch_backend_cuda": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
+    target_compatible_with = CUDA_TEST_COMPATIBLE_WITH,
 )
 
 sh_test(
@@ -180,10 +180,7 @@ sh_test(
         "python_runtime.sh",
         "test_bytetrack_cuda.py",
     ],
-    target_compatible_with = select({
-        "//bazel:torch_backend_rocm": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
+    target_compatible_with = ROCM_TEST_COMPATIBLE_WITH,
 )
 
 py_test(
@@ -470,6 +467,7 @@ sh_test(
     data=[
         "//:pyproject.toml",
         "//hmlib:hmlib.lib",
+        "//hockeymon:hockeymon",
         "aspen_plugin_harness.py",
         "python_runtime.sh",
         "test_ice_rink_config_plugin.py",
@@ -733,6 +731,7 @@ sh_test(
     data = [
         "//:pyproject.toml",
         "//hmlib:hmlib.lib",
+        "//hockeymon:hockeymon",
         "python_runtime.sh",
         "test_shadow_lift.py",
     ],
@@ -787,7 +786,7 @@ sh_test(
     name = "test_stitching_artifacts",
     srcs = ["runtime_pytest.sh"],
     args = ["tests/test_stitching_artifacts.py", "cv2", "numpy", "pytest", "tifffile", "torch"],
-    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_stitching_artifacts.py", "stitching_fixtures.py"],
+    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "//hockeymon:hockeymon", "python_runtime.sh", "test_stitching_artifacts.py", "stitching_fixtures.py"],
     env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
 
@@ -817,6 +816,7 @@ sh_test(
     data=[
         "//:pyproject.toml",
         "//hmlib:hmlib.lib",
+        "//hockeymon:hockeymon",
         "python_runtime.sh",
         "test_output_finalization.py",
     ],

@@ -93,7 +93,7 @@ http_archive(
 
 http_archive(
   name = "pybind11",
-  build_file = "@pybind11_bazel//:pybind11.BUILD",
+  build_file = "//bazel:pybind11.BUILD",
   # Python 3.14 support, including standalone bindings without Torch headers.
   strip_prefix = "pybind11-3.0.1",
   urls = ["https://github.com/pybind/pybind11/archive/refs/tags/v3.0.1.tar.gz"],
@@ -240,13 +240,14 @@ git_repository(
      remote = "https://github.com/cjolivier01/jetson-utils.git",
 )
 
-load("@jetson-utils//bazel:dependencies.bzl", "local_cuda_sdk_repository", "local_rocm_sdk_repository")
+load("@jetson-utils//bazel:dependencies.bzl", "local_cuda_sdk_repository")
+load("//bazel:dependencies.bzl", "local_rocm_sdk_bridge_repository")
 
 local_cuda_sdk_repository(
     name = "cuda_sdk",
 )
 
-local_rocm_sdk_repository(
+local_rocm_sdk_bridge_repository(
     name = "rocm_sdk_includes",
 )
 

@@ -689,13 +689,9 @@ std::pair<at::Tensor, at::Tensor> BYTETrackerCuda::kalman_update(
   auto projected_cov = proj.second;
 
   auto B = at::matmul(covariance, update_mat_T_);
-  auto BT = B.transpose(1, 2);
-
-  // Keep the full Kalman update on the tracker device to avoid
-  // host round-trips and implicit stream synchronizations.
-  auto chol = at::linalg_cholesky(projected_cov);
-  auto sol = at::cholesky_solve(BT, chol);
-  auto kalman_gain = sol.transpose(1, 2);
+  // Each position couples only to its own velocity, so projected_cov stays
+  // diagonal. Avoid Cholesky here; some ROCm PyTorch builds do not ship MAGMA.
+  auto kalman_gain = B / projected_cov.diagonal(0, 1, 2).unsqueeze(1);
 
   auto innovation = measurement_cxcyah - projected_mean;
   auto delta = at::matmul(

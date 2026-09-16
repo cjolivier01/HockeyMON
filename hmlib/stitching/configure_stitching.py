@@ -273,14 +273,27 @@ def get_tiff_tag_value(tiff_tag):
     return float(numerator) / denominator
 
 
-def is_older_than(file1: str, file2: str):
+def is_older_than(file1: Union[str, Path], file2: Union[str, Path]) -> Optional[bool]:
     """Return True if `file2` is older than `file1`, or None if missing."""
     try:
-        mtime1 = os.path.getmtime(file1)
-        mtime2 = os.path.getmtime(file2)
-        return mtime2 < mtime1
+        mtime1 = Path(file1).stat().st_mtime_ns
+        mtime2 = Path(file2).stat().st_mtime_ns
     except OSError:
         return None
+    return mtime2 < mtime1
+
+
+def _keep_autooptimiser_fresh(project: Path, autooptimiser: Path) -> None:
+    """Keep normal publications from looking like user-edited PTO projects."""
+    if not project.is_file() or not autooptimiser.is_file():
+        return
+    project_mtime_ns = project.stat().st_mtime_ns
+    autooptimiser_info = autooptimiser.stat()
+    if autooptimiser_info.st_mtime_ns <= project_mtime_ns:
+        os.utime(
+            autooptimiser,
+            ns=(autooptimiser_info.st_atime_ns, project_mtime_ns + 1_000_000),
+        )
 
 
 def _stitch_project_is_complete(
@@ -1115,6 +1128,7 @@ def build_stitching_project(
         _save_stitched_reference_frame(stage)
         for pto in stage.glob("*.pto"):
             _rewrite_pto_sources(pto, source_directory=stage, target_directory=project.parent)
+        _keep_autooptimiser_fresh(stage / project.name, stage / "autooptimiser_out.pto")
         (stage / _STITCH_ARTIFACT_MANIFEST).write_text(
             json.dumps(
                 {
@@ -1188,9 +1202,13 @@ def build_stitching_project(
         )
         # Make the provenance file the last replacement for tools that inspect it.
         names.remove(_STITCH_ARTIFACT_MANIFEST)
+        if "autooptimiser_out.pto" in names:
+            names.remove("autooptimiser_out.pto")
         if staged_private_config:
             names.remove("config.yaml")
             names.append("config.yaml")
+        if (stage / "autooptimiser_out.pto").is_file():
+            names.append("autooptimiser_out.pto")
         names.append(_STITCH_ARTIFACT_MANIFEST)
         # Derived masks are safe to recompute if publication later rolls back.
         # Clear them only after every replacement artifact has passed validation.

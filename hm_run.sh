@@ -19,7 +19,7 @@ SAVE_DATA_ARGS="--save-camera-data"
 echo "Experiment name: ${EXP_NAME}"
 
 if [ ! -z "${VIDEO}" ]; then
-  VIDEO="--input_video=${VIDEO}"
+  VIDEO="--input-video=${VIDEO}"
 fi
 
 REPO_PYTHONPATH="$(pwd)"

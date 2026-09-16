@@ -4,6 +4,7 @@ Experiments in stitching
 
 import argparse
 import contextlib
+import copy
 import math
 import os
 import sys
@@ -66,6 +67,12 @@ def make_parser():
             "Validate stitch CLI startup, report the active torch backend, "
             "optionally exercise preview output setup, and exit."
         ),
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Device used for configure-only rink mask inference",
     )
     return parser
 
@@ -647,9 +654,13 @@ def stitch_videos(
                 config=aspen_cfg_all,
                 explicit_arg_names=getattr(args, "explicit_arg_names", None),
             )
+            configure_cfg_all = copy.deepcopy(aspen_cfg_all)
             if lowmem:
                 if _apply_single_lowmem_gpu_overrides(args, aspen_cfg_all):
                     dtype = torch.float16
+        else:
+            configure_cfg_all = copy.deepcopy(aspen_cfg_all)
+        resolve_global_refs(configure_cfg_all)
         resolve_global_refs(aspen_cfg_all)
 
         stitch_cfg = get_nested_value(aspen_cfg_all, "stitching", {}) or {}
@@ -695,7 +706,7 @@ def stitch_videos(
             game_id=game_id,
             stitch_frame_time=stitch_frame_time,
             ignore_private_config=ignore_private_config,
-            game_config=aspen_cfg_all,
+            game_config=configure_cfg_all,
         )
 
         stitch_videos = {

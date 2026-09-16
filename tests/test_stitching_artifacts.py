@@ -752,6 +752,7 @@ def should_cancel_leveling_without_publishing_a_partial_generation(tmp_path, mon
 
 def should_reuse_frame_content_before_running_matcher_or_invalidating_again(tmp_path, monkeypatch):
     import torch
+
     from hmlib.cli import create_control_points
 
     frame = np.zeros((3, 4, 3), np.uint8)
@@ -823,13 +824,21 @@ def should_pin_original_game_lenses_across_staging_and_invalidate_profile_change
     monkeypatch.setattr(configure_stitching, "_build_stitching_project_in_place", build)
     for _ in range(2):
         configure_stitching.build_stitching_project(
-            str(game / "hm_project.pto"), images, 20, control_point_matcher="akaze"
+            str(game / "hm_project.pto"),
+            images,
+            20,
+            control_point_matcher="akaze",
+            mapping_backend="opencv-magsac",
         )
     assert len(pairs) == 1
     profile["right_uniforms"]["fx"] = 3
     profile_path.write_text(json.dumps(profile))
     configure_stitching.build_stitching_project(
-        str(game / "hm_project.pto"), images, 20, control_point_matcher="akaze"
+        str(game / "hm_project.pto"),
+        images,
+        20,
+        control_point_matcher="akaze",
+        mapping_backend="opencv-magsac",
     )
     assert len(pairs) == 2 and pairs[0].fingerprint != pairs[1].fingerprint
     assert pairs[0].right.fx == 2 and pairs[1].right.fx == 3
@@ -874,6 +883,7 @@ def should_invalidate_direct_cache_when_effective_scale_changes(tmp_path, monkey
 def should_retain_edited_pto_only_for_current_video_generation(tmp_path, monkeypatch, change):
     from dataclasses import replace
     from types import SimpleNamespace
+
     import torch
 
     images = _source_images(tmp_path)

@@ -1,13 +1,27 @@
 load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library")
-load("@rules_cuda//cuda:defs.bzl", "cuda_library", "requires_cuda")
+load("@libtorch//:torch_backend.bzl", "TORCH_BACKEND")
 
-ROCM_COMPAT_COPTS = select({
-    "//bazel:torch_backend_rocm": [
+ROCM_COMPAT_COPTS = (
+    [
         "-DJETSON_USE_HIP",
         "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE",
-    ],
-    "//conditions:default": [],
-})
+    ] if TORCH_BACKEND == "rocm" else []
+)
+
+CUDA_KERNEL_COMPATIBLE_WITH = [] if TORCH_BACKEND == "cuda" else ["@platforms//:incompatible"]
+ROCM_KERNEL_COMPATIBLE_WITH = [] if TORCH_BACKEND == "rocm" else ["@platforms//:incompatible"]
+GPU_OPS_COMPATIBLE_WITH = (
+    [] if TORCH_BACKEND in ["cuda", "rocm"] else ["@platforms//:incompatible"]
+)
+BYTETRACK_KERNEL_DEPS = (
+    [
+        ":bytetrack_cuda_kernels_hip",
+        "@rocm_sdk_includes//:amdhip64",
+    ] if TORCH_BACKEND == "rocm" else [
+        ":bytetrack_cuda_kernels_cuda",
+        "@jetson-utils//cuda:cuda_compat_includes",
+    ] if TORCH_BACKEND == "cuda" else []
+)
 
 cc_library(
     name = "pytorch_stitch",
@@ -34,22 +48,86 @@ cc_library(
     ],
 )
 
-cuda_library(
-    name = "bytetrack_cuda_kernels_cuda",
-    hdrs = ["torch_cuda_compat.h"],
-    srcs = ["bytetrack_cuda_kernels.cu"],
-    features = [
-        "-coverage",
-    ],
-    visibility = ["//visibility:private"],
-    target_compatible_with = select({
-        "//bazel:torch_backend_rocm": ["@platforms//:incompatible"],
-        "//conditions:default": [],
-    }) + requires_cuda(),
-    deps = [
+genrule(
+    name = "bytetrack_cuda_kernels_cuda_archive",
+    srcs = [
+        "bytetrack_cuda_kernels.cu",
+        "bytetrack_cuda_ops.h",
+        "torch_cuda_compat.h",
         "@jetson-utils//cuda:cuda_compat_includes",
-        "@libtorch",
     ],
+    outs = ["libbytetrack_cuda_kernels_cuda.a"],
+    cmd = """
+set -e
+NVCC="$(location @cuda_sdk//:nvcc)"
+if [ ! -x "$${NVCC}" ]; then
+  echo "CUDA backend selected but nvcc is unavailable. Install CUDA or use a ROCm env." >&2
+  exit 1
+fi
+CUDA_ROOT="$$(cd "$$(dirname "$${NVCC}")/.." && pwd)"
+OBJ="$(@D)/bytetrack_cuda_kernels.o"
+CUDA_GENCODE_FLAGS=""
+
+if [ -n "$${CUDA_BAZEL_ARCHS:-}" ]; then
+  OLD_IFS="$${IFS}"
+  IFS=';'
+  for group in $${CUDA_BAZEL_ARCHS}; do
+    [ -n "$${group}" ] || continue
+    case "$${group}" in
+      *:*)
+        virtual_arch="$${group%%:*}"
+        codes="$${group#*:}"
+        ;;
+      *)
+        virtual_arch="$${group%%,*}"
+        codes="$${group}"
+        ;;
+    esac
+    virtual_arch="$${virtual_arch#sm_}"
+    virtual_arch="$${virtual_arch#compute_}"
+
+    IFS=','
+    for code in $${codes}; do
+      [ -n "$${code}" ] || continue
+      case "$${code}" in
+        sm_*)
+          code_flag="sm_$${code#sm_}"
+          ;;
+        compute_*)
+          code_flag="compute_$${code#compute_}"
+          ;;
+        *)
+          code_flag="sm_$${code}"
+          ;;
+      esac
+      CUDA_GENCODE_FLAGS="$${CUDA_GENCODE_FLAGS} -gencode arch=compute_$${virtual_arch},code=$${code_flag}"
+    done
+    IFS=';'
+  done
+  IFS="$${OLD_IFS}"
+fi
+
+"$${NVCC}" -c --std=c++17 -Xcompiler=-fPIC -O2 \
+  $${CUDA_GENCODE_FLAGS} \
+  -I. \
+  -I"$${CUDA_ROOT}/include" \
+  -Iexternal/libtorch/include \
+  -Iexternal/libtorch/include/torch/csrc/api/include \
+  -Iexternal/jetson-utils/cuda \
+  $(location bytetrack_cuda_kernels.cu) -o "$${OBJ}"
+ar rcs "$@" "$${OBJ}"
+""",
+    tags = ["no-sandbox"],
+    tools = ["@cuda_sdk//:nvcc"],
+    target_compatible_with = CUDA_KERNEL_COMPATIBLE_WITH,
+)
+
+cc_import(
+    name = "bytetrack_cuda_kernels_cuda",
+    static_library = ":bytetrack_cuda_kernels_cuda_archive",
+    alwayslink = True,
+    visibility = ["//visibility:private"],
+    target_compatible_with = CUDA_KERNEL_COMPATIBLE_WITH,
 )
 
 genrule(
@@ -58,7 +136,7 @@ genrule(
         "bytetrack_cuda_kernels.cu",
         "bytetrack_cuda_ops.h",
         "torch_cuda_compat.h",
-        "@jetson-utils//cuda:cuda_compat_includes",
+        "@jetson-utils//cuda:cuda_compat_hdrs",
     ],
     outs = ["libbytetrack_cuda_kernels_hip.a"],
     cmd = """
@@ -92,10 +170,7 @@ ar rcs "$@" "$${OBJ}"
 """,
     tags = ["no-sandbox"],
     tools = ["@rocm_sdk_includes//:hipcc"],
-    target_compatible_with = select({
-        "//bazel:torch_backend_rocm": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
+    target_compatible_with = ROCM_KERNEL_COMPATIBLE_WITH,
 )
 
 cc_import(
@@ -103,10 +178,7 @@ cc_import(
     static_library = ":bytetrack_cuda_kernels_hip_archive",
     alwayslink = True,
     visibility = ["//visibility:private"],
-    target_compatible_with = select({
-        "//bazel:torch_backend_rocm": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
+    target_compatible_with = ROCM_KERNEL_COMPATIBLE_WITH,
 )
 
 cc_library(
@@ -115,15 +187,8 @@ cc_library(
     hdrs = ["bytetrack_cuda_ops.h"],
     copts = ROCM_COMPAT_COPTS,
     visibility = ["//visibility:public"],
-    deps = select({
-        "//bazel:torch_backend_rocm": [
-            ":bytetrack_cuda_kernels_hip",
-            "@jetson-utils//cuda:hip_runtime",
-        ],
-        "//conditions:default": [
-            ":bytetrack_cuda_kernels_cuda",
-        ],
-    }) + [
+    target_compatible_with = GPU_OPS_COMPATIBLE_WITH,
+    deps = BYTETRACK_KERNEL_DEPS + [
         "@libtorch",
     ],
 )

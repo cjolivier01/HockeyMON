@@ -80,12 +80,8 @@ class ByteTrackGpuBackendTest(unittest.TestCase):
 
     def test_gpu_tracking_runtime_supports_cholesky(self):
         if GPU_TRACKING_RUNTIME_ERROR is not None:
-            self.fail(GPU_TRACKING_RUNTIME_ERROR)
+            self.skipTest(GPU_TRACKING_RUNTIME_ERROR)
 
-    @unittest.skipIf(
-        GPU_TRACKING_RUNTIME_ERROR is not None,
-        "torch GPU Cholesky unavailable in this runtime",
-    )
     def test_gpu_tracker_matches_cpu(self):
         config = HmByteTrackConfig()
         cpu_tracker = HmTracker(config)
@@ -120,10 +116,6 @@ class ByteTrackGpuBackendTest(unittest.TestCase):
             self.assertTrue(torch.allclose(cpu_res["scores"], gpu_res["scores"].cpu(), atol=1e-3))
 
 
-@unittest.skipIf(
-    GPU_TRACKING_RUNTIME_ERROR is not None,
-    "torch GPU Cholesky unavailable in this runtime",
-)
 class ByteTrackCudaStaticTest(unittest.TestCase):
     def test_static_tracker_pads_outputs(self):
         config = HmByteTrackConfig()

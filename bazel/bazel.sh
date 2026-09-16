@@ -62,9 +62,13 @@ done
 
 case "${1:-}:${BAZEL_WORKSPACE_ROOT}" in
   build:"${REPO_ROOT}"|coverage:"${REPO_ROOT}"|run:"${REPO_ROOT}"|test:"${REPO_ROOT}")
-    CUDA_BAZEL_ARCHS="$(detect_cuda_bazel_archs)"
-    export CUDA_BAZEL_ARCHS
-    BAZEL_FLAGS="${BAZEL_FLAGS} --@rules_cuda//cuda:archs=${CUDA_BAZEL_ARCHS}"
+    if [[ "${TORCH_BACKEND:-}" == "cuda" ]]; then
+      CUDA_BAZEL_ARCHS="$(detect_cuda_bazel_archs)"
+      export CUDA_BAZEL_ARCHS
+      BAZEL_FLAGS="${BAZEL_FLAGS} --repo_env=CUDA_BAZEL_ARCHS=${CUDA_BAZEL_ARCHS}"
+      BAZEL_FLAGS="${BAZEL_FLAGS} --action_env=CUDA_BAZEL_ARCHS=${CUDA_BAZEL_ARCHS}"
+      BAZEL_FLAGS="${BAZEL_FLAGS} --@rules_cuda//cuda:archs=${CUDA_BAZEL_ARCHS}"
+    fi
     ;;
 esac
 

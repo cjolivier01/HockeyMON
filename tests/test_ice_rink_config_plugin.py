@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 try:
@@ -16,6 +17,7 @@ if torch is not None:
         sys.path.insert(0, str(TESTS_DIR))
 
     from aspen_plugin_harness import make_track_data_sample
+
     from hmlib.aspen.plugins.ice_rink_boundaries_plugins import IceRinkSegmConfigPlugin
     from hmlib.utils.gpu import wrap_tensor
 else:
@@ -24,6 +26,89 @@ else:
     wrap_tensor = None  # type: ignore[assignment]
 
 requires_torch = pytest.mark.skipif(torch is None, reason="requires torch")
+
+
+@requires_torch
+def should_configure_ice_rink_mask_from_numpy_image(tmp_path, monkeypatch) -> None:
+    from hmlib.segm import ice_rink
+
+    image = np.zeros((20, 30, 3), dtype=np.uint8)
+    captured = {}
+
+    monkeypatch.setattr(
+        ice_rink,
+        "get_model_config",
+        lambda game_id, model_name: ("config.py", "checkpoint.pth"),
+    )
+    monkeypatch.setattr(ice_rink, "get_game_dir", lambda game_id: str(tmp_path))
+    monkeypatch.setattr(ice_rink, "prepend_root_dir", lambda path: path)
+
+    def find_masks(**kwargs):
+        captured.update(kwargs)
+        return {"combined_mask": torch.ones((20, 30), dtype=torch.bool)}
+
+    monkeypatch.setattr(ice_rink, "find_ice_rink_masks", find_masks)
+
+    result = ice_rink.configure_ice_rink_mask(
+        game_id="game-1",
+        expected_shape=torch.Size((20, 30)),
+        device=torch.device("cpu"),
+        force=True,
+        image=image,
+        persist=False,
+    )
+
+    assert result["combined_mask"].shape == (20, 30)
+    assert captured["image"] is image
+    assert captured["device"] == torch.device("cpu")
+
+
+@requires_torch
+def should_skip_ice_rink_mask_when_game_id_is_missing(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(
+        "hmlib.segm.ice_rink.configure_ice_rink_mask",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("rink mask should not be configured without a game_id")
+        ),
+    )
+
+    plugin = IceRinkSegmConfigPlugin()
+    context = {
+        "data_samples": make_track_data_sample(num_frames=1, ori_shape=(20, 30)),
+        "original_images": wrap_tensor(torch.zeros((1, 20, 30, 3), dtype=torch.float32)),
+    }
+
+    with caplog.at_level("WARNING"):
+        out = plugin.forward(context)
+
+    assert out == {}
+    assert "No game_id is available" in caplog.text
+
+
+@requires_torch
+def should_skip_ice_rink_mask_without_game_id_even_with_telemetry_geometry(
+    monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr(
+        "hmlib.segm.ice_rink.configure_ice_rink_mask",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("rink mask should not be configured without a game_id")
+        ),
+    )
+
+    plugin = IceRinkSegmConfigPlugin()
+    context = {
+        "data_samples": make_track_data_sample(num_frames=1, ori_shape=(20, 30)),
+        "original_images": wrap_tensor(torch.zeros((1, 20, 30, 3), dtype=torch.float32)),
+        "camera_input_geometry": {"stitched_geometry_revision": "calibration-1"},
+        "telemetry_batch": object(),
+    }
+
+    with caplog.at_level("WARNING"):
+        out = plugin.forward(context)
+
+    assert out == {}
+    assert "No game_id is available" in caplog.text
 
 
 @requires_torch
@@ -101,6 +186,7 @@ def should_regenerate_for_same_size_geometry_change_without_overwriting_masks(mo
 @requires_torch
 def should_reuse_static_rink_embedding_and_reset_camera_history(tmp_path, monkeypatch):
     from aspen_plugin_harness import make_instance_data
+
     from hmlib.aspen.plugins.camera_controller_plugin import CameraControllerPlugin
     from hmlib.camera.camera_gpt import CameraGPTConfig, CameraPanZoomGPT, pack_gpt_checkpoint
     from hmlib.camera.camera_transformer import CameraNorm
@@ -176,8 +262,8 @@ def should_reuse_static_rink_embedding_and_reset_camera_history(tmp_path, monkey
 
 @requires_torch
 def should_snapshot_loaded_mask_once_for_run_publication(tmp_path, monkeypatch):
-    from PIL import Image
     import numpy as np
+    from PIL import Image
 
     mask = torch.zeros((20, 30), dtype=torch.bool)
     mask[2:8, 4:12] = True

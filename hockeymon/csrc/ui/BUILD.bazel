@@ -1,10 +1,8 @@
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@libtorch//:torch_backend.bzl", "TORCH_BACKEND")
 
 INCLUDE_PREFIX = "hockeymon/csrc/ui"
-ROCM_COMPAT_COPTS = select({
-    "//bazel:torch_backend_rocm": ["-DJETSON_USE_HIP"],
-    "//conditions:default": [],
-})
+ROCM_COMPAT_COPTS = ["-DJETSON_USE_HIP"] if TORCH_BACKEND == "rocm" else []
 
 cc_library(
     name = "hm_render_set",
