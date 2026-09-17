@@ -143,6 +143,8 @@ stitching:
   control_point_matcher: "superpoint-lightglue"
   # SuperPoint: native pixels or the 2048x1152 canvas (2k); other matchers retain their fixed size.
   control_point_resolution: "native"
+  # Neural control-point matchers: cuda (default) or cpu. No automatic CPU fallback.
+  control_point_execution_provider: "cuda"
   # Use Hugin alignment and General Panini for the default panorama mapping.
   mapping_backend: "nona"
   projection: "general-panini"
