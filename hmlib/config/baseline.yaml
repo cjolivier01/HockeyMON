@@ -64,7 +64,7 @@ runtime:
 hstream_ui:
   drivegpt_database:
     # Initial checkbox state; capture disables seeking for the run.
-    enabled: false
+    enabled: true
 
 apply_camera:
   crop_play_box: false
@@ -141,6 +141,8 @@ stitching:
     m_kpts0: null
     m_kpts1: null
   control_point_matcher: "superpoint-lightglue"
+  # SuperPoint: native pixels or the 2048x1152 canvas (2k); other matchers retain their fixed size.
+  control_point_resolution: "native"
   # Use Hugin alignment and General Panini for the default panorama mapping.
   mapping_backend: "nona"
   projection: "general-panini"

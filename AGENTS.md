@@ -48,6 +48,8 @@
 - Assets: do not commit large datasets or model weights; use `datasets/` and `pretrained/` symlinks.
 
 ## Security & Configuration Tips
+
+- Keep `hmlib/config/baseline.yaml` byte-for-byte synchronized with HockeyMONStream's `configs/baseline.yaml`. `stitching.control_point_resolution` is the native HStream matcher setting (`native` or `2k`); its runtime policy is documented in that repository's `docs/native-feature-matchers.md`.
 - Secrets: never commit credentials; prefer environment variables.
 - Large files: keep outside the repo (symlinks `datasets/`, `pretrained/`).
 - Reproducibility: run via Bazel for consistent tooling; avoid ad‑hoc local installs unless developing isolated modules.
