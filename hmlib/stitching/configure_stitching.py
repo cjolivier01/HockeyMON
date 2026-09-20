@@ -71,6 +71,7 @@ from hmlib.stitching.projections import (
     cap_projection_canvas,
     set_source_horizontal_fov,
 )
+from hmlib.stitching.seam import normalize_canvas_seam_mask
 from hmlib.stitching.settings import MAPPING_BACKENDS as MAPPING_BACKENDS
 from hmlib.stitching.settings import OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS
 from hmlib.stitching.settings import StitchingSettings
@@ -1121,7 +1122,8 @@ def build_stitching_project(
         )
         if not result:
             raise RuntimeError("Failed to build staged stitching project")
-        validate_artifact_generation(stage, project_name=project.name)
+        canvas_width, canvas_height = validate_artifact_generation(stage, project_name=project.name)
+        normalize_canvas_seam_mask(stage / "seam_file.png", canvas_width, canvas_height)
         for basename in ("mapping_0000", "mapping_0001"):
             read_mapping_arrays(stage, basename)
         validate_mapping_tiff(stage / "panorama.tif")

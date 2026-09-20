@@ -5,10 +5,8 @@ import subprocess
 import sys
 from fractions import Fraction
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import pytest
+import pytest
 
 
 def _ensure_repo_on_path() -> Path:
@@ -133,6 +131,67 @@ def should_support_mkv_container_with_pynvencoder(tmp_path: Path):
 
     assert filename.is_file()
     assert filename.stat().st_size > 0
+
+
+@pytest.mark.parametrize("preset", ["P2", "P5"])
+@pytest.mark.parametrize("use_pyav", [False, True])
+def should_preserve_nvenc_frame_order_without_packet_timestamps(tmp_path, preset, use_pyav):
+    import numpy as np
+
+    if use_pyav:
+        pytest.importorskip("av")
+    torch = _require_torch_cuda()
+    from hmlib.video.py_nv_encoder import PyNvVideoEncoder
+
+    width, height, frame_count = 320, 180, 12
+    output = tmp_path / "ordered.mkv"
+    encoder = PyNvVideoEncoder(
+        output_path=output,
+        width=width,
+        height=height,
+        fps=30000 / 1001,
+        codec="hevc",
+        preset=preset,
+        device=torch.device("cuda", 0),
+        use_pyav=use_pyav,
+    )
+    levels = torch.arange(frame_count, device="cuda", dtype=torch.uint8) * 16 + 32
+    frames = levels[:, None, None, None].expand(-1, height, width, 3).contiguous()
+    encoder.open()
+    try:
+        encoder.write(frames)
+    finally:
+        encoder.close()
+
+    probe = json.loads(
+        subprocess.check_output(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=has_b_frames:packet=pts_time,dts_time",
+                "-of",
+                "json",
+                str(output),
+            ],
+            text=True,
+        )
+    )
+    assert probe["streams"][0]["has_b_frames"] == 0
+    assert len(probe["packets"]) == frame_count
+    for index, packet in enumerate(probe["packets"]):
+        assert float(packet["pts_time"]) == pytest.approx(index * 1001 / 30000, abs=0.001)
+        assert packet["pts_time"] == packet["dts_time"]
+    decoded = subprocess.check_output(
+        ["ffmpeg", "-v", "error", "-i", str(output), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+    )
+    brightness = (
+        np.frombuffer(decoded, np.uint8).reshape(frame_count, height, width).mean(axis=(1, 2))
+    )
+    assert np.all(np.diff(brightness) > 0), brightness
 
 
 def should_accept_frame_ids_with_extra_dim(tmp_path: Path):
