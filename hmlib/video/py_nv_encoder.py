@@ -408,6 +408,10 @@ class PyNvVideoEncoder:
             "preset": self.preset,
             "fps": str(self.fps),
             "gpu_id": str(self.gpu_id),
+            # Encode() returns elementary bytes without packet timestamps.
+            # File and live muxers assign PTS/DTS in packet order, so presets
+            # must not introduce B-frame reordering (including the PyAV path).
+            "bf": "0",
         }
 
         # For file-backed and callback-backed elementary bitstreams, request a
@@ -698,30 +702,28 @@ class PyNvVideoEncoder:
 
             output_container = av.open(str(self.output_path), mode="w")
             try:
-                fps = Fraction(int(round(self.fps * 1001)), 1001)
-                codec_name = input_stream.codec_context.name
-                output_stream = output_container.add_stream(codec_name, rate=fps)
-                output_stream.width = self.width
-                output_stream.height = self.height
-                output_stream.pix_fmt = "yuv420p"
-                output_stream.time_base = Fraction(1, 90000)
-                if input_stream.codec_context.extradata:
-                    output_stream.codec_context.extradata = input_stream.codec_context.extradata
+                fps = Fraction(float(self.fps)).limit_denominator(1001)
+                # Remux with the NVENC stream's codec parameters. Creating an
+                # encoder stream here writes fresh headers (including B-frame
+                # settings) that can disagree with the copied packets.
+                output_stream = output_container.add_stream_from_template(input_stream)
+                frame_time_base = 1 / fps
+                output_stream.time_base = frame_time_base
 
                 output_container.start_encoding()
-                tb = output_stream.time_base
-                ticks_per_frame = int(round((Fraction(1, 1) / fps) / tb))
-                ticks_per_frame = max(ticks_per_frame, 1)
                 next_pts = 0
                 for packet in input_container.demux(input_stream):
                     if packet is None or packet.size == 0:
                         continue
                     packet.stream = output_stream
-                    packet.time_base = tb
+                    # Let PyAV rescale each absolute frame timestamp into the
+                    # container time base; rounding a per-frame increment to
+                    # Matroska milliseconds would accumulate timing drift.
+                    packet.time_base = frame_time_base
                     packet.pts = next_pts
                     packet.dts = next_pts
-                    packet.duration = ticks_per_frame
-                    next_pts += ticks_per_frame
+                    packet.duration = 1
+                    next_pts += 1
                     output_container.mux(packet)
             finally:
                 output_container.close()

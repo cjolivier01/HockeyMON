@@ -21,15 +21,20 @@ def build_ffmpeg_raw_bitstream_mux_cmd(
 ) -> List[str]:
     """Build an ffmpeg command to mux a raw elementary bitstream into a container.
 
-    This is intentionally a pure function so it can be unit-tested without
-    importing torch/PyNvVideoCodec (which may not be available in all test
-    environments).
+    The input must have no frame reordering: elementary streams have no packet
+    timestamps, so presentation and decode timestamps are assigned in packet
+    order at the requested frame rate. PyNvVideoEncoder disables B-frames to
+    satisfy this contract.
     """
     fps_frac = Fraction(float(fps)).limit_denominator(1001)
     fps_str = (
         f"{fps_frac.numerator}/{fps_frac.denominator}"
         if fps_frac.denominator != 1
         else str(fps_frac.numerator)
+    )
+    time_base = Fraction(fps_frac.denominator, fps_frac.numerator)
+    setts_bsf = (
+        f"setts=pts=N:dts=N:duration=1:time_base={time_base.numerator}/{time_base.denominator}"
     )
 
     cmd: List[str] = [
@@ -56,7 +61,7 @@ def build_ffmpeg_raw_bitstream_mux_cmd(
         cmd += ["-i", str(audio_file)]
         cmd += ["-map", "0:v:0", "-map", f"1:a:{int(audio_stream)}"]
 
-    cmd += ["-c:v", "copy"]
+    cmd += ["-c:v", "copy", "-bsf:v", setts_bsf]
 
     if audio_file:
         # If the audio codec is already AAC, stream copy; otherwise re-encode to AAC.
