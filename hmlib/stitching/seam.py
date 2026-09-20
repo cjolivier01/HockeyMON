@@ -1,6 +1,8 @@
 """Load enblend seam masks at their PNG-declared canvas position."""
 
+import logging
 import math
+import stat
 import struct
 import zlib
 from dataclasses import dataclass
@@ -14,11 +16,14 @@ import tifffile
 from hmlib.stitching.artifact_validation import (
     MAX_SEAM_BYTES,
     bounded_file,
+    load_owner_seam_mask,
     validate_canvas,
     validate_mapping_tiff,
 )
+from hmlib.stitching.artifacts import artifact_stage, publish_artifacts, stitching_lock
 
 PathLike = Union[str, Path]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,7 @@ class PngLayout:
     height: int
     offset_x: int = 0
     offset_y: int = 0
+    has_offset: bool = False
 
 
 def _read_exact(file, size: int, description: str) -> bytes:
@@ -116,6 +122,7 @@ def read_png_layout(path: PathLike) -> PngLayout:
                     height=layout.height,
                     offset_x=offset_x,
                     offset_y=offset_y,
+                    has_offset=True,
                 )
                 have_offset = True
             elif chunk_type == b"IDAT":
@@ -161,6 +168,54 @@ def load_canvas_seam_mask(path: PathLike, canvas_width: int, canvas_height: int)
     if any(before or after for before, after in padding):
         seam = np.pad(seam, padding, mode="edge")
     return np.ascontiguousarray(seam)
+
+
+def normalize_canvas_seam_mask(path: PathLike, canvas_width: int, canvas_height: int) -> None:
+    """Publish a full-canvas seam for native loaders, matching HStream normalization.
+
+    Honor PNG pixel offsets and replicate crop edges without moving the seam.
+    HStream also accepts a one-pixel origin crop without offset metadata; larger
+    unpositioned crops are ambiguous and must be regenerated.
+    """
+    path = Path(path)
+    path = path.parent.resolve() / path.name
+    with stitching_lock(path.parent):
+        validate_canvas(canvas_width, canvas_height)
+        layout = read_png_layout(path)
+        if not layout.has_offset and (
+            canvas_width - layout.width > 1 or canvas_height - layout.height > 1
+        ):
+            raise ValueError(
+                f"PNG seam has no crop offset and does not match its mapping canvas: {path} "
+                f"size={layout.width}x{layout.height} canvas={canvas_width}x{canvas_height}"
+            )
+        seam = load_owner_seam_mask(path, canvas_width, canvas_height)
+        if (
+            layout.width == canvas_width
+            and layout.height == canvas_height
+            and layout.offset_x == 0
+            and layout.offset_y == 0
+        ):
+            return
+        with artifact_stage(path.parent) as stage:
+            staged = stage / path.name
+            if not cv2.imwrite(str(staged), seam):
+                raise OSError(f"Could not write normalized stitching seam: {staged}")
+            staged.chmod(stat.S_IMODE(path.stat().st_mode))
+            if read_png_layout(staged) != PngLayout(canvas_width, canvas_height):
+                raise ValueError(f"Normalized stitching seam has an invalid layout: {staged}")
+            load_owner_seam_mask(staged, canvas_width, canvas_height)
+            publish_artifacts(path.parent, stage, [path.name])
+        logger.info(
+            "Normalized stitching seam %s from %dx%d+%d+%d to %dx%d",
+            path,
+            layout.width,
+            layout.height,
+            layout.offset_x,
+            layout.offset_y,
+            canvas_width,
+            canvas_height,
+        )
 
 
 def _tiff_tag_number(tag, default: float) -> float:

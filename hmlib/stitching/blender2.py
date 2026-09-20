@@ -27,7 +27,11 @@ from hmlib.stitching.artifact_validation import (
 from hmlib.stitching.artifacts import artifact_stage, publish_artifacts, stitching_lock
 from hmlib.stitching.image_remapper import ImageRemapper, RemapImageInfoEx
 from hmlib.stitching.laplacian_blend import LaplacianBlend, simple_make_full
-from hmlib.stitching.seam import load_canvas_seam_mask, read_mapping_canvas_size
+from hmlib.stitching.seam import (
+    load_canvas_seam_mask,
+    normalize_canvas_seam_mask,
+    read_mapping_canvas_size,
+)
 from hmlib.stitching.synchronize import synchronize_by_audio
 from hmlib.tracking_utils.timer import Timer
 from hmlib.ui import show_image
@@ -396,7 +400,7 @@ def make_seam_and_xor_masks(
                         check=True,
                         cwd=stage,
                     )
-                load_owner_seam_mask(stage / "seam_file.png", canvas_width, canvas_height)
+                normalize_canvas_seam_mask(stage / "seam_file.png", canvas_width, canvas_height)
                 if (stage / "xor_file.png").is_file():
                     load_canvas_seam_mask(stage / "xor_file.png", canvas_width, canvas_height)
                 _save_stitched_reference_frame(stage)
@@ -955,8 +959,11 @@ def create_stitcher(
             if input_image_sizes_wh
             else (mapping_basename_1, mapping_basename_2)
         )
-        validate_artifact_generation(dir_name, basenames=basenames)
+        canvas_width, canvas_height = validate_artifact_generation(dir_name, basenames=basenames)
         if use_cuda_pano:
+            normalize_canvas_seam_mask(
+                Path(dir_name) / "seam_file.png", canvas_width, canvas_height
+            )
             assert dir_name
             if input_image_sizes_wh is None:
                 input_image_sizes_wh = [left_image_size_wh, right_image_size_wh]

@@ -12,6 +12,7 @@ import cv2
 import numpy as np
 import pytest
 import tifffile
+import torch
 import yaml
 from stitching_fixtures import write_generation
 
@@ -239,6 +240,46 @@ def should_validate_real_artifacts_and_reject_mismatched_maps(tmp_path):
     tifffile.imwrite(tmp_path / "mapping_0000_x.tif", np.zeros((3, 3), np.uint16))
     with pytest.raises(ValueError, match="Mismatched"):
         validate_artifact_generation(tmp_path)
+
+
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.float32])
+@pytest.mark.parametrize("use_cuda_pano_n", [False, True])
+def should_normalize_seam_before_native_stitcher_load(
+    tmp_path, monkeypatch, dtype, use_cuda_pano_n
+):
+    from hmlib.stitching import blender2
+
+    write_generation(tmp_path)
+    # HStream accepts a one-pixel crop without a PNG offset, but hm-cupano
+    # requires the raster itself to cover the entire mapping canvas.
+    assert cv2.imwrite(str(tmp_path / "seam_file.png"), np.array([[0, 255, 255]] * 3, np.uint8))
+    loaded = object()
+
+    def native_loader(directory, *args, **kwargs):
+        seam = cv2.imread(str(Path(directory) / "seam_file.png"), cv2.IMREAD_GRAYSCALE)
+        assert seam.tolist() == [[0, 255, 255, 255]] * 3
+        return loaded
+
+    for name in (
+        "CudaStitchPanoU8",
+        "CudaStitchPanoF32",
+        "CudaStitchPanoNU8",
+        "CudaStitchPanoNF32",
+    ):
+        monkeypatch.setattr(blender2, name, native_loader)
+    assert (
+        blender2.create_stitcher(
+            str(tmp_path),
+            batch_size=1,
+            device=torch.device("cuda"),
+            dtype=dtype,
+            left_image_size_wh=(4, 3),
+            right_image_size_wh=(4, 3),
+            python_blender=False,
+            use_cuda_pano_n=use_cuda_pano_n,
+        )
+        is loaded
+    )
 
 
 def should_reject_oversized_png_header_before_reading_its_payload(tmp_path):
