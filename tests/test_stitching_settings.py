@@ -13,7 +13,11 @@ import pytest
 from stitching_fixtures import write_generation
 
 from hmlib.stitching import configure_stitching
-from hmlib.stitching.projections import apply_projection, read_panorama_geometry
+from hmlib.stitching.projections import (
+    apply_projection,
+    cap_projection_canvas,
+    read_panorama_geometry,
+)
 from hmlib.stitching.settings import (
     PROJECTIONS,
     maximum_projection_fov,
@@ -202,6 +206,36 @@ def should_apply_rotation_and_manual_crop_before_mapping(tmp_path):
     assert "--rotate=0,-25,2" in commands[0]
     assert "--crop=10,90,20,80%" in commands[0]
     assert "--projection-parameter=100 0 0" in commands[0]
+
+
+@pytest.mark.parametrize(
+    "source_size, source_crop, capped_size, capped_crop",
+    [
+        ((16446, 8440), (1195, 14904, 3886, 8341), (1920, 984), (140, 1740, 454, 974)),
+        ((4000, 2011), (100, 3900, 670, 1900), (1920, 964), (48, 1872, 322, 912)),
+    ],
+)
+def should_preserve_centered_crop_when_capping_canvas(
+    tmp_path, source_size, source_crop, capped_size, capped_crop
+):
+    project = tmp_path / "autooptimiser_out.pto"
+    project.write_text(
+        _pto(
+            fov=183,
+            crop=" S" + ",".join(map(str, source_crop)),
+        ).replace("w1000 h500", f"w{source_size[0]} h{source_size[1]}")
+    )
+
+    def run(command):
+        assert f"--canvas={capped_size[0]}x{capped_size[1]}" in command
+        Path(command[command.index("-o") + 1]).write_text(
+            _pto(fov=183, crop=" S" + ",".join(map(str, capped_crop))).replace(
+                "w1000 h500", f"w{capped_size[0]} h{capped_size[1]}"
+            )
+        )
+
+    result = cap_projection_canvas(project, _nona(max_output_width=1920), run)
+    assert result.crop == capped_crop
 
 
 def should_level_between_projection_and_one_final_nona_enblend_pass(tmp_path, monkeypatch):
