@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from fractions import Fraction
 from pathlib import Path
-from typing import List, Optional
 
 
 def build_ffmpeg_raw_bitstream_mux_cmd(
@@ -12,13 +11,13 @@ def build_ffmpeg_raw_bitstream_mux_cmd(
     output_path: Path,
     stream_format: str,
     fps: float,
-    muxer: Optional[str],
-    audio_file: Optional[str] = None,
+    muxer: str | None,
+    audio_file: str | None = None,
     audio_stream: int = 0,
     audio_offset_seconds: float = 0.0,
-    audio_codec: Optional[str] = None,
+    audio_codec: str | None = None,
     aac_bitrate: str = "192k",
-) -> List[str]:
+) -> list[str]:
     """Build an ffmpeg command to mux a raw elementary bitstream into a container.
 
     The input must have no frame reordering: elementary streams have no packet
@@ -32,12 +31,8 @@ def build_ffmpeg_raw_bitstream_mux_cmd(
         if fps_frac.denominator != 1
         else str(fps_frac.numerator)
     )
-    time_base = Fraction(fps_frac.denominator, fps_frac.numerator)
-    setts_bsf = (
-        f"setts=pts=N:dts=N:duration=1:time_base={time_base.numerator}/{time_base.denominator}"
-    )
-
-    cmd: List[str] = [
+    setts_bsf = f"setts=pts=N/({fps_str}*TB):dts=N/({fps_str}*TB)" f":duration=1/({fps_str}*TB)"
+    cmd: list[str] = [
         ffmpeg,
         "-y",
         "-hide_banner",
@@ -102,7 +97,7 @@ def build_ffmpeg_live_bitstream_publish_cmd(
     stream_format: str,
     fps: float,
     aac_bitrate: str = "128k",
-) -> List[str]:
+) -> list[str]:
     """Build an ffmpeg command to publish a raw elementary bitstream live.
 
     This is used for NVENC-backed RTMP(S) publishing where encoded H.264
@@ -115,9 +110,7 @@ def build_ffmpeg_live_bitstream_publish_cmd(
         if fps_frac.denominator != 1
         else str(fps_frac.numerator)
     )
-    time_base = Fraction(fps_frac.denominator, fps_frac.numerator)
-    time_base_str = f"{time_base.numerator}/{time_base.denominator}"
-    setts_bsf = f"setts=pts=N:dts=N:duration=1:time_base={time_base_str}"
+    setts_bsf = f"setts=pts=N/({fps_str}*TB):dts=N/({fps_str}*TB)" f":duration=1/({fps_str}*TB)"
 
     return [
         ffmpeg,
@@ -170,7 +163,7 @@ def build_ffmpeg_live_hls_bitstream_publish_cmd(
     fps: float,
     hls_time: float = 1.0,
     hls_list_size: int = 6,
-) -> List[str]:
+) -> list[str]:
     """Build an ffmpeg command to mux a raw elementary bitstream into live HLS."""
     fps_frac = Fraction(float(fps)).limit_denominator(1001)
     fps_str = (
@@ -178,9 +171,7 @@ def build_ffmpeg_live_hls_bitstream_publish_cmd(
         if fps_frac.denominator != 1
         else str(fps_frac.numerator)
     )
-    time_base = Fraction(fps_frac.denominator, fps_frac.numerator)
-    time_base_str = f"{time_base.numerator}/{time_base.denominator}"
-    setts_bsf = f"setts=pts=N:dts=N:duration=1:time_base={time_base_str}"
+    setts_bsf = f"setts=pts=N/({fps_str}*TB):dts=N/({fps_str}*TB)" f":duration=1/({fps_str}*TB)"
 
     return [
         ffmpeg,

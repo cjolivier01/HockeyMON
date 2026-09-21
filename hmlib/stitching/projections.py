@@ -5,9 +5,9 @@ from __future__ import annotations
 import math
 import re
 import shlex
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Sequence
 
 from hmlib.stitching.settings import (
     MAX_CANVAS_DIMENSION,
@@ -135,9 +135,19 @@ def _cap_panorama(
             raise ValueError("pano_modify changed projection geometry while capping canvas")
         if (scaled.width, scaled.height) != (width, height):
             raise ValueError("pano_modify produced an unexpected capped canvas size")
+        # Mirror PanoramaOptions::setWidth(..., true) followed by setHeight():
+        # Hugin rounds the uniformly scaled crop and intermediate height, then
+        # recenters vertically with C++ integer division and clips to the canvas.
+        canvas_scale = width / geometry.width
+        intermediate_height = int(geometry.height * canvas_scale + 0.5)
+        vertical_shift = math.trunc((height - intermediate_height) / 2)
         for index, edge in enumerate(scaled.crop):
-            scale = width / geometry.width if index < 2 else height / geometry.height
-            if abs(edge - geometry.crop[index] * scale) > 1.01:
+            scaled_extent = width if index < 2 else height
+            expected = int(geometry.crop[index] * canvas_scale + 0.5)
+            if index >= 2:
+                expected += vertical_shift
+            expected = min(max(expected, 0), scaled_extent)
+            if edge != expected:
                 raise ValueError("pano_modify changed framing while capping canvas")
         temporary.replace(project)
         geometry = scaled
