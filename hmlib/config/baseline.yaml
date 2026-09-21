@@ -87,11 +87,13 @@ video_out:
   output_width: "auto"
   output_height: null
   bit_rate: null  # Auto: scale source bitrate per pixel to the final output dimensions.
-  # GPU scaling filter for ENCODE_PROGRAM_4K_FILE sinks. "default" restores
-  # the pre-cubic NVIDIA behavior (nearest on the CUDA path). Valid values are
-  # default, nearest, bilinear, cubic (or bicubic), super, lanczos, and nicest.
-  # A direct pipeline.sink*.interpolation-method in an app/overlay YAML takes
-  # precedence at the same configuration layer.
+  # NVIDIA scaling filter for ENCODE_PROGRAM_4K_FILE sinks. "default" restores
+  # the pre-cubic behavior (nearest on CUDA and VIC). Portable names are
+  # default, nearest, bilinear, and algo1 through algo4. CUDA aliases are
+  # cubic/bicubic, super, and lanczos for algo1 through algo3; on VIC those
+  # algorithms are 5-tap, 10-tap, and smart. "nicest" aliases algo4, which is
+  # ignored on CUDA and selects nicest on VIC. A direct pipeline.sink*.
+  # interpolation-method in an app/overlay YAML wins a same-layer tie.
   program_4k_interpolation: "default"
   show_image: false
   show_scaled: null
