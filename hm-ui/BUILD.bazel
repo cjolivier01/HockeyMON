@@ -9,17 +9,13 @@ filegroup(
     ], allow_empty = True),
 )
 
-genrule(
-    name = "hm-ui",
-    srcs = [
-        "Cargo.toml",
-        "Cargo.lock",
-        ":sources",
-        "@ubuntu2204_glibc//:sysroot",
-        "@ubuntu2204_glibc//:.sysroot_marker",
-    ],
-    outs = ["hm-ui-bin"],
-    cmd = """
+config_setting(
+    name = "portable_hm_ui_enabled",
+    define_values = {"portable_hm_ui": "true"},
+    visibility = ["//visibility:public"],
+)
+
+_BUILD_PREAMBLE = """
 set -eu
 build_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/hm-ui-build.XXXXXX")"
 trap 'rm -rf "$${build_dir}"' EXIT
@@ -28,6 +24,35 @@ cp $(location Cargo.lock) "$${build_dir}/Cargo.lock"
 cp -R "$$(dirname $(location Cargo.toml))/src" "$${build_dir}/src"
 export CARGO_HOME="$${build_dir}/.cargo-home"
 export CARGO_TARGET_DIR="$${build_dir}/.cargo-target"
+"""
+
+genrule(
+    name = "hm-ui",
+    srcs = [
+        "Cargo.toml",
+        "Cargo.lock",
+        ":sources",
+    ],
+    outs = ["hm-ui-bin"],
+    cmd = _BUILD_PREAMBLE + """
+cargo build --locked --manifest-path "$${build_dir}/Cargo.toml" --release
+cp "$$CARGO_TARGET_DIR/release/hm-ui" "$@"
+""",
+    executable = True,
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "hm-ui-portable",
+    srcs = [
+        "Cargo.toml",
+        "Cargo.lock",
+        ":sources",
+        "@ubuntu2204_glibc//:sysroot",
+        "@ubuntu2204_glibc//:.sysroot_marker",
+    ],
+    outs = ["hm-ui-portable-bin"],
+    cmd = _BUILD_PREAMBLE + """
 rust_target="$$(rustc -vV | sed -n 's/^host: //p')"
 rust_target_env="$$(printf '%s' "$${rust_target}" | tr '[:lower:]-' '[:upper:]_')"
 case "$${rust_target}" in
@@ -55,6 +80,11 @@ cargo build --locked --manifest-path "$${build_dir}/Cargo.toml" --release --targ
 cp "$$CARGO_TARGET_DIR/$${rust_target}/release/hm-ui" "$@"
 """,
     executable = True,
+    tags = ["manual"],
+    target_compatible_with = select({
+        ":portable_hm_ui_enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     visibility = ["//visibility:public"],
 )
 

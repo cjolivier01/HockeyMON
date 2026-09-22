@@ -3,21 +3,21 @@
 _PACKAGES = {
     "x86_64": [
         (
-            "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.35-0ubuntu3.14_amd64.deb",
+            "https://launchpad.net/ubuntu/+archive/primary/+files/libc6_2.35-0ubuntu3.14_amd64.deb",
             "4aa2feae34cb6296e133af5c7429756ab5606549cd16a9d26a0060e010214523",
         ),
         (
-            "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6-dev_2.35-0ubuntu3.14_amd64.deb",
+            "https://launchpad.net/ubuntu/+archive/primary/+files/libc6-dev_2.35-0ubuntu3.14_amd64.deb",
             "49583c0ebf761a2ade6d024949e8b1d70746653cce781e3a4eb68b4dd7ced540",
         ),
     ],
     "aarch64": [
         (
-            "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6_2.35-0ubuntu3.14_arm64.deb",
+            "https://launchpad.net/ubuntu/+archive/primary/+files/libc6_2.35-0ubuntu3.14_arm64.deb",
             "e4eb1c12810ccbb8758b6cc8e49b7090bf6a28f11bc1bec09a9f8ded55c7cd37",
         ),
         (
-            "https://ports.ubuntu.com/ubuntu-ports/pool/main/g/glibc/libc6-dev_2.35-0ubuntu3.14_arm64.deb",
+            "https://launchpad.net/ubuntu/+archive/primary/+files/libc6-dev_2.35-0ubuntu3.14_arm64.deb",
             "21e50e76729c36891e4bd4397d4f58dabe8589e972535765da3deabcc5a55bba",
         ),
     ],
