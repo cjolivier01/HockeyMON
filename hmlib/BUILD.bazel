@@ -125,12 +125,17 @@ genrule(
 
 genrule(
     name = "embed_hm_ui",
-    srcs = ["//hm-ui:hm-ui"],
+    srcs = ["//hm-ui:hm-ui-portable"],
     outs = ["bin/hm-ui"],
     cmd = select({
-        ":linux_x86_64": "$(location //tools/packaging/wheel:validate_elf_arch) $(location //hm-ui:hm-ui) x86_64 2.35 && cp $(location //hm-ui:hm-ui) $@ && chmod +x $@",
-        ":linux_arm64": "$(location //tools/packaging/wheel:validate_elf_arch) $(location //hm-ui:hm-ui) aarch64 2.35 && cp $(location //hm-ui:hm-ui) $@ && chmod +x $@",
-        ":linux_aarch64": "$(location //tools/packaging/wheel:validate_elf_arch) $(location //hm-ui:hm-ui) aarch64 2.35 && cp $(location //hm-ui:hm-ui) $@ && chmod +x $@",
+        ":linux_x86_64": "$(location //tools/packaging/wheel:validate_elf_arch) $(location //hm-ui:hm-ui-portable) x86_64 2.35 && cp $(location //hm-ui:hm-ui-portable) $@ && chmod +x $@",
+        ":linux_arm64": "$(location //tools/packaging/wheel:validate_elf_arch) $(location //hm-ui:hm-ui-portable) aarch64 2.35 && cp $(location //hm-ui:hm-ui-portable) $@ && chmod +x $@",
+        ":linux_aarch64": "$(location //tools/packaging/wheel:validate_elf_arch) $(location //hm-ui:hm-ui-portable) aarch64 2.35 && cp $(location //hm-ui:hm-ui-portable) $@ && chmod +x $@",
+    }),
+    tags = ["python-wheel", "manual"],
+    target_compatible_with = select({
+        "//hm-ui:portable_hm_ui_enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
     }),
     tools = ["//tools/packaging/wheel:validate_elf_arch"],
     visibility = ["//visibility:public"],
@@ -159,6 +164,11 @@ filegroup(
         "py.typed",
         # "@multiblend//:multiblend",
     ] + _MULTIBLEND_DATA,
+    tags = ["python-wheel", "manual"],
+    target_compatible_with = select({
+        "//hm-ui:portable_hm_ui_enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
     visibility = ["//visibility:public"],
 )
 

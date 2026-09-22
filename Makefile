@@ -69,16 +69,16 @@ test-cuda:
 	$(call run_bazel_with_backend,cuda,test --config=release //...)
 
 wheel:
-	$(call run_bazel_with_backend,,run --config=release //hockeymon:bdist_wheel)
-	$(call run_bazel_with_backend,,run --config=release //hmlib:bdist_wheel)
+	$(call run_bazel_with_backend,,run --config=release --config=portable-wheels //hockeymon:bdist_wheel)
+	$(call run_bazel_with_backend,,run --config=release --config=portable-wheels //hmlib:bdist_wheel)
 
 wheel-rocm:
-	$(call run_bazel_with_backend,rocm,run --config=release //hockeymon:bdist_wheel)
-	$(call run_bazel_with_backend,rocm,run --config=release //hmlib:bdist_wheel)
+	$(call run_bazel_with_backend,rocm,run --config=release --config=portable-wheels //hockeymon:bdist_wheel)
+	$(call run_bazel_with_backend,rocm,run --config=release --config=portable-wheels //hmlib:bdist_wheel)
 
 wheel-cuda:
-	$(call run_bazel_with_backend,cuda,run --config=release //hockeymon:bdist_wheel)
-	$(call run_bazel_with_backend,cuda,run --config=release //hmlib:bdist_wheel)
+	$(call run_bazel_with_backend,cuda,run --config=release --config=portable-wheels //hockeymon:bdist_wheel)
+	$(call run_bazel_with_backend,cuda,run --config=release --config=portable-wheels //hmlib:bdist_wheel)
 
 docs:
 	$(BAZEL) build //:all_doxygen_docs

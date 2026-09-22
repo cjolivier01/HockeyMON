@@ -61,8 +61,11 @@ The Python bridge searches for `hm-ui` in this order:
 6. `hm-ui/target/release/hm-ui` or `hm-ui/target/debug/hm-ui`
 
 The hmlib wheel bundles `hm-ui` at `hmlib/bin/hm-ui`.
-The Bazel release target links that bundled executable dynamically against a pinned
-Ubuntu 22.04 (glibc 2.35) sysroot, independent of the build host's glibc version.
+The regular Bazel target uses the current build environment. The wheel packaging
+path opts into `--config=portable-wheels` and uses `//hm-ui:hm-ui-portable`,
+which links the bundled executable dynamically against a pinned Ubuntu 22.04
+(glibc 2.35) sysroot so wheels keep a stable glibc baseline independent of the
+build host.
 
 To exercise actual X11/EGL initialization (not only `--help`), install `xvfb-run` and run:
 
