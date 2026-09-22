@@ -208,8 +208,20 @@ play_tracker:
   no_wide_start: true
 
 ice_boundaries:
+  # Detection sample offsets, independent of stitching/calibration artifacts.
+  # Near/bottom edge: subtract this fraction of player height from box center.
   raise_bbox_center_by_height_ratio: -0.1
+  # Far/top edge: subtract this fraction of player height from the feet.
   lower_bbox_bottom_by_height_ratio: 0.1
+  # Far-half feet move toward the rink center by these fractions of half width.
+  left_bbox_by_half_width_ratio: 0.2
+  right_bbox_by_half_width_ratio: 0.2
+  # Signed native stitched-pixel mask insets. Positive excludes more ice;
+  # negative expands the allowed region. Independent of calibration artifacts.
+  mask_top_inset: 0
+  mask_bottom_inset: 0
+  mask_left_inset: 0
+  mask_right_inset: 0
 
 #
 # Rink config

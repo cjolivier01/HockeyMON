@@ -51,6 +51,7 @@
 
 - Keep `hmlib/config/baseline.yaml` byte-for-byte synchronized with HockeyMONStream's `configs/baseline.yaml`. `stitching.control_point_execution_provider` defaults to `cuda` (`cpu` is an explicit alternative without a UI switch). `stitching.control_point_resolution` is the native HStream matcher setting (`auto` defaults to `2k` on Jetson and `native` on desktop/SBSA; explicit `native`/`2k` overrides it); its runtime policy is documented in that repository's `docs/native-feature-matchers.md`.
 - Secrets: never commit credentials; prefer environment variables.
+- Shared `ice_boundaries` defaults include HStream's four signed pixel mask insets (zero by default) and independent left/right half-box-width sampling offsets. These are player-filter settings, not stitching artifacts; see HockeyMONStream's `docs/rink-extents.md` for native filtering and preview semantics.
 - Large files: keep outside the repo (symlinks `datasets/`, `pretrained/`).
 - Reproducibility: run via Bazel for consistent tooling; avoid ad‑hoc local installs unless developing isolated modules.
 
