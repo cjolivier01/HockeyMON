@@ -49,7 +49,7 @@
 
 ## Security & Configuration Tips
 
-- Keep `hmlib/config/baseline.yaml` byte-for-byte synchronized with HockeyMONStream's `configs/baseline.yaml`. `stitching.control_point_execution_provider` defaults to `cuda` (`cpu` is an explicit alternative without a UI switch). `stitching.control_point_resolution` is the native HStream matcher setting (`auto` defaults to `2k` on Jetson and `native` on desktop/SBSA; explicit `native`/`2k` overrides it); its runtime policy is documented in that repository's `docs/native-feature-matchers.md`.
+- Keep `hmlib/config/baseline.yaml` byte-for-byte synchronized with HockeyMONStream's `configs/baseline.yaml`. `stitching.control_point_execution_provider` defaults to `cuda` (`cpu` is an explicit alternative without a UI switch). `stitching.control_point_resolution` is the native HStream matcher setting (`2k` is the default on every platform, including missing or `auto` settings; explicit `native`/`1k` choices remain available); its runtime policy is documented in that repository's `docs/native-feature-matchers.md`.
 - The shared `stitching.rink_mask_frame_time` and rink-profile field configure native HStream final-mask sampling: `null` inherits, `auto` uses the first stitched frame, and negative `HH:MM:SS[.mmm]` is relative to the synchronized recording end. TV Dublin defaults to `-00:00:01`; Python mask sampling is unchanged. Runtime ownership and UI overrides are documented in HockeyMONStream's `docs/rink-mask-frame-time-design.md`.
 - Secrets: never commit credentials; prefer environment variables.
 - Large files: keep outside the repo (symlinks `datasets/`, `pretrained/`).
