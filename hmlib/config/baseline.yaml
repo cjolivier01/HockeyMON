@@ -137,6 +137,14 @@ stitching:
     sharks-ice:
       display_name: "Sharks Ice"
       rotation_degrees: [0, -15, 0]
+    tv-dublin:
+      display_name: "TV Dublin"
+      rotation_degrees: [0, -23.5, 3.23]
+      rink_mask_frame_time: "-00:00:01"
+  # Final ice-mask frame: null inherits the selected rink; auto uses the current
+  # first stitched frame. A negative [-]HH:MM:SS[.mmm] time is relative to the
+  # synchronized recording end, independently of Playback start and run limits.
+  rink_mask_frame_time: null
   # Unselected keeps legacy zero rotation; select a venue in the game config.
   rink_config: null
   pto_project_file: null
