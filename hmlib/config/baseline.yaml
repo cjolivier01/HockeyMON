@@ -157,9 +157,9 @@ stitching:
     m_kpts0: null
     m_kpts1: null
   control_point_matcher: "superpoint-lightglue"
-  # SuperPoint: auto uses 2k on Jetson, native on desktop/SBSA; explicit native or 2k overrides it.
+  # SuperPoint defaults to 2k on every platform; auto also resolves to 2k. Native and 1k remain explicit choices.
   # Other matchers retain their fixed processing sizes.
-  control_point_resolution: "auto"
+  control_point_resolution: "2k"
   # Neural control-point matchers: cuda (default) or cpu. No automatic CPU fallback.
   control_point_execution_provider: "cuda"
   # Use Hugin alignment and General Panini for the default panorama mapping.
