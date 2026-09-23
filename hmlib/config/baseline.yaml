@@ -137,6 +137,14 @@ stitching:
     sharks-ice:
       display_name: "Sharks Ice"
       rotation_degrees: [0, -15, 0]
+    tv-dublin:
+      display_name: "TV Dublin"
+      rotation_degrees: [0, -23.5, 3.23]
+      rink_mask_frame_time: "-00:00:01"
+  # Final ice-mask frame: null inherits the selected rink; auto uses the current
+  # first stitched frame. A negative [-]HH:MM:SS[.mmm] time is relative to the
+  # synchronized recording end, independently of Playback start and run limits.
+  rink_mask_frame_time: null
   # Unselected keeps legacy zero rotation; select a venue in the game config.
   rink_config: null
   pto_project_file: null
@@ -149,9 +157,9 @@ stitching:
     m_kpts0: null
     m_kpts1: null
   control_point_matcher: "superpoint-lightglue"
-  # SuperPoint: auto uses 2k on Jetson, native on desktop/SBSA; explicit native or 2k overrides it.
+  # SuperPoint defaults to 2k on every platform; auto also resolves to 2k. Native and 1k remain explicit choices.
   # Other matchers retain their fixed processing sizes.
-  control_point_resolution: "auto"
+  control_point_resolution: "2k"
   # Neural control-point matchers: cuda (default) or cpu. No automatic CPU fallback.
   control_point_execution_provider: "cuda"
   # Use Hugin alignment and General Panini for the default panorama mapping.
