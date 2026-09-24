@@ -47,7 +47,12 @@ class DetectorComparePlugin(DetectorInferencePlugin):
             models,
             annotations,
             threshold,
-            metadata={"tracking_model": selected, "precision": "float32"},
+            metadata={
+                "tracking_model": selected,
+                "precision": "float32",
+                "timing": "single-frame inference after one warmup per model/input shape",
+                "warmups": [],
+            },
         )
         self.selected = selected
         self.sample_every = sample_every
@@ -55,6 +60,7 @@ class DetectorComparePlugin(DetectorInferencePlugin):
         self.threshold = threshold
         self._frames_seen = 0
         self._previews_written = 0
+        self._warmed = set()
         self.factories = torch.nn.ModuleDict(
             {
                 name: DetectorFactoryPlugin(
@@ -80,44 +86,47 @@ class DetectorComparePlugin(DetectorInferencePlugin):
         self.report.metadata["game_id"] = context.get("game_id")
         samples = context["data_samples"]
         track = samples[0] if isinstance(samples, list) else samples
-        # The selected detector still runs on every frame and supplies tracking.
-        super().forward(context)
-        from mmdet.structures import DetDataSample, TrackDataSample
-
+        compared = []
         for index in range(len(track)):
             sample = track[index]
-            frame_id = int(sample.metainfo["frame_id"])
+            # Detector heads use ori_shape to clip boxes, so normalize HmCrop's
+            # full tensor shape before inference, not just before reporting.
+            sample.set_metainfo({"ori_shape": original_shape(sample.metainfo)})
+            frame_id = int(sample.metainfo["img_id"])
             compare = (
                 frame_id in self.report.frames
                 if self.report.ground_truth is not None
                 else self._frames_seen % self.sample_every == 0
             )
             self._frames_seen += 1
-            if not compare:
-                continue
+            if compare:
+                compared.append((index, frame_id))
+
+        # Reuse the actual tracking prediction for the normal single-frame case.
+        # Larger tracking batches still need single-frame comparison calls for
+        # equivalent latency measurements. Unsampled frames add no timing syncs.
+        reuse_selected = len(track) == 1 and bool(compared)
+        if reuse_selected:
+            self._warmup(self.selected, context)
+            selected_elapsed = self._timed_inference(context, tracking=True)
+        else:
+            super().forward(context)
+        for index, frame_id in compared:
+            sample = track[index]
             predictions, elapsed = {}, {}
             for name in self.report.models:
-                # Copy metadata only. GPU prediction wrappers own CUDA events
-                # that cannot be deep-copied, and candidates need no old predictions.
-                comparison_track = TrackDataSample(
-                    video_data_samples=[DetDataSample(metainfo=sample.metainfo)]
-                )
-                candidate_context = dict(
-                    context,
-                    inputs=inputs[index : index + 1],
-                    data_samples=comparison_track,
-                    detect_timer=None,
-                )
-                if name != self.selected:
-                    candidate_context.update(self.factories[name](candidate_context))
-                if inputs.is_cuda:
-                    torch.cuda.synchronize(inputs.device)
-                start = time.perf_counter()
-                self.inference(candidate_context)
-                if inputs.is_cuda:
-                    torch.cuda.synchronize(inputs.device)
-                elapsed[name] = (time.perf_counter() - start) * 1000
-                inst = comparison_track[0].pred_instances
+                if name == self.selected and reuse_selected:
+                    inst = sample.pred_instances
+                    elapsed[name] = selected_elapsed
+                else:
+                    candidate_context = self._fresh_context(
+                        context, inputs[index : index + 1], sample
+                    )
+                    if name != self.selected:
+                        candidate_context.update(self.factories[name](candidate_context))
+                    self._warmup(name, candidate_context)
+                    elapsed[name] = self._timed_inference(candidate_context)
+                    inst = candidate_context["data_samples"][0].pred_instances
                 boxes = unwrap_tensor(inst.bboxes).detach().float().cpu().numpy()
                 scores = unwrap_tensor(inst.scores).detach().float().cpu().numpy()
                 labels = unwrap_tensor(inst.labels).detach().cpu().numpy()
@@ -135,6 +144,47 @@ class DetectorComparePlugin(DetectorInferencePlugin):
                 self._preview(frame_id, inputs[index], sample.metainfo, predictions)
                 self._previews_written += 1
         return {}
+
+    @staticmethod
+    def _fresh_context(context: dict, inputs: torch.Tensor, sample):
+        from mmdet.structures import DetDataSample, TrackDataSample
+
+        # Prediction wrappers own CUDA events that cannot be deep-copied.
+        return dict(
+            context,
+            inputs=inputs,
+            data_samples=TrackDataSample(
+                video_data_samples=[DetDataSample(metainfo=sample.metainfo)]
+            ),
+            detect_timer=None,
+        )
+
+    def _warmup(self, name: str, context: dict):
+        inputs = context["inputs"]
+        key = (name, tuple(inputs.shape), str(inputs.dtype), str(inputs.device))
+        if key in self._warmed:
+            return
+        samples = context["data_samples"]
+        track = samples[0] if isinstance(samples, list) else samples
+        warmup = self._fresh_context(context, inputs, track[0])
+        elapsed = self._timed_inference(warmup)
+        self.report.metadata["warmups"].append(
+            {"model": name, "input_shape": list(inputs.shape), "warmup_ms": elapsed}
+        )
+        self._warmed.add(key)
+
+    def _timed_inference(self, context: dict, *, tracking: bool = False) -> float:
+        inputs = context["inputs"]
+        if inputs.is_cuda:
+            torch.cuda.synchronize(inputs.device)
+        start = time.perf_counter()
+        if tracking:
+            super().forward(context)
+        else:
+            self.inference(context)
+        if inputs.is_cuda:
+            torch.cuda.synchronize(inputs.device)
+        return (time.perf_counter() - start) * 1000
 
     def _preview(self, frame_id: int, image: torch.Tensor, meta: dict, predictions: dict):
         import cv2

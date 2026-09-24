@@ -22,8 +22,12 @@ defaults to 0.25 and affects counts, agreement and previews, not mAP input.
 Only class 0 (person) is compared. Raw detections are compared before rink masks
 and tracking. All candidates use identical HM preprocessing, FP32 inference and PyTorch head NMS;
 this compares model weights at HM's configured resolution, not their differing
-training resolutions or production TensorRT latency. Timings are diagnostic, may
-include first-call warmup and exclude loading. Comparison adds compute overhead.
+training resolutions or production TensorRT latency. Timings exclude model loading
+and one untimed warmup per model/input shape; warmup timings are recorded separately
+in the JSON report. These are diagnostic single-frame timings, not a steady-state
+throughput benchmark. With batch size 1, the selected model's actual tracking
+prediction is reused. Larger tracking batches require additional single-frame
+comparison calls to keep timing workloads equivalent. Comparison adds compute overhead.
 
 ## Accuracy with labeled game frames
 
@@ -73,6 +77,9 @@ It accepts both full distillation checkpoints and exported students. Explicit
 paths override discovery; missing or ambiguous checkpoints fail clearly.
 `--detector-checkpoint` (alias `--detector`) overrides the selected profile's weights.
 Checkpoint shapes must match the profile and are checked strictly.
+Deployed configs with a checkpoint prefix (for example, `detector.` in a complete
+tracker checkpoint) retain that prefix when weights are overridden; raw exported
+detector checkpoints are also accepted.
 
 During a comparison, `--tracking-model trained` or `--tracking-model distilled`
 chooses the predictions passed to normal rink filtering/tracking. The default is

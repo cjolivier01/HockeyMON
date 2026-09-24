@@ -122,7 +122,8 @@ class ComparisonReport:
             accuracy_available=self.ground_truth is not None,
             note="mAP uses person boxes before rink filtering, COCO maxDets=100. "
             "Agreement with deployed predictions is not accuracy. "
-            "Inference timings are diagnostic, may include warmup, and exclude model loading.",
+            "Inference timings are diagnostic warmed single-frame measurements; "
+            "model loading and separately recorded warmups are excluded.",
             models={},
         )
         for name, spec in self.models.items():

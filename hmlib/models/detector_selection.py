@@ -111,6 +111,12 @@ def resolve_detector(profile: str, deployed_params: dict, checkpoint: str | None
     checkpoint = checkpoint or deployed_params.get("checkpoint")
     if checkpoint:
         spec["checkpoint"] = _local_checkpoint(checkpoint)
+        init_cfg = model.get("init_cfg")
+        prefix = init_cfg.get("prefix") if isinstance(init_cfg, dict) else None
+        if profile == "deployed":
+            prefix = deployed_params.get("checkpoint_prefix") or prefix
+        if prefix:
+            spec["checkpoint_prefix"] = prefix
         model["init_cfg"] = None
     return spec
 
@@ -155,6 +161,7 @@ def configure_detector_selection(args, game_config: dict) -> None:
     spec = resolve_detector(selected, deployed, args.detector or overrides.get(selected))
     params.pop("detector_yaml", None)
     params.pop("checkpoint", None)
+    params.pop("checkpoint_prefix", None)
     params.update(spec)
     identity = detector_identity(spec)
     for backend, field, extension in (("trt", "engine", "engine"), ("onnx", "path", "onnx")):
@@ -164,11 +171,10 @@ def configure_detector_selection(args, game_config: dict) -> None:
     if not args.compare_detectors:
         return
     models = {
-        name: resolve_detector(name, deployed, overrides.get(name))
+        name: spec if name == selected else resolve_detector(name, deployed, overrides.get(name))
         for name in PROFILES
         if name != "distilled" or args.compare_distilled or selected == name
     }
-    models[selected] = spec
     # All models use the same PyTorch head NMS and precision for this comparison.
     params["trt"]["enable"] = False
     params["onnx"]["enable"] = False
