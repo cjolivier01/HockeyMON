@@ -268,7 +268,9 @@ def make_parser(parser: argparse.ArgumentParser = None):
     # ONNX pose options moved to hm_opts.parser
     # Audio-only and output-video moved to hm_opts.parser
     parser.add_argument("--checkpoint", type=str, default=None, help="Tracking checkpoint file")
-    parser.add_argument("--detector", help="det checkpoint file")
+    from hmlib.models.detector_selection import add_detector_arguments
+
+    add_detector_arguments(parser)
     parser.add_argument("--reid", help="reid checkpoint file")
 
     # Pose args
@@ -1626,6 +1628,11 @@ def _main(args, num_gpu):
 
         using_precalculated_tracking = bool(tracking_data_path)
         using_precalculated_detections = bool(detection_data_path)
+        if args.detector_model or args.detector or args.compare_detectors:
+            # Model selection requires GPU capacity for fresh inference even
+            # when earlier runs left CSVs in the game directory.
+            using_precalculated_tracking = False
+            using_precalculated_detections = False
         # using_precalculated_pose = bool(pose_data_path)
 
         actual_device_count = torch.cuda.device_count()
@@ -1849,6 +1856,10 @@ def _main(args, num_gpu):
                 args.aspen["plugins"] = trunks_cfg
             except Exception:
                 traceback.print_exc()
+
+        from hmlib.models.detector_selection import configure_detector_selection
+
+        configure_detector_selection(args, game_config)
 
         if args.tracking:
             model = None  # Built by Aspen ModelFactoryPlugin
