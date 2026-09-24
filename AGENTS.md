@@ -47,6 +47,13 @@
 - Do not mention AI agents or coding tools in PR titles or descriptions; PR comments may mention them when useful.
 - Assets: do not commit large datasets or model weights; use `datasets/` and `pretrained/` symlinks.
 
+### Nested repositories and submodules
+
+- Treat every nested Git repository as an independent repository with its own commit and remote.
+- Commit and push changes from the innermost repository outward. Never record a submodule pointer to a child commit that has not been pushed.
+- After pushing a child repository, stage its updated gitlink in the immediate parent, commit and push that parent, then repeat for every containing superproject until the outermost repository is updated.
+- Before finishing, verify that each repository in the chain points at the intended child commit and that no task-related changes remain uncommitted.
+
 ## Security & Configuration Tips
 
 - Keep `hmlib/config/baseline.yaml` byte-for-byte synchronized with HockeyMONStream's `configs/baseline.yaml`. `stitching.control_point_execution_provider` defaults to `cuda` (`cpu` is an explicit alternative without a UI switch). `stitching.control_point_resolution` is the native HStream matcher setting (`2k` is the default on every platform, including missing or `auto` settings; explicit `native`/`1k` choices remain available); its runtime policy is documented in that repository's `docs/native-feature-matchers.md`.
