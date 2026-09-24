@@ -460,7 +460,8 @@ model:
   ice_rink_segm:
     config: config/models/ice_rink/mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco.py
     # checkpoint: pretrained/mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco/ice_rink_iter_30000.pth
-    checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/ice_rink_iter_30000.pth
+    # checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/ice_rink_iter_30000.pth
+    checkpoint: https://github.com/cjolivier01/HockeyMONStream/releases/download/pretrained-assets-v1/ice_rink_iter_60000.pth
 
   svnh_classifier:
     config: null
