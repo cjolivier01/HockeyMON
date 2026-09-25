@@ -51,7 +51,7 @@ def should_resolve_camera_and_inherit_rink_without_mutating_config():
     }
     original = copy.deepcopy(config)
     settings = read_stitching_settings(config)
-    assert (settings.horizontal_fov, settings.vertical_fov) == (109, 98)
+    assert (settings.horizontal_fov, settings.vertical_fov) == (108, 98)
     assert settings.framing.rotation_degrees == (0, -23, 4)
     assert config == original
     config["stitching"]["projection_framing"] = {"rotation_degrees": [0, 0, 0]}

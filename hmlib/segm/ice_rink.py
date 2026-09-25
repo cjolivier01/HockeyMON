@@ -186,6 +186,7 @@ def result_to_polygons(
     category_mask = labels == category_id
     bboxes = bboxes[category_mask, :]
     labels = labels[category_mask]
+    scores = scores[category_mask]
     if segms is not None:
         segms = segms[category_mask, ...]
 
@@ -195,10 +196,11 @@ def result_to_polygons(
         inds = scores > score_thr
         bboxes = bboxes[inds, :]
         labels = labels[inds]
+        scores = scores[inds]
         if segms is not None:
             segms = segms[inds, ...]
 
-    if not len(segms):
+    if segms is None or not len(segms):
         print("No ice rink found")
         return None
 
@@ -290,10 +292,28 @@ def _rescale_rink_results(
     return rink_results
 
 
+def rink_category_id(model: "BaseDetector", default: int = 1) -> int:
+    """
+    Locate the ice rink class index in a detector's ``dataset_meta``.
+
+    Single-class rink checkpoints label the rink 0, while the COCO-shaped checkpoints
+    this code was originally written against label it 1. Ask the model rather than
+    assuming, falling back to ``default`` when the checkpoint carries no class names.
+    """
+    classes = (getattr(model, "dataset_meta", None) or {}).get("classes")
+    if not classes:
+        return default
+    for index, name in enumerate(classes):
+        if "rink" in str(name).lower():
+            return index
+    return default
+
+
 def detect_ice_rink_mask(
     image: Union[torch.Tensor, np.ndarray],
     model: "BaseDetector",
     show: bool = False,
+    category_id: Optional[int] = None,
 ) -> Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]]:
     from mmdet.apis import inference_detector
 
@@ -310,7 +330,15 @@ def detect_ice_rink_mask(
         # show_image = model.show_result(show_image, result, score_thr=DEFAULT_SCORE_THRESH, show=False)
         do_show_image("Ice-rink", show_image, wait=True)
 
-    return result_to_polygons(inference_result=result, score_thr=DEFAULT_SCORE_THRESH, show=False)
+    if category_id is None:
+        category_id = rink_category_id(model)
+
+    return result_to_polygons(
+        inference_result=result,
+        category_id=category_id,
+        score_thr=DEFAULT_SCORE_THRESH,
+        show=False,
+    )
 
 
 def find_ice_rink_masks(
@@ -340,6 +368,11 @@ def find_ice_rink_masks(
     if device.type == "cpu":
         logger.info("Looking for the ice at the rink, this may take awhile...")
     model = init_detector(config_file, checkpoint, device=device)
+    category_id = rink_category_id(model)
+    logger.info(
+        f"Ice rink detector classes={(getattr(model, 'dataset_meta', None) or {}).get('classes')}, "
+        f"using category_id={category_id}"
+    )
     results: List[
         Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]]
     ] = []
@@ -361,7 +394,9 @@ def find_ice_rink_masks(
                 infer_image, (new_width, new_height), interpolation=interpolation
             )
 
-        rink_result = detect_ice_rink_mask(image=infer_image, model=model, show=show)
+        rink_result = detect_ice_rink_mask(
+            image=infer_image, model=model, show=show, category_id=category_id
+        )
 
         if rink_result is None:
             results.append(rink_result)
@@ -497,6 +532,24 @@ def load_rink_combined_mask(
     return results
 
 
+def _resolve_path_override(path_str: str, what: str) -> str:
+    """
+    Resolve a caller-supplied model path.
+
+    Unlike paths declared in the game config (which are relative to the repo root),
+    an explicitly passed path is resolved against the current working directory.
+    """
+    if "://" in path_str:
+        # Likely a URL; mmengine fetches these itself
+        return path_str
+    path = Path(path_str).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    if not path.exists():
+        raise FileNotFoundError(f"Ice rink {what} not found: {path_str}")
+    return str(path)
+
+
 def get_device_to_use_for_rink(
     gpu_allocator: GpuAllocator, default_device: torch.device = torch.device("cpu")
 ) -> torch.device:
@@ -516,29 +569,41 @@ def configure_ice_rink_mask(
     image: Union[torch.Tensor, np.ndarray, StreamTensorBase, None] = None,
     scale: Optional[float] = None,
     persist: bool = True,
+    checkpoint: Optional[str] = None,
+    model_config: Optional[str] = None,
 ) -> Optional[torch.Tensor]:
     if expected_shape is None and image is not None:
         expected_shape = torch.Size((image_height(image), image_width(image)))
     if not force:
         combined_mask_profile = load_rink_combined_mask(game_id=game_id)
         if combined_mask_profile:
-            if expected_shape is None:
+            reuse_cached = True
+            if expected_shape is not None:
+                combined_mask = combined_mask_profile["combined_mask"]
+                mask_w = image_width(combined_mask)
+                mask_h = image_height(combined_mask)
+                assert len(expected_shape) == 2  # (H, W)
+                if mask_w != expected_shape[1] or mask_h != expected_shape[0]:
+                    reuse_cached = False
+                    logging.warning(
+                        f"Expected rink mask of size w={expected_shape[1]}, h={expected_shape[0]} does not match actual"
+                        f"rink mask size of w={mask_w}, h={mask_h}, so mask must be reconstructed"
+                    )
+            if reuse_cached:
+                if checkpoint or model_config:
+                    logging.warning(
+                        f"Reusing the cached rink mask for game {game_id}; the supplied "
+                        "checkpoint/config was ignored. Force reconfiguration to apply it."
+                    )
                 return combined_mask_profile
-            combined_mask = combined_mask_profile["combined_mask"]
-            mask_w = image_width(combined_mask)
-            mask_h = image_height(combined_mask)
-            assert len(expected_shape) == 2  # (H, W)
-            if mask_w == expected_shape[1] and mask_h == expected_shape[0]:
-                return combined_mask_profile
-            else:
-                logging.warning(
-                    f"Expected rink mask of size w={expected_shape[1]}, h={expected_shape[0]} does not match actual"
-                    f"rink mask size of w={mask_w}, h={mask_h}, so mask must be reconstructed"
-                )
 
     model_config_file, model_checkpoint = get_model_config(
         game_id=game_id, model_name="ice_rink_segm"
     )
+    if checkpoint:
+        model_checkpoint = _resolve_path_override(checkpoint, "checkpoint")
+    if model_config:
+        model_config_file = _resolve_path_override(model_config, "model config")
 
     assert model_config_file
     assert model_checkpoint
@@ -601,6 +666,12 @@ def configure_ice_rink_mask(
         device=device,
         inference_scale=scale,
     )
+    if rink_results is None:
+        raise RuntimeError(
+            f"No ice rink detected for game {game_id} using checkpoint {model_checkpoint} "
+            f"with config {model_config_file}. Check that the config's class count matches "
+            "the checkpoint's."
+        )
     if "combined_mask" in rink_results:
         rink_mask = rink_results["combined_mask"]
         assert image_width(rink_mask) == image_width(image_frame)
@@ -728,6 +799,24 @@ def main(args: argparse.Namespace = None, device: torch.device = torch.device("c
         parser.add_argument(
             "--device", "-d", type=str, default=None, help="Device used for inference"
         )
+        parser.add_argument(
+            "--checkpoint",
+            "-c",
+            type=str,
+            default=None,
+            help="PyTorch checkpoint for the ice rink mask model, overriding the game config. "
+            "Only applied when the mask is (re)generated, so pair it with --force to replace "
+            "an existing mask.",
+        )
+        parser.add_argument(
+            "--model-config",
+            "-m",
+            type=str,
+            default=None,
+            help="mmdet config for the ice rink mask model, overriding the game config. "
+            "Must match the checkpoint's class count, so pass it alongside --checkpoint "
+            "whenever the checkpoint was not trained against the configured model.",
+        )
         args = parser.parse_args()
 
     if args.device is not None:
@@ -757,6 +846,8 @@ def main(args: argparse.Namespace = None, device: torch.device = torch.device("c
         image=image,
         expected_shape=(image_height(image), image_width(image)),
         scale=mask_scale,
+        checkpoint=getattr(args, "checkpoint", None),
+        model_config=getattr(args, "model_config", None),
     )
     mask = results["combined_mask"]
     centroid = [int(i) for i in results["centroid"]]
