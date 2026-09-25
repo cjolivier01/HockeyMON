@@ -121,8 +121,9 @@ stitching:
       vertical_fov: 90
     gopro-mission-1:
       display_name: "GoPro Mission 1"
-      horizontal_fov: 109
-      vertical_fov: 64
+      # Temporarily use the Insta Ace Pro 2 lens settings.
+      horizontal_fov: 108
+      vertical_fov: 90
     insta-ace-pro-2:
       display_name: "Insta Ace Pro 2"
       horizontal_fov: 108
