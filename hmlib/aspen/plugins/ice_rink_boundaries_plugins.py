@@ -443,8 +443,13 @@ class IceRinkSegmConfigPlugin(Plugin):
                 device=torch.device("cpu"),
                 expected_shape=exp_shape,
                 image=frame0,
-                force=strict_geometry,
-                persist=not strict_geometry,
+                # A proven revision may reuse the persisted game mask, but
+                # only when configure_ice_rink_mask verifies that exact key
+                # and frame shape.  A changed revision regenerates and saves a
+                # new profile atomically through the normal config path.
+                force=False,
+                persist=True,
+                geometry_revision=revision,
             )
             if self._rink_profile is not None and strict_geometry:
                 mask = self._rink_profile["combined_mask"]

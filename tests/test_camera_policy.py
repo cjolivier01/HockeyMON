@@ -365,6 +365,36 @@ def should_attach_rendered_rotation_even_if_request_changes_during_stitching(mon
     )
 
 
+def should_make_rink_geometry_revision_stable_across_plugin_instances():
+    import torch
+
+    from hmlib.aspen.plugins.stitching_plugin import StitchingPlugin
+
+    config = {
+        "stitching": {
+            "calibration_frame_selection": {"context": {"rink_mask_revision": "calibration-v1"}}
+        }
+    }
+    context = {"shared": {"game_id": "game-1", "game_config": config}}
+    inputs = [torch.zeros((1, 3, 20, 30)), torch.zeros((1, 3, 20, 30))]
+    blended = torch.zeros((1, 20, 30, 4))
+
+    first = StitchingPlugin()
+    first._config_ref = config
+    second = StitchingPlugin()
+    second._config_ref = config
+    revision_a = first._make_geometry_revision(context, inputs, blended, 0.0)
+    revision_b = second._make_geometry_revision(context, inputs, blended, 0.0)
+    assert revision_a == revision_b
+
+    config["stitching"]["calibration_frame_selection"]["context"][
+        "rink_mask_revision"
+    ] = "calibration-v2"
+    third = StitchingPlugin()
+    third._config_ref = config
+    assert third._make_geometry_revision(context, inputs, blended, 0.0) != revision_a
+
+
 def should_ignore_color_changes_and_repeat_controls_but_capture_applied_target_changes():
     from test_play_tracker_parity import _base_game_config, _build_tracker
 
