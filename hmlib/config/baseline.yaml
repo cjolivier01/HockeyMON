@@ -459,6 +459,8 @@ model:
     checkpoint: https://download.openmmlab.com/mmaction/v1.0/skeleton/posec3d/slowonly_r50_8xb16-u48-240e_ntu60-xsub-keypoint/slowonly_r50_8xb16-u48-240e_ntu60-xsub-keypoint_20220815-38db104b.pth
 
   ice_rink_segm:
+    # The HockeyMONStream checkpoint is trained for one foreground class
+    # (ice rink); the recipe below is configured accordingly.
     config: config/models/ice_rink/mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco.py
     # checkpoint: pretrained/mask2former_swin-s-p4-w7-224_8xb2-lsj-50e_coco/ice_rink_iter_30000.pth
     # checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/ice_rink_iter_30000.pth
