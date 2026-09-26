@@ -107,7 +107,14 @@ def inspect_generation(directory: Path, suffix: str, min_frames: int) -> dict:
             "play_tracker_effective.yaml",
         )
     ]
-    companions += sorted(directory.glob("rink_mask_*.png"))
+    # Only the calibration mask and its immutable run snapshots belong in a
+    # dataset. Revision-scoped copies are rebuildable cache keyed to a stitch
+    # geometry, and publishing them bloats every catalog with unreadable files.
+    companions += sorted(
+        path
+        for path in directory.glob("rink_mask_*.png")
+        if re.fullmatch(r"rink_mask_\d+(?:-\d+)?\.png", path.name)
+    )
     if rink_context_path(str(paths["tracking"])).is_file():
         context = read_rink_context(str(paths["tracking"]))
         companions += [directory / binding["file"] for binding in context["masks"]]

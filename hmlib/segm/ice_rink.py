@@ -6,6 +6,7 @@ import argparse
 import gc
 import hashlib
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from matplotlib.patches import Polygon
 from PIL import Image
 
 from hmlib.config import (
+    _delete_nested_key,
     get_game_config_private,
     get_game_dir,
     get_nested_value,
@@ -473,6 +475,19 @@ def save_boolean_tensor_as_png(tensor: Union[torch.Tensor, np.ndarray], filename
     image.save(filename)
 
 
+def _rink_mask_file_prefix(geometry_revision: Optional[str]) -> str:
+    """Name rink masks after the stitch geometry they were generated for.
+
+    Derived on every use and never stored: a second copy of this in the game
+    config could contradict the revision it came from, and the mismatch would
+    invalidate the cache for good.
+    """
+    if geometry_revision is None:
+        return "rink_mask_"
+    cache_token = hashlib.sha256(geometry_revision.encode("utf-8")).hexdigest()[:32]
+    return f"rink_mask_{cache_token}_"
+
+
 def _atomically_save_mask_png(
     mask: Union[torch.Tensor, np.ndarray], *, game_dir: str, image_file: str
 ) -> None:
@@ -481,9 +496,38 @@ def _atomically_save_mask_png(
         temporary_name = temporary_file.name
     try:
         save_boolean_tensor_as_png(mask, temporary_name)
+        # NamedTemporaryFile creates at 0600 and os.replace keeps the source
+        # mode, which would make these masks unreadable to the other accounts
+        # that consume them. Restore the umask-default mode a plain save gives.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(temporary_name, 0o666 & ~umask)
+        with open(temporary_name, "rb") as published:
+            os.fsync(published.fileno())
         os.replace(temporary_name, image_file)
     finally:
         Path(temporary_name).unlink(missing_ok=True)
+
+
+_REVISION_MASK_PATTERN = re.compile(r"rink_mask_[0-9a-f]{32}_\d+\.png")
+
+
+def _prune_stale_revision_masks(game_dir: str, *, keep_prefix: str) -> None:
+    """Drop revision-scoped masks the config no longer names.
+
+    The config records exactly one revision, so masks under any other one are
+    unreachable. Without this a game that cannot produce a durable geometry
+    identity would leave a new orphan set behind on every run.
+    """
+    for path in Path(game_dir).glob("rink_mask_*.png"):
+        if not _REVISION_MASK_PATTERN.fullmatch(path.name):
+            continue
+        if path.name.startswith(keep_prefix):
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as ex:
+            logger.warning("Could not remove stale rink mask %s: %s", path, ex)
 
 
 def save_rink_profile_config(
@@ -491,47 +535,55 @@ def save_rink_profile_config(
     rink_profile: Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]],
     geometry_revision: Optional[str] = None,
 ) -> Dict[str, Any]:
-    game_config = get_game_config_private(game_id=game_id)
-    masks = rink_profile.get("masks")
-    mask_count = len(masks) if masks is not None else 0
-    set_nested_value(game_config, "rink.ice_contours_mask_count", mask_count)
-    centroid = rink_profile["centroid"]
-    centroid = [float(centroid[0]), float(centroid[1])]
-    set_nested_value(game_config, "rink.ice_contours_mask_centroid", centroid)
+    from hmlib.stitching.artifacts import stitching_lock
 
-    combined_bbox = None
-    if rink_profile["combined_bbox"] is not None:
-        combined_bbox = [float(i) for i in rink_profile["combined_bbox"]]
-    set_nested_value(game_config, "rink.ice_contours_combined_bbox", combined_bbox)
-    # A saved mask is only safe to reuse for the exact stitched coordinate
-    # plane that produced it.  Keep this separate from the native HStream
-    # revision because older game configs do not have one.
-    set_nested_value(game_config, "rink.ice_contours_geometry_revision", geometry_revision)
-    if geometry_revision is None:
-        mask_file_prefix = "rink_mask_"
-    else:
-        cache_token = hashlib.sha256(geometry_revision.encode("utf-8")).hexdigest()[:32]
-        mask_file_prefix = f"rink_mask_{cache_token}_"
-    # The prefix is a basename, never a caller-controlled path.  Keeping each
-    # revision in its own files means a new run cannot overwrite a mask that a
-    # concurrent run is still reading.
-    set_nested_value(game_config, "rink.ice_contours_mask_file_prefix", mask_file_prefix)
     game_dir = _game_dir_for_id(game_id, assert_exists=False)
     Path(game_dir).mkdir(parents=True, exist_ok=True)
-    for i in range(mask_count):
-        mask = masks[i]
-        # The revision-scoped copy is the cross-process reuse cache.  The bare
-        # name stays the mutable "current calibration" pointer that consumers
-        # outside this module address directly (camera rink features, stitching
-        # calibration cleanup, output publication), so keep it pointing at the
-        # newest revision rather than making every reader resolve a prefix.
-        destinations = [str(Path(game_dir) / f"{mask_file_prefix}{i}.png")]
-        bare_image_file = str(Path(game_dir) / f"rink_mask_{i}.png")
-        if bare_image_file not in destinations:
-            destinations.append(bare_image_file)
-        for image_file in destinations:
-            _atomically_save_mask_png(mask, game_dir=game_dir, image_file=image_file)
-    save_private_config(game_id=game_id, data=game_config, verbose=True)
+    # Publish the masks and the config that names them as one critical section.
+    # save_private_config rewrites the whole file from the copy read here, and
+    # the stitch UI, play tracker and cleanup paths all read-modify-write it.
+    # The lock is re-entrant, so save_private_config re-taking it is fine.
+    with stitching_lock(game_dir):
+        game_config = get_game_config_private(game_id=game_id)
+        masks = rink_profile.get("masks")
+        mask_count = len(masks) if masks is not None else 0
+        set_nested_value(game_config, "rink.ice_contours_mask_count", mask_count)
+        centroid = rink_profile["centroid"]
+        centroid = [float(centroid[0]), float(centroid[1])]
+        set_nested_value(game_config, "rink.ice_contours_mask_centroid", centroid)
+
+        combined_bbox = None
+        if rink_profile["combined_bbox"] is not None:
+            combined_bbox = [float(i) for i in rink_profile["combined_bbox"]]
+        set_nested_value(game_config, "rink.ice_contours_combined_bbox", combined_bbox)
+        # A saved mask is only safe to reuse for the exact stitched coordinate
+        # plane that produced it.  Keep this separate from the native HStream
+        # revision because older game configs do not have one.
+        if geometry_revision is None:
+            # set_nested_value treats a None value as "leave unchanged", so clear
+            # the key explicitly.  Leaving a stale revision beside masks that were
+            # just rewritten without one would strand the cache permanently.
+            _delete_nested_key(game_config, "rink.ice_contours_geometry_revision")
+        else:
+            set_nested_value(game_config, "rink.ice_contours_geometry_revision", geometry_revision)
+        # Keeping each revision in its own files means a new run cannot overwrite
+        # a mask that a concurrent run is still reading.
+        mask_file_prefix = _rink_mask_file_prefix(geometry_revision)
+        for i in range(mask_count):
+            mask = masks[i]
+            # The revision-scoped copy is the cross-process reuse cache.  The bare
+            # name stays the mutable "current calibration" pointer that consumers
+            # outside this module address directly (camera rink features, stitching
+            # calibration cleanup, output publication), so keep it pointing at the
+            # newest revision rather than making every reader resolve a prefix.
+            destinations = [str(Path(game_dir) / f"{mask_file_prefix}{i}.png")]
+            bare_image_file = str(Path(game_dir) / f"rink_mask_{i}.png")
+            if bare_image_file not in destinations:
+                destinations.append(bare_image_file)
+            for image_file in destinations:
+                _atomically_save_mask_png(mask, game_dir=game_dir, image_file=image_file)
+        _prune_stale_revision_masks(game_dir, keep_prefix=mask_file_prefix)
+        save_private_config(game_id=game_id, data=game_config, verbose=True)
 
 
 def load_rink_combined_mask(
@@ -546,31 +598,18 @@ def load_rink_combined_mask(
     combined_mask = None
     game_dir = _game_dir_for_id(game_id, assert_exists=False)
     geometry_revision = get_nested_value(game_config, "rink.ice_contours_geometry_revision", None)
-    mask_file_prefix = get_nested_value(game_config, "rink.ice_contours_mask_file_prefix", None)
-    if geometry_revision is not None:
-        expected_token = hashlib.sha256(geometry_revision.encode("utf-8")).hexdigest()[:32]
-        expected_prefix = f"rink_mask_{expected_token}_"
-        if mask_file_prefix is None:
-            mask_file_prefix = expected_prefix
-        elif mask_file_prefix != expected_prefix:
-            logging.warning(
-                "Ignoring rink mask cache for game %s: mask prefix does not match "
-                "its geometry revision",
-                game_id,
-            )
-            return None
-    else:
-        mask_file_prefix = mask_file_prefix or "rink_mask_"
-    if Path(mask_file_prefix).name != mask_file_prefix:
-        logging.warning("Ignoring unsafe rink mask cache path for game %s", game_id)
-        return None
-    mask_image_file_base = str(Path(game_dir) / mask_file_prefix)
+    mask_image_file_base = str(Path(game_dir) / _rink_mask_file_prefix(geometry_revision))
     for i in range(mask_count):
         image_file = mask_image_file_base + str(i) + ".png"
         if not os.path.exists(image_file):
             # Missing the actual mask file, so return as if nothing was found
             return None
-        mask = load_png_as_boolean_tensor(image_file)
+        try:
+            mask = load_png_as_boolean_tensor(image_file)
+        except (OSError, ValueError, Image.UnidentifiedImageError):
+            # A mask truncated by a crash must rebuild, not fail the run.
+            logger.warning("Ignoring unreadable rink mask for game %s: %s", game_id, image_file)
+            return None
         if combined_mask is None:
             combined_mask = mask
         else:
@@ -638,6 +677,8 @@ def configure_ice_rink_mask(
             reuse_cached = True
             cached_geometry_revision = combined_mask_profile.get("geometry_revision")
             if geometry_revision is not None and cached_geometry_revision != geometry_revision:
+                # Already disqualified; the shape check below would only compare
+                # a mask this caller cannot use, and raises when none was stored.
                 reuse_cached = False
                 logging.info(
                     "Ignoring rink mask cache for game %s: geometry revision changed (%s != %s)",
@@ -645,7 +686,7 @@ def configure_ice_rink_mask(
                     cached_geometry_revision,
                     geometry_revision,
                 )
-            if expected_shape is not None:
+            elif expected_shape is not None:
                 combined_mask = combined_mask_profile["combined_mask"]
                 mask_w = image_width(combined_mask)
                 mask_h = image_height(combined_mask)

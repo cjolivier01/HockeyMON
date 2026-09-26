@@ -331,6 +331,7 @@ class StitchUiPlugin(Plugin):
                 ("rink", "ice_contours_mask_count"),
                 ("rink", "ice_contours_mask_centroid"),
                 ("rink", "ice_contours_combined_bbox"),
+                ("rink", "ice_contours_geometry_revision"),
                 ("rink", "scoreboard", "perspective_polygon"),
             ):
                 self._set_path(private_config, path, _MISSING)

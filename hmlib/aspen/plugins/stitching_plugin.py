@@ -759,7 +759,13 @@ class StitchingPlugin(Plugin):
         # stable when the calibration is durable, allowing rink masks to be
         # reused safely across processes.
         if self._geometry_stitcher is not self._stitcher:
+            # Stitchers own immutable calibration maps, so a replacement must not
+            # inherit the previous identity. Drop the memoized source: a durable
+            # source recomputes to the same value, and a process-local one has to
+            # become a new token rather than vouch for a different calibration.
             self._geometry_stitcher = self._stitcher
+            self._geometry_source_identity = None
+            self._geometry_session = None
         geometry_revision = self._make_geometry_revision(
             context=context,
             imgs=imgs,

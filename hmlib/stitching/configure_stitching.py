@@ -99,6 +99,8 @@ _STITCH_GEOMETRY_CONFIG_PATHS = (
     ("rink", "ice_contours_mask_centroid"),
     ("rink", "ice_contours_combined_bbox"),
     ("rink", "ice_contours_geometry_revision"),
+    # The mask prefix is derived from the revision now, but existing game
+    # configs still carry it; clear it rather than leaving a dead key behind.
     ("rink", "ice_contours_mask_file_prefix"),
 )
 _CALIBRATION_CONFIG_KEYS = (
