@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import hashlib
+import json
 import math
 import os
 import uuid
@@ -135,6 +136,7 @@ class StitchingPlugin(Plugin):
         self._stitcher = None
         self._geometry_stitcher = None
         self._geometry_session = None
+        self._geometry_source_identity = None
         self._rotate_cache: Dict[Tuple[Any, ...], Dict[str, torch.Tensor]] = {}
         self._rotate_grid_cache: Dict[Tuple[Any, ...], torch.Tensor] = {}
         self._width_t: Optional[torch.Tensor] = None
@@ -195,6 +197,97 @@ class StitchingPlugin(Plugin):
             self._dir_name = Path(game_dir)
             return self._dir_name
         raise RuntimeError("StitchingPlugin needs dir_name or pto_project_file")
+
+    def _geometry_source(self, context: Dict[str, Any]) -> Dict[str, str]:
+        """Return a stable identity for the calibration behind the stitcher.
+
+        Native HStream configs carry a revision generated from the actual
+        stitch artifacts.  For older configs, the PTO project is the stable
+        source from which those artifacts are generated, so hash its contents.
+        If neither is available, deliberately fall back to a process-local
+        token: a mask without a durable geometry identity must never be reused
+        across runs merely because its dimensions happen to match.
+        """
+        if self._geometry_source_identity is not None:
+            return self._geometry_source_identity
+
+        cfg = self._config_ref
+        if cfg is None:
+            shared = context.get("shared", {})
+            candidate = shared.get("game_config") if isinstance(shared, dict) else None
+            cfg = candidate if isinstance(candidate, dict) else None
+
+        native_revision = None
+        if isinstance(cfg, dict):
+            for path in (
+                "stitching.calibration_frame_selection.context.rink_mask_revision",
+                "stitching.rink_mask_revision",
+                "rink.rink_mask_revision",
+            ):
+                try:
+                    native_revision = get_nested_value(cfg, path, None)
+                except Exception:
+                    native_revision = None
+                if native_revision is not None:
+                    break
+
+        if native_revision is not None:
+            self._geometry_source_identity = {
+                "kind": "native-rink-mask-revision",
+                "value": str(native_revision),
+            }
+            return self._geometry_source_identity
+
+        pto_project_file = self._pto_project_file
+        if pto_project_file is None and isinstance(cfg, dict):
+            try:
+                pto_project_file = get_nested_value(cfg, "stitching.pto_project_file", None)
+            except Exception:
+                pto_project_file = None
+        if pto_project_file and "://" not in str(pto_project_file):
+            pto_path = Path(str(pto_project_file)).expanduser()
+            if pto_path.is_file():
+                digest = hashlib.sha256()
+                with pto_path.open("rb") as pto_file:
+                    for chunk in iter(lambda: pto_file.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                self._geometry_source_identity = {
+                    "kind": "pto-sha256",
+                    "value": digest.hexdigest(),
+                }
+                return self._geometry_source_identity
+
+        if self._geometry_session is None:
+            self._geometry_session = uuid.uuid4().hex
+        self._geometry_source_identity = {
+            "kind": "process-local",
+            "value": self._geometry_session,
+        }
+        return self._geometry_source_identity
+
+    def _make_geometry_revision(
+        self,
+        context: Dict[str, Any],
+        imgs: List[torch.Tensor],
+        blended: torch.Tensor,
+        applied_rotation: float,
+    ) -> str:
+        shared = context.get("shared", {})
+        game_id = context.get("game_id")
+        if game_id is None and isinstance(shared, dict):
+            game_id = shared.get("game_id")
+        payload = {
+            "schema": "hm-stitch-geometry-v2",
+            "game_id": str(game_id) if game_id is not None else None,
+            "source": self._geometry_source(context),
+            "input_shapes": [list(img.shape[1:]) for img in imgs],
+            "stitched_shape": list(blended.shape[1:]),
+            "post_stitch_rotate_degrees": float(applied_rotation),
+            "blend_mode": self._blend_mode,
+            "max_output_width": self._max_output_width,
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()
 
     def _ensure_rgba(self, tensor: torch.Tensor) -> torch.Tensor:
         tensor = make_channels_first(tensor)
@@ -661,22 +754,24 @@ class StitchingPlugin(Plugin):
             print(f"Saving first stitched frame to {frame_path}")
             cv2.imwrite(frame_path, make_visible_image(stitched_frame[0], force_numpy=True))
 
-        # Stitchers own immutable calibration maps. A replacement gets a new
-        # session identity; rotation and canvas/input shape belong to the identity
-        # of the frame actually rendered, not a later UI request.
+        # Rotation and canvas/input shape belong to the identity of the frame
+        # actually rendered, not a later UI request.  The source identity is
+        # stable when the calibration is durable, allowing rink masks to be
+        # reused safely across processes.
         if self._geometry_stitcher is not self._stitcher:
+            # Stitchers own immutable calibration maps, so a replacement must not
+            # inherit the previous identity. Drop the memoized source: a durable
+            # source recomputes to the same value, and a process-local one has to
+            # become a new token rather than vouch for a different calibration.
             self._geometry_stitcher = self._stitcher
-            self._geometry_session = uuid.uuid4().hex
-        geometry_revision = hashlib.sha256(
-            repr(
-                (
-                    self._geometry_session,
-                    tuple(tuple(img.shape[1:]) for img in imgs),
-                    tuple(blended.shape[1:]),
-                    applied_rotation,
-                )
-            ).encode()
-        ).hexdigest()
+            self._geometry_source_identity = None
+            self._geometry_session = None
+        geometry_revision = self._make_geometry_revision(
+            context=context,
+            imgs=imgs,
+            blended=blended,
+            applied_rotation=applied_rotation,
+        )
         out: Dict[str, Any] = {
             "original_images": original_images,
             "camera_input_geometry": {

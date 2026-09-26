@@ -142,10 +142,14 @@ class DetectorFactoryPlugin(Plugin):
         nms_test: bool = False,
         nms_plugin: str = "efficient",
         cuda_graph: bool = True,
+        checkpoint: Optional[str] = None,
+        checkpoint_prefix: Optional[str] = None,
     ):
         super().__init__(enabled=enabled)
         self._detector_dict = detector
         self._detector_yaml = detector_yaml
+        self._checkpoint = checkpoint
+        self._checkpoint_prefix = checkpoint_prefix
         self._data_preprocessor = data_preprocessor
         self._to_device = to_device
         self._model = None
@@ -216,6 +220,12 @@ class DetectorFactoryPlugin(Plugin):
                 return x
 
             model_cfg = _to_cfg(detector_cfg)
+            checkpoint_prefix = self._checkpoint_prefix
+            if self._checkpoint:
+                init_cfg = model_cfg.get("init_cfg")
+                if checkpoint_prefix is None and isinstance(init_cfg, dict):
+                    checkpoint_prefix = init_cfg.get("prefix")
+                model_cfg["init_cfg"] = None
             if self._data_preprocessor is not None:
                 # Attach data_preprocessor to the model config before build
                 if not isinstance(model_cfg, dict):
@@ -235,7 +245,7 @@ class DetectorFactoryPlugin(Plugin):
             model_type = str(model_cfg.get("type", "")).lower()
             model_scope = (
                 DefaultScope.overwrite_default_scope("mmyolo")
-                if "mmyolo" in model_type
+                if "mmyolo" in model_type or model_type == "yolodetector"
                 else nullcontext()
             )
             with model_scope:
@@ -244,6 +254,31 @@ class DetectorFactoryPlugin(Plugin):
             if hasattr(model, "init_weights"):
                 with numpy2_pickle_compat():
                     model.init_weights()
+
+            if self._checkpoint:
+                from mmengine.runner.checkpoint import _load_checkpoint, load_state_dict
+
+                with numpy2_pickle_compat():
+                    checkpoint = _load_checkpoint(self._checkpoint, map_location="cpu")
+                weights = checkpoint.get("state_dict", checkpoint)
+                # Deployed configs may refer to a detector inside a full tracker.
+                # Raw exported detector weights remain valid with the same config.
+                if checkpoint_prefix:
+                    prefix = checkpoint_prefix.rstrip(".") + "."
+                    if any(key.startswith(prefix) for key in weights):
+                        weights = {
+                            key.removeprefix(prefix): value
+                            for key, value in weights.items()
+                            if key.startswith(prefix)
+                        }
+                if any(key.startswith("student.") for key in weights):
+                    weights = {
+                        key.removeprefix("student."): value
+                        for key, value in weights.items()
+                        if key.startswith("student.")
+                    }
+                load_state_dict(model, weights, strict=True)
+                logger.info("Loaded detector checkpoint: %s", self._checkpoint)
 
             # Enable static-shape detection outputs whenever the head supports
             # it (e.g., YOLOXHead). This avoids dynamic mask-based selects and

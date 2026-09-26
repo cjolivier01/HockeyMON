@@ -424,6 +424,60 @@ def _case_detector_inference(monkeypatch, tmp_path: Path, cuda_graph_enabled: bo
     assert int(track_data_sample[0].metainfo["frame_id"]) == 0
 
 
+def _case_detector_compare(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = False) -> None:
+    import json
+
+    from hmlib.aspen.plugins.detector_compare_plugin import DetectorComparePlugin
+
+    class _Result:
+        def __init__(self, pred_instances):
+            self.pred_instances = pred_instances
+
+    class _Detector:
+        def predict(self, inputs, data_samples):
+            return [
+                _Result(
+                    make_instance_data(
+                        bboxes=torch.tensor([[1.0, 1.0, 5.0, 5.0]], dtype=torch.float32),
+                        scores=torch.tensor([0.8], dtype=torch.float32),
+                        labels=torch.tensor([0], dtype=torch.long),
+                    )
+                )
+                for _ in data_samples
+            ]
+
+    output_dir = tmp_path / "detector_comparison"
+    # Only the tracking model is compared, so no extra detector is built here;
+    # preview rendering is exercised by the detector comparison tests instead.
+    plugin = DetectorComparePlugin(
+        models={"deployed": {"detector": {"type": "FakeDetector"}}},
+        selected="deployed",
+        output_dir=str(output_dir),
+        sample_every=1,
+        preview_frames=0,
+    )
+    _maybe_enable_cuda_graph(plugin, cuda_graph_enabled)
+    track_data_sample = make_track_data_sample(num_frames=1)
+    out = plugin(
+        {
+            "inputs": torch.zeros((1, 3, 8, 8), dtype=torch.float32),
+            "data_samples": track_data_sample,
+            "detector_model": _Detector(),
+            "fp16": False,
+            "device": torch.device("cpu"),
+            "game_id": "game-1",
+            "work_dir": str(tmp_path),
+        }
+    )
+    assert out == {}
+    plugin.finalize()
+    summary = json.loads((output_dir / "summary.json").read_text())
+    assert summary["frames"] == 1
+    assert summary["frame_ids"] == [0]
+    assert summary["metadata"]["game_id"] == "game-1"
+    assert summary["models"]["deployed"]["mean_person_detections"] == 1.0
+
+
 def _case_ice_boundaries(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = False) -> None:
     from hmlib.aspen.plugins.ice_rink_boundaries_plugins import IceRinkSegmBoundariesPlugin
 
@@ -1132,6 +1186,7 @@ PLUGIN_CASES: dict[str, Callable[[Any, Path, bool], None]] = {
     "hmlib.aspen.plugins.camera_train_plugin.CameraTrainPlugin": _case_camera_train,
     "hmlib.aspen.plugins.dataloader_plugin.DataLoaderPlugin": _case_dataloader,
     "hmlib.aspen.plugins.debug_rgb_stats_plugin.RgbStatsCheckPlugin": _case_debug_rgb_stats,
+    "hmlib.aspen.plugins.detector_compare_plugin.DetectorComparePlugin": _case_detector_compare,
     "hmlib.aspen.plugins.detector_factory_plugin.DetectorFactoryPlugin": _case_detector_factory,
     "hmlib.aspen.plugins.detector_plugin.DetectorInferencePlugin": _case_detector_inference,
     "hmlib.aspen.plugins.ice_rink_boundaries_plugins.IceRinkSegmBoundariesPlugin": _case_ice_boundaries,

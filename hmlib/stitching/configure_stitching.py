@@ -98,6 +98,10 @@ _STITCH_GEOMETRY_CONFIG_PATHS = (
     ("rink", "ice_contours_mask_count"),
     ("rink", "ice_contours_mask_centroid"),
     ("rink", "ice_contours_combined_bbox"),
+    ("rink", "ice_contours_geometry_revision"),
+    # The mask prefix is derived from the revision now, but existing game
+    # configs still carry it; clear it rather than leaving a dead key behind.
+    ("rink", "ice_contours_mask_file_prefix"),
 )
 _CALIBRATION_CONFIG_KEYS = (
     "control_point_matcher",
@@ -771,6 +775,8 @@ def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: Union[str, Path]
         changed |= _delete_nested_key(cfg, ["rink", "ice_contours_mask_count"])
         changed |= _delete_nested_key(cfg, ["rink", "ice_contours_mask_centroid"])
         changed |= _delete_nested_key(cfg, ["rink", "ice_contours_combined_bbox"])
+        changed |= _delete_nested_key(cfg, ["rink", "ice_contours_geometry_revision"])
+        changed |= _delete_nested_key(cfg, ["rink", "ice_contours_mask_file_prefix"])
         if changed:
             try:
                 save_private_config(game_id=game_id, data=cfg, verbose=True)
@@ -784,11 +790,13 @@ def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: Union[str, Path]
 
 
 def _calibration_masks(game_dir: Union[str, Path]) -> list[Path]:
-    # Numbered run snapshots must survive calibration cache invalidation.
+    # Both the bare calibration pointer and its revision-scoped copies are
+    # rebuildable cache. Numbered run snapshots ("rink_mask_0-17.png") are not,
+    # and must survive calibration cache invalidation.
     return [
         path
         for path in Path(game_dir).glob("rink_mask_*.png")
-        if re.fullmatch(r"rink_mask_\d+\.png", path.name)
+        if re.fullmatch(r"rink_mask_(?:[0-9a-f]{32}_)?\d+\.png", path.name)
     ]
 
 

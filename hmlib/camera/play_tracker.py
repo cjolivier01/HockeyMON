@@ -3037,6 +3037,7 @@ class PlayTracker(torch.nn.Module):
                         ("rink", "ice_contours_mask_count"),
                         ("rink", "ice_contours_mask_centroid"),
                         ("rink", "ice_contours_combined_bbox"),
+                        ("rink", "ice_contours_geometry_revision"),
                         ("rink", "scoreboard", "perspective_polygon"),
                     ):
                         try:

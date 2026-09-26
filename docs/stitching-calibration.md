@@ -49,6 +49,8 @@ projection framing, including a selected rink with nonzero rotation, requires
 NONA; unsupported framing is rejected before calibration.
 
 `max_output_dimension` caps both canvas dimensions. `max_output_width` caps width.
+For either setting, `0` and `null` both mean no user-specified cap; canvas safety
+limits still apply. Negative values, fractional dimensions and booleans are rejected.
 NONA caps the full projected canvas before remapping (including any crop), so
 cropping may produce a smaller width. Native OpenCV applies caps during map
 construction. Width-cap support requires rebuilding the HockeyMON native

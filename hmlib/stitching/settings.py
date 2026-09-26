@@ -141,11 +141,16 @@ def _defaulted(mapping: Mapping[str, Any], key: str, default: Any) -> Any:
 
 
 def normalize_max_output_dimension(value: Any) -> int | None:
+    """Normalize optional canvas caps; zero and null both mean unbounded."""
     if value is None:
         return None
     dimension = _number(value, "max_output_dimension")
+    if dimension == 0:
+        return None
     if not dimension.is_integer() or not 0 < dimension <= MAX_CANVAS_DIMENSION:
-        raise ValueError(f"max_output_dimension must be between 1 and {MAX_CANVAS_DIMENSION}")
+        raise ValueError(
+            f"max_output_dimension must be 0 (unbounded) or between 1 and {MAX_CANVAS_DIMENSION}"
+        )
     return int(dimension)
 
 

@@ -38,6 +38,29 @@ def _nona(**values):
     )
 
 
+@pytest.mark.parametrize("key", ["max_output_width", "max_output_dimension"])
+@pytest.mark.parametrize("value", [None, 0, 0.0, "0"])
+def should_treat_zero_canvas_caps_as_unbounded(key, value):
+    config = {"stitching": {key: value}}
+    original = copy.deepcopy(config)
+    settings = read_stitching_settings(config)
+    unbounded = read_stitching_settings({"stitching": {key: None}})
+    assert getattr(settings, key) is None
+    assert settings == unbounded
+    assert settings.manifest() == unbounded.manifest()
+    assert config == original
+
+
+def should_allow_zero_override_to_remove_an_inherited_canvas_cap():
+    settings = read_stitching_settings(
+        {"stitching": {"max_output_width": 1920, "max_output_dimension": 4096}},
+        max_output_width=0,
+        max_output_dimension=0,
+    )
+    assert settings.max_output_width is None
+    assert settings.max_output_dimension is None
+
+
 def should_resolve_camera_and_inherit_rink_without_mutating_config():
     config = {
         "stitching": {
@@ -93,6 +116,10 @@ def should_accept_custom_camera_with_complete_explicit_fov():
         ({"projection_framing": {"auto_crop": True, "crop": [0, 0.5, 0, 1]}}, "mutually exclusive"),
         ({"projection_framing": {"rotation_degrees": [0, 181, 0]}}, "-180 and 180"),
         ({"max_output_dimension": 10.5}, "max_output_dimension"),
+        ({"max_output_width": -1}, "max_output_dimension"),
+        ({"max_output_dimension": -1}, "max_output_dimension"),
+        ({"max_output_width": 65535}, "max_output_dimension"),
+        ({"max_output_width": False}, "finite number"),
         ({"max_output_width": True}, "finite number"),
     ],
 )

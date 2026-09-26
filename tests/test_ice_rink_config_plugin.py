@@ -40,7 +40,7 @@ def should_configure_ice_rink_mask_from_numpy_image(tmp_path, monkeypatch) -> No
         "get_model_config",
         lambda game_id, model_name: ("config.py", "checkpoint.pth"),
     )
-    monkeypatch.setattr(ice_rink, "get_game_dir", lambda game_id: str(tmp_path))
+    monkeypatch.setattr(ice_rink, "get_game_dir", lambda game_id, assert_exists=True: str(tmp_path))
     monkeypatch.setattr(ice_rink, "prepend_root_dir", lambda path: path)
 
     def find_masks(**kwargs):
@@ -61,6 +61,197 @@ def should_configure_ice_rink_mask_from_numpy_image(tmp_path, monkeypatch) -> No
     assert result["combined_mask"].shape == (20, 30)
     assert captured["image"] is image
     assert captured["device"] == torch.device("cpu")
+
+
+@requires_torch
+def should_reuse_only_the_geometry_keyed_rink_mask(tmp_path, monkeypatch) -> None:
+    from hmlib.segm import ice_rink
+
+    game_config = {"rink": {}}
+    monkeypatch.setattr(ice_rink, "get_game_config_private", lambda game_id: game_config)
+    monkeypatch.setattr(ice_rink, "get_game_dir", lambda game_id, assert_exists=True: str(tmp_path))
+    monkeypatch.setattr(
+        ice_rink,
+        "save_private_config",
+        lambda game_id, data, verbose=True: None,
+    )
+
+    profile = {
+        "masks": [torch.ones((20, 30), dtype=torch.bool)],
+        "centroid": torch.tensor([15.0, 10.0]),
+        "combined_bbox": [0.0, 0.0, 30.0, 20.0],
+    }
+    ice_rink.save_rink_profile_config(
+        game_id="game-1", rink_profile=profile, geometry_revision="geometry-v1"
+    )
+    assert game_config["rink"]["ice_contours_geometry_revision"] == "geometry-v1"
+    assert list(tmp_path.glob("rink_mask_*_0.png"))
+
+    monkeypatch.setattr(
+        ice_rink,
+        "get_model_config",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("model must not load")),
+    )
+    cached = ice_rink.configure_ice_rink_mask(
+        game_id="game-1",
+        expected_shape=torch.Size((20, 30)),
+        geometry_revision="geometry-v1",
+    )
+    assert torch.equal(cached["combined_mask"], profile["masks"][0])
+
+    monkeypatch.setattr(
+        ice_rink,
+        "get_model_config",
+        lambda **kwargs: ("config.py", "checkpoint.pth"),
+    )
+    monkeypatch.setattr(ice_rink, "prepend_root_dir", lambda path: path)
+    monkeypatch.setattr(
+        ice_rink,
+        "find_ice_rink_masks",
+        lambda **kwargs: {
+            "combined_mask": torch.zeros((20, 30), dtype=torch.bool),
+            "masks": [torch.zeros((20, 30), dtype=torch.bool)],
+            "centroid": torch.tensor([15.0, 10.0]),
+            "combined_bbox": [0.0, 0.0, 30.0, 20.0],
+        },
+    )
+    regenerated = ice_rink.configure_ice_rink_mask(
+        game_id="game-1",
+        expected_shape=torch.Size((20, 30)),
+        geometry_revision="geometry-v2",
+        image=np.zeros((20, 30, 3), dtype=np.uint8),
+    )
+    assert not torch.equal(regenerated["combined_mask"], profile["masks"][0])
+    assert game_config["rink"]["ice_contours_geometry_revision"] == "geometry-v2"
+
+
+@requires_torch
+def should_clear_the_revision_when_saving_without_one(tmp_path, monkeypatch) -> None:
+    """A revisionless save must not strand the previous revision on the config."""
+    from hmlib.segm import ice_rink
+
+    game_config = {"rink": {}}
+    monkeypatch.setattr(ice_rink, "get_game_config_private", lambda game_id: game_config)
+    monkeypatch.setattr(ice_rink, "get_game_dir", lambda game_id, assert_exists=True: str(tmp_path))
+    monkeypatch.setattr(ice_rink, "save_private_config", lambda game_id, data, verbose=True: None)
+
+    profile = {
+        "masks": [torch.ones((20, 30), dtype=torch.bool)],
+        "centroid": torch.tensor([15.0, 10.0]),
+        "combined_bbox": [0.0, 0.0, 30.0, 20.0],
+    }
+    ice_rink.save_rink_profile_config(
+        game_id="game-1", rink_profile=profile, geometry_revision="geometry-v1"
+    )
+    assert ice_rink.load_rink_combined_mask(game_id="game-1") is not None
+
+    # Legacy callers pass no revision. The masks they write live under the bare
+    # prefix, so a leftover revision would point the loader at the wrong files.
+    ice_rink.save_rink_profile_config(game_id="game-1", rink_profile=profile)
+    assert "ice_contours_geometry_revision" not in game_config["rink"]
+    reloaded = ice_rink.load_rink_combined_mask(game_id="game-1")
+    assert reloaded is not None
+    assert reloaded["geometry_revision"] is None
+    assert torch.equal(reloaded["combined_mask"], profile["masks"][0])
+
+
+@requires_torch
+def should_not_accumulate_masks_for_superseded_revisions(tmp_path, monkeypatch) -> None:
+    """A game with no durable geometry identity gets a new revision every run."""
+    from hmlib.segm import ice_rink
+
+    game_config = {"rink": {}}
+    monkeypatch.setattr(ice_rink, "get_game_config_private", lambda game_id: game_config)
+    monkeypatch.setattr(ice_rink, "get_game_dir", lambda game_id, assert_exists=True: str(tmp_path))
+    monkeypatch.setattr(ice_rink, "save_private_config", lambda game_id, data, verbose=True: None)
+
+    profile = {
+        "masks": [torch.ones((20, 30), dtype=torch.bool)],
+        "centroid": torch.tensor([15.0, 10.0]),
+        "combined_bbox": [0.0, 0.0, 30.0, 20.0],
+    }
+    for run in range(5):
+        ice_rink.save_rink_profile_config(
+            game_id="game-1", rink_profile=profile, geometry_revision=f"run-{run}"
+        )
+        # Only the current revision plus the bare pointer ever remain.
+        assert len(list(tmp_path.glob("rink_mask_*.png"))) == 2
+        assert ice_rink.load_rink_combined_mask(game_id="game-1") is not None
+
+    # A run snapshot is not a revision-scoped mask and must not be pruned.
+    snapshot = tmp_path / "rink_mask_0-17.png"
+    snapshot.write_bytes(b"run snapshot")
+    ice_rink.save_rink_profile_config(
+        game_id="game-1", rink_profile=profile, geometry_revision="run-final"
+    )
+    assert snapshot.exists()
+
+
+@requires_torch
+def should_rebuild_rather_than_raise_on_a_truncated_mask(tmp_path, monkeypatch) -> None:
+    from hmlib.segm import ice_rink
+
+    game_config = {"rink": {}}
+    monkeypatch.setattr(ice_rink, "get_game_config_private", lambda game_id: game_config)
+    monkeypatch.setattr(ice_rink, "get_game_dir", lambda game_id, assert_exists=True: str(tmp_path))
+    monkeypatch.setattr(ice_rink, "save_private_config", lambda game_id, data, verbose=True: None)
+
+    ice_rink.save_rink_profile_config(
+        game_id="game-1",
+        rink_profile={
+            "masks": [torch.ones((20, 30), dtype=torch.bool)],
+            "centroid": torch.tensor([15.0, 10.0]),
+            "combined_bbox": [0.0, 0.0, 30.0, 20.0],
+        },
+        geometry_revision="geometry-v1",
+    )
+    cached = next(iter(tmp_path.glob("rink_mask_*_0.png")))
+    cached.write_bytes(cached.read_bytes()[:12])
+    assert ice_rink.load_rink_combined_mask(game_id="game-1") is None
+
+
+@requires_torch
+def should_point_the_bare_mask_name_at_the_current_revision(tmp_path, monkeypatch) -> None:
+    """Consumers that address rink_mask_0.png directly must see the newest mask."""
+    from hmlib.segm import ice_rink
+    from hmlib.segm.ice_rink import load_png_as_boolean_tensor
+    from hmlib.stitching.configure_stitching import _calibration_masks
+
+    game_config = {"rink": {}}
+    monkeypatch.setattr(ice_rink, "get_game_config_private", lambda game_id: game_config)
+    monkeypatch.setattr(ice_rink, "get_game_dir", lambda game_id, assert_exists=True: str(tmp_path))
+    monkeypatch.setattr(ice_rink, "save_private_config", lambda game_id, data, verbose=True: None)
+
+    def save(mask: torch.Tensor, revision: str) -> None:
+        ice_rink.save_rink_profile_config(
+            game_id="game-1",
+            rink_profile={
+                "masks": [mask],
+                "centroid": torch.tensor([15.0, 10.0]),
+                "combined_bbox": [0.0, 0.0, 30.0, 20.0],
+            },
+            geometry_revision=revision,
+        )
+
+    first = torch.ones((20, 30), dtype=torch.bool)
+    save(first, "geometry-v1")
+    bare = tmp_path / "rink_mask_0.png"
+    assert torch.equal(load_png_as_boolean_tensor(str(bare)), first)
+
+    second = torch.zeros((20, 30), dtype=torch.bool)
+    second[0, 0] = True
+    save(second, "geometry-v2")
+    assert torch.equal(load_png_as_boolean_tensor(str(bare)), second)
+
+    # A run snapshot is not calibration cache; every revision-scoped copy is,
+    # so calibration invalidation must not leave them behind.
+    snapshot = tmp_path / "rink_mask_0-17.png"
+    snapshot.write_bytes(b"run snapshot")
+    stale = {path.name for path in _calibration_masks(tmp_path)}
+    assert "rink_mask_0.png" in stale
+    assert snapshot.name not in stale
+    # The superseded geometry-v1 copy was pruned, so only geometry-v2 remains.
+    assert len([name for name in stale if name != "rink_mask_0.png"]) == 1
 
 
 @requires_torch
@@ -147,11 +338,12 @@ def should_prefer_stitched_frame_shape_over_detector_input_shape(monkeypatch) ->
     assert result["rink_profile"]["coordinate_space"] == "original_stitched_pixels"
     assert result["rink_profile"]["frame_size"] == [30, 20]
     assert len(result["rink_profile"]["geometry_revision"]) == 64
-    assert captured["force"] is True and captured["persist"] is False
+    assert captured["force"] is False and captured["persist"] is True
+    assert captured["geometry_revision"] == "calibration-1"
 
 
 @requires_torch
-def should_regenerate_for_same_size_geometry_change_without_overwriting_masks(monkeypatch):
+def should_regenerate_for_same_size_geometry_change_keyed_by_revision(monkeypatch):
     calls = []
 
     def configure(**kwargs):
@@ -173,7 +365,16 @@ def should_regenerate_for_same_size_geometry_change_without_overwriting_masks(mo
     second = plugin.forward(context)["rink_profile"]
     assert len(calls) == 2
     assert first["geometry_revision"] != second["geometry_revision"]
-    assert all(call["force"] and not call["persist"] for call in calls)
+    assert all(
+        not call["force"]
+        and call["persist"]
+        and call["geometry_revision"]
+        in {
+            "first-calibration",
+            "second-calibration",
+        }
+        for call in calls
+    )
     # A legacy saved mask with the same dimensions must not acquire grid provenance.
     legacy = IceRinkSegmConfigPlugin()
     assert "coordinate_space" not in legacy.forward(context)["rink_profile"]
