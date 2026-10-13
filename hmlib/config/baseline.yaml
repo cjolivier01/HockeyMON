@@ -147,21 +147,41 @@ stitching:
   # Source-camera lens presets. Hugin consumes horizontal_fov directly; the
   # vertical value is retained with the shared mapping configuration for
   # algorithms that model both axes. Games select a preset with camera_config
-  # and may store per-game values under camera_fov in their private config.yaml.
+  # and may override camera_fov and input_lens in their private config.yaml.
+  # Lens defaults depend on recording mode (Wide/Linear, aspect ratio, crop),
+  # not just the camera body. Add a separate profile for each calibrated mode.
+  # These neutral defaults preserve automatic fitting; measured corrections
+  # can use full-frame-fisheye, fixed/refine, Hugin a/b/c distortion and
+  # center_offset as fractions of the full source width/height.
   camera_configs:
     gopro-hero-11:
       display_name: "GoPro Hero 11"
       horizontal_fov: 108
       vertical_fov: 90
+      input_lens:
+        projection: rectilinear
+        optimization: auto
+        distortion: [0, 0, 0]
+        center_offset: [0, 0]
     gopro-mission-1:
       display_name: "GoPro Mission 1"
       # Temporarily use the Insta Ace Pro 2 lens settings.
       horizontal_fov: 108
       vertical_fov: 90
+      input_lens:
+        projection: rectilinear
+        optimization: auto
+        distortion: [0, 0, 0]
+        center_offset: [0, 0]
     insta-ace-pro-2:
       display_name: "Insta Ace Pro 2"
       horizontal_fov: 108
       vertical_fov: 90
+      input_lens:
+        projection: rectilinear
+        optimization: auto
+        distortion: [0, 0, 0]
+        center_offset: [0, 0]
   camera_config: "gopro-mission-1"
   # Venue defaults rotate the registered camera pair together, before output
   # projection. A game's projection_framing.rotation_degrees overrides these.
@@ -298,6 +318,10 @@ rink:
     projected_height: "%20"
     projected_width: "%10"
     scoreboard_scale: 1.0
+    # Resize the extracted scoreboard before the bilinear perspective warp.
+    resize_filter: bilinear
+    # GPU unsharp mask after perspective correction; 0 disables it. Values above 2 can strongly amplify artifacts.
+    sharpen_amount: 0.0
   end_zones:
     #
     # End zone start/stop thresholds (lines of the form (x1, y1), (x2, y2))
