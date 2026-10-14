@@ -54,3 +54,6 @@ hmlib.egg-info
 
 # Generated projection previews and local effective game configurations.
 /projection-review/
+
+# Local agent scratch space, including the worktrees checked out under it.
+/.claude/
