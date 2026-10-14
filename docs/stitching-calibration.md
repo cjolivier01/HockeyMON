@@ -43,6 +43,13 @@ values. The iPhone and ONE RS entries expose missing app/module information.
 HockeyMONStream maintains the pinned sources and reproducible conversion in
 [`docs/camera-lens-catalog.md`](https://github.com/cjolivier01/HockeyMONStream/blob/master/docs/camera-lens-catalog.md).
 Auto remains the default; native HStream alone imports video lens metadata.
+Its independent `stitching.camera_automation.fov` and `.lens` policies select
+MP4 values, verified matching mode defaults, then baseline defaults. Null policies
+follow the camera selector; named profiles are manual unless explicitly enabled.
+The four HERO11 profiles share coefficients across 20 explicitly compatible
+frame-rate/stabilization modes. Source-match constraints and policy keys are
+retained in this shared baseline but are interpreted only by native HStream.
+The panorama's `projection_framing.auto_fov` remains a separate coverage fit.
 Python currently resolves the preset FOVs but does not apply the `input_lens`
 correction model. Use these complete lens profiles in HStream's Projection or
 Stitching Experiments controls.
