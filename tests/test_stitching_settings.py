@@ -169,10 +169,7 @@ def should_fingerprint_effective_settings_and_preserve_inactive_tuning():
     assert settings.parameters == ()
     assert config == before
     assert settings.manifest() != replace(settings, horizontal_fov=120).manifest()
-    assert (
-        json.loads(settings.manifest()["calibration_settings"])["camera_config"]
-        == "gopro-mission-1"
-    )
+    assert json.loads(settings.manifest()["calibration_settings"])["camera_config"] == "auto"
 
 
 def should_invalidate_cache_after_camera_or_framing_change(tmp_path):

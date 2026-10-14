@@ -154,6 +154,25 @@ stitching:
   # use full-frame-fisheye, fixed/refine, Hugin a/b/c distortion and
   # center_offset as fractions of the full source width/height.
   camera_configs:
+    auto:
+      display_name: "Auto (video metadata)"
+      # Used when original files lack a supported shared lens prescription.
+      horizontal_fov: 108
+      vertical_fov: 90
+      input_lens:
+        projection: rectilinear
+        optimization: auto
+        distortion: [0, 0, 0]
+        center_offset: [0, 0]
+    manual:
+      display_name: "Manual lens settings"
+      horizontal_fov: 108
+      vertical_fov: 90
+      input_lens:
+        projection: rectilinear
+        optimization: auto
+        distortion: [0, 0, 0]
+        center_offset: [0, 0]
     gopro-hero-11:
       display_name: "GoPro Hero 11"
       horizontal_fov: 108
@@ -173,6 +192,22 @@ stitching:
         optimization: fixed
         distortion: [0, 0.0208293582808693, 0]
         center_offset: [-0.0013154349398449218, 0.14355981616751806]
+    gopro-mission-1-factory:
+      display_name: "GoPro Mission 1 Factory (8K Wide, HyperSmooth On)"
+      # MISSION 1 PRO, 7680x4320 at 59.94 fps, Wide, HS EIS, zoom 1,
+      # horizon control Off, firmware H26.01.02.02.70. Derived from the
+      # recording's GoPro POLY/ZMPL metadata, not published Hugin coefficients.
+      # See HStream docs/gopro-mission-1-factory-lens.md for the conversion.
+      # Horizontal is Hugin's fitted parameter (actual coverage is ~120 deg);
+      # vertical is the camera-reported YFOV, retained for provenance.
+      horizontal_fov: 125.12273264898167
+      vertical_fov: 70.3657608032227
+      input_lens:
+        projection: full-frame-fisheye
+        optimization: fixed
+        distortion: [-0.004931889213955486, 0.04057437656776939, -0.02182075784509423]
+        # The embedded radial model assumes a centered image.
+        center_offset: [0, 0]
     insta-ace-pro-2:
       display_name: "Insta Ace Pro 2"
       horizontal_fov: 108
@@ -182,7 +217,7 @@ stitching:
         optimization: auto
         distortion: [0, 0, 0]
         center_offset: [0, 0]
-  camera_config: "gopro-mission-1"
+  camera_config: "auto"
   # Venue defaults rotate the registered camera pair together, before output
   # projection. A game's projection_framing.rotation_degrees overrides these.
   rink_configs:
