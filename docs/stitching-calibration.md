@@ -36,6 +36,23 @@ checked to detect Hugin clamping a requested value.
 Camera presets select source-image FOVs. Override either axis with
 `camera_fov.horizontal_fov` or `camera_fov.vertical_fov`. A custom camera identifier
 requires a definition under `camera_configs` or both explicit FOVs.
+The shared baseline also provides mode-specific community measurements labeled
+`measured`, using native HStream's `input_lens.optimization: refine`. Match the resolution, lens
+and stabilization setting; these are initial fits, not manufacturer factory
+values. The iPhone and ONE RS entries expose missing app/module information.
+HockeyMONStream maintains the pinned sources and reproducible conversion in
+[`docs/camera-lens-catalog.md`](https://github.com/cjolivier01/HockeyMONStream/blob/master/docs/camera-lens-catalog.md).
+Auto remains the default; native HStream alone imports video lens metadata.
+Its independent `stitching.camera_automation.fov` and `.lens` policies select
+MP4 values, verified matching mode defaults, then baseline defaults. Null policies
+follow the camera selector; named profiles are manual unless explicitly enabled.
+The four HERO11 profiles share coefficients across 20 explicitly compatible
+frame-rate/stabilization modes. Source-match constraints and policy keys are
+retained in this shared baseline but are interpreted only by native HStream.
+The panorama's `projection_framing.auto_fov` remains a separate coverage fit.
+Python currently resolves the preset FOVs but does not apply the `input_lens`
+correction model. Use these complete lens profiles in HStream's Projection or
+Stitching Experiments controls.
 
 A selected rink supplies shared camera-space yaw, pitch, and roll before NONA
 projection. Omitted or null `projection_framing.rotation_degrees` inherits those
