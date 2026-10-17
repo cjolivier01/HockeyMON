@@ -209,9 +209,10 @@ class ProjectionFraming:
 # Framing that asks for nothing: no rotation and the whole canvas. This is only
 # ever the fallback for a key the bundled baseline itself omits, which today is
 # rotation_degrees and crop; the FOV pair here is inert because the baseline
-# always names both. These literals are not "the default framing" and must not
-# be compared against as if they were — read_stitching_settings derives that
-# from baseline.yaml, so it keeps following HStream when a default moves.
+# always names both, which _baseline_framing enforces. These literals are not
+# "the default framing" and must not be compared against as if they were —
+# read_stitching_settings derives that from baseline.yaml, so it keeps
+# following HStream when a default moves.
 _UNFRAMED = ProjectionFraming(
     auto_fov=False,
     horizontal_fov=180.0,
@@ -220,52 +221,81 @@ _UNFRAMED = ProjectionFraming(
     rotation_degrees=(0.0, 0.0, 0.0),
     crop=(0.0, 1.0, 0.0, 1.0),
 )
+# Keys the bundled baseline must name, so that losing one during a sync with
+# HStream fails here instead of quietly reverting to the _UNFRAMED literal.
+_REQUIRED_BASELINE_FRAMING = ("auto_fov", "horizontal_fov", "auto_canvas", "auto_crop")
+
+
+def _framing_is_automatic(framing: ProjectionFraming) -> bool:
+    """Whether this framing leaves every decision to the mapping backend.
+
+    Only NONA applies projection framing: ``apply_projection_framing`` runs
+    behind ``mapping_backend == "nona"``, and the OpenCV backends derive their
+    mapping from the fitted rectilinear transform without ever seeing a
+    ``StitchingSettings``. Letting the backend choose costs nothing when the
+    framing is dropped, so it stays allowed; a fixed FOV or canvas, a rotation
+    or a crop is a request that would vanish silently, so it does not.
+
+    ``horizontal_fov`` is deliberately not checked: it is read only in the
+    fixed-FOV branch, so while ``auto_fov`` holds it is inert under every
+    backend, including NONA.
+    """
+    return (
+        framing.auto_fov
+        and framing.auto_canvas
+        and not framing.auto_crop
+        and framing.crop == _UNFRAMED.crop
+        and not any(framing.rotation_degrees)
+    )
 
 
 def _read_framing(
     framing_config: Mapping[str, Any],
     defaults: ProjectionFraming,
     rotation: tuple[float, ...],
+    source: str = "stitching.projection_framing",
 ) -> ProjectionFraming:
     """Resolve one projection_framing layer over ``defaults``.
 
-    ``rotation`` is the rink profile's rotation, which stands in for the
-    fallback's own when the layer does not name one.
+    ``rotation`` supplies the fallback rotation, which is the selected rink
+    profile's when the game layer does not name one of its own. ``source``
+    names the layer in errors, so a bad value in the bundled baseline is not
+    reported as something the operator typed.
     """
-    crop = _array(_defaulted(framing_config, "crop", defaults.crop), 4, "projection_framing.crop")
+    crop = _array(_defaulted(framing_config, "crop", defaults.crop), 4, f"{source}.crop")
     if not (0 <= crop[0] < crop[1] <= 1 and 0 <= crop[2] < crop[3] <= 1):
-        raise ValueError("projection_framing.crop must be normalized left,right,top,bottom bounds")
+        raise ValueError(f"{source}.crop must be normalized left,right,top,bottom bounds")
     resolved = _array(
         _defaulted(framing_config, "rotation_degrees", rotation),
         3,
-        "projection_framing.rotation_degrees",
+        f"{source}.rotation_degrees",
     )
     if any(abs(angle) > 180 for angle in resolved):
-        raise ValueError("projection_framing.rotation_degrees must be between -180 and 180")
+        raise ValueError(f"{source}.rotation_degrees must be between -180 and 180")
     framing = ProjectionFraming(
         auto_fov=_boolean(
             _defaulted(framing_config, "auto_fov", defaults.auto_fov),
-            "projection_framing.auto_fov",
+            f"{source}.auto_fov",
         ),
         horizontal_fov=_number(
             _defaulted(framing_config, "horizontal_fov", defaults.horizontal_fov),
-            "projection_framing.horizontal_fov",
+            f"{source}.horizontal_fov",
         ),
         auto_canvas=_boolean(
             _defaulted(framing_config, "auto_canvas", defaults.auto_canvas),
-            "projection_framing.auto_canvas",
+            f"{source}.auto_canvas",
         ),
         auto_crop=_boolean(
             _defaulted(framing_config, "auto_crop", defaults.auto_crop),
-            "projection_framing.auto_crop",
+            f"{source}.auto_crop",
         ),
         rotation_degrees=resolved,
         crop=crop,
     )
     if framing.auto_crop and crop != (0, 1, 0, 1):
-        raise ValueError("projection_framing.crop and auto_crop are mutually exclusive")
+        raise ValueError(f"{source}.crop and auto_crop are mutually exclusive")
     if not 0 < framing.horizontal_fov <= 360:
-        raise ValueError("projection_framing.horizontal_fov must be between 0 and 360")
+        raise ValueError(f"{source}.horizontal_fov must be between 0 and 360")
     return framing
 
 
@@ -369,15 +399,30 @@ def read_stitching_settings(
             profile.get("rotation_degrees"), 3, f"rink_configs.{rink}.rotation_degrees"
         )
     # Resolve the baseline's framing first so a config that omits a key lands on
-    # the same value whether or not it was merged with baseline.yaml, and so the
-    # OpenCV check below compares against the shipped default rather than a
-    # literal that has to be edited every time HStream moves one.
+    # the same value whether or not it was merged with baseline.yaml, instead of
+    # on a literal that has to be edited every time HStream moves one.
+    baseline_framing = _mapping(baseline.get("projection_framing"), "stitching.projection_framing")
+    missing = [key for key in _REQUIRED_BASELINE_FRAMING if key not in baseline_framing]
+    if missing:
+        raise ValueError(
+            "Bundled baseline.yaml is missing stitching.projection_framing "
+            f"{', '.join(missing)}; it must name them so game configs do not "
+            "fall back to a stale built-in default"
+        )
     defaults = _read_framing(
-        _mapping(baseline.get("projection_framing"), "stitching.projection_framing"),
+        baseline_framing,
         _UNFRAMED,
         _UNFRAMED.rotation_degrees,
+        "baseline.yaml stitching.projection_framing",
     )
-    framing = _read_framing(framing_config, defaults, rotation)
+    # Only a selected rink displaces the baseline's own rotation; without one the
+    # fallback has to stay the baseline's, or a rotation it names is dropped here
+    # and then read as operator intent by the automatic-framing check below.
+    framing = _read_framing(
+        framing_config,
+        defaults,
+        rotation if rink is not None and rink != "" else defaults.rotation_degrees,
+    )
     if (
         backend == "nona"
         and not framing.auto_fov
@@ -387,11 +432,13 @@ def read_stitching_settings(
             f"{projection} horizontal FOV exceeds projection limit {maximum_projection_fov(projection, parameters):.6g}"
         )
     # A selected rink's rotation reaches `framing` through `rotation`, so it is
-    # non-default here and rejected, which is what the OpenCV path requires.
-    if backend != "nona" and framing != defaults:
+    # a request here and rejected, which is what the OpenCV path requires.
+    if backend != "nona" and not _framing_is_automatic(framing):
         raise ValueError(
-            "Non-default projection framing (including rink rotation and crop) requires "
-            "mapping_backend=nona and run_autooptimizer=true"
+            "Projection framing that fixes the FOV or canvas, or asks for a rink "
+            "rotation or a crop, requires mapping_backend=nona and "
+            "run_autooptimizer=true; the OpenCV backends fit a rectilinear "
+            "transform and would drop it"
         )
     width = normalize_max_output_dimension(stitch.get("max_output_width"))
     frame_count = _number(

@@ -412,10 +412,11 @@ def should_forward_effective_config_to_calibration_worker(monkeypatch, tmp_path)
         {"projection_framing": {"rotation_degrees": [0, -20, 0]}},
         {"projection_framing": {"crop": [0.1, 0.9, 0, 1]}},
         {"projection_framing": {"auto_crop": True}},
-        # The baseline ships auto_fov, so turning it off is the non-default ask.
+        # The baseline ships auto_fov, so turning it off is the real ask; a FOV
+        # only counts as one once it is going to be read.
         {"projection_framing": {"auto_fov": False}},
+        {"projection_framing": {"auto_fov": False, "horizontal_fov": 150}},
         {"projection_framing": {"auto_canvas": False}},
-        {"projection_framing": {"horizontal_fov": 150}},
     ],
 )
 def should_require_nona_for_nondefault_effective_framing(values):
@@ -460,6 +461,91 @@ def should_accept_baseline_framing_on_opencv_backends(backend):
         baseline["stitching"]["projection_framing"]["auto_fov"],
         baseline["stitching"]["projection_framing"]["horizontal_fov"],
     )
+
+
+def _bundle_baseline(tmp_path, monkeypatch, **framing):
+    """Point settings.py at a copy of the baseline with framing overridden."""
+    source = Path(settings_module.__file__).resolve().parents[1] / "config" / "baseline.yaml"
+    document = yaml.safe_load(source.read_text())
+    block = document["stitching"]["projection_framing"]
+    for key, value in framing.items():
+        if value is None:
+            del block[key]
+        else:
+            block[key] = value
+    bundled = tmp_path / "hmlib" / "config" / "baseline.yaml"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text(yaml.safe_dump(document))
+    monkeypatch.setattr(
+        settings_module, "__file__", str(tmp_path / "hmlib" / "stitching" / "settings.py")
+    )
+
+
+def should_apply_a_rotation_the_baseline_names(tmp_path, monkeypatch):
+    """A rotation the baseline names belongs to the resolved framing.
+
+    The rink profile supplies the rotation fallback, but only when a rink is
+    selected. Letting it displace the baseline's own value unconditionally drops
+    a rotation NONA should have applied, and then reads the loss as if the
+    operator had asked for zero.
+    """
+    _bundle_baseline(tmp_path, monkeypatch, rotation_degrees=[0, -5, 0])
+    settings = read_stitching_settings({"stitching": {"mapping_backend": "nona"}})
+    assert settings.framing.rotation_degrees == (0.0, -5.0, 0.0)
+
+    # A selected rink still wins over it.
+    rinked = read_stitching_settings(
+        {"stitching": {"mapping_backend": "nona", "rink_config": "vallco"}}
+    )
+    assert rinked.framing.rotation_degrees == (0.0, -23.8, 4.3)
+
+
+def should_keep_reaching_opencv_when_the_baseline_moves_an_inert_fov(tmp_path, monkeypatch):
+    """Moving horizontal_fov under auto_fov must not strand the OpenCV backends.
+
+    This is the original failure from the other side: the baseline names a
+    value, the game config asks for nothing, and an OpenCV run still has to
+    start. A fixed FOV is only a request once auto_fov is off.
+    """
+    _bundle_baseline(tmp_path, monkeypatch, auto_fov=True, horizontal_fov=171.5)
+    settings = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": "opencv-magsac",
+                "projection": "rectilinear",
+                "run_autooptimizer": False,
+            }
+        }
+    )
+    assert settings.framing.horizontal_fov == 171.5
+
+
+def should_accept_an_unread_fov_that_differs_from_the_baseline():
+    """Only a FOV that is going to be read counts as a request.
+
+    While auto_fov holds, horizontal_fov is read by no backend, NONA included,
+    so differing from the baseline is not something the OpenCV path can drop.
+    Rejecting on bare inequality would refuse a config that renders identically.
+    """
+    settings = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": "opencv-magsac",
+                "projection": "rectilinear",
+                "run_autooptimizer": False,
+                "projection_framing": {"auto_fov": True, "horizontal_fov": 150},
+            }
+        }
+    )
+    assert settings.framing.horizontal_fov == 150
+    assert settings.framing.auto_fov is True
+
+
+def should_reject_a_baseline_that_stops_naming_framing(tmp_path, monkeypatch):
+    """Losing the block during a sync must fail loudly, not revert to a literal."""
+    _bundle_baseline(tmp_path, monkeypatch, auto_fov=None)
+    with pytest.raises(ValueError, match="missing stitching.projection_framing auto_fov"):
+        read_stitching_settings({"stitching": {}})
 
 
 def should_allow_explicit_zero_rotation_to_disable_native_rink_default():

@@ -119,13 +119,20 @@ def expand_cases(matrix: dict[str, Any], source_config: dict[str, Any] | None = 
                     "calibration_frame_count": values.get("frame_count", 4),
                     "max_output_width": width,
                     "stitch_frame_time": str(values.get("stitch_frame_time", "00:00:00")),
+                    # Carry only what the matrix case actually names, so the rest
+                    # resolves from baseline.yaml. Spelling defaults here instead
+                    # would pin this script to values HStream can move.
                     "projection_framing": {
-                        "auto_fov": values.get("auto_fov", False),
-                        "horizontal_fov": values.get("horizontal_fov", 180),
-                        "auto_canvas": values.get("auto_canvas", True),
-                        "auto_crop": values.get("auto_crop", False),
-                        "rotation_degrees": values.get("rotation_degrees", [0, 0, 0]),
-                        "crop": values.get("crop", [0, 1, 0, 1]),
+                        key: values[key]
+                        for key in (
+                            "auto_fov",
+                            "horizontal_fov",
+                            "auto_canvas",
+                            "auto_crop",
+                            "rotation_degrees",
+                            "crop",
+                        )
+                        if key in values
                     },
                 }
             )
