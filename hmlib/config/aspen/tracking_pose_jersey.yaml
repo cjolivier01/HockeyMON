@@ -266,6 +266,7 @@ aspen:
         plot_speed: GLOBAL.plot.plot_speed
         plot_jersey_numbers: false
         plot_actions: GLOBAL.plot.plot_actions
+        no_wide_start: GLOBAL.play_tracker.no_wide_start
 
     play_tracker_join:
       class: hmlib.aspen.plugins.join_plugin.JoinPlugin

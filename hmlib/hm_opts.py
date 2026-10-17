@@ -1959,6 +1959,7 @@ class hm_opts(object):
             ),
             ("no_plot_tracking_circles", "plot.plot_tracking_circles"),
             ("debug", "plot.debug_play_tracker"),
+            ("no_wide_start", "play_tracker.no_wide_start"),
         ]
     )
     ARG_VALUE_MAP: Mapping[str, Union[Mapping[Any, Any], Callable[[Any], Any]]] = {
