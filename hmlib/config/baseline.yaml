@@ -421,6 +421,10 @@ stitching:
   # AKAZE needs no model asset, runs on CPU, and aligns rink footage better than
   # SuperPoint + LightGlue in practice. Neural matchers remain explicit choices.
   control_point_matcher: "akaze-hamming"
+  # Native automatic matches: independent geometric checks before spatial capping.
+  control_point_filtering:
+    epipolar_ransac: true
+    homography_consistency: true
   # Applies only to SuperPoint, which defaults to 2k on every platform; auto also
   # resolves to 2k. Native and 1k remain explicit choices. Other matchers,
   # including the default AKAZE, retain their fixed processing sizes.
