@@ -12,7 +12,7 @@ import math
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import yaml
 
@@ -224,6 +224,12 @@ _UNFRAMED = ProjectionFraming(
 # Keys the bundled baseline must name, so that losing one during a sync with
 # HStream fails here instead of quietly reverting to the _UNFRAMED literal.
 _REQUIRED_BASELINE_FRAMING = ("auto_fov", "horizontal_fov", "auto_canvas", "auto_crop")
+# ...and the two it must not, which belong to the rink profile or the operator.
+_GAME_OWNED_FRAMING = ("rotation_degrees", "crop")
+
+
+def _listed(keys: Iterable[str]) -> str:
+    return ", ".join(sorted(keys))
 
 
 def _framing_is_automatic(framing: ProjectionFraming) -> bool:
@@ -401,38 +407,37 @@ def read_stitching_settings(
     # Resolve the baseline's framing first so a config that omits a key lands on
     # the same value whether or not it was merged with baseline.yaml, instead of
     # on a literal that has to be edited every time HStream moves one.
-    baseline_framing = _mapping(
-        baseline.get("projection_framing"), "baseline.yaml stitching.projection_framing"
-    )
+    baseline_label = "baseline.yaml stitching.projection_framing"
+    baseline_framing = _mapping(baseline.get("projection_framing"), baseline_label)
+    unsupported = set(baseline_framing) - set(ProjectionFraming.__dataclass_fields__)
+    if unsupported:
+        raise ValueError(f"{baseline_label} contains an unsupported key: {_listed(unsupported)}")
     # `null` has to count as missing: baseline.yaml spells "unset" that way all
     # over, and _defaulted turns it back into the _UNFRAMED literal this check
     # exists to keep out of the resolution.
     missing = [key for key in _REQUIRED_BASELINE_FRAMING if baseline_framing.get(key) is None]
     if missing:
         raise ValueError(
-            "Bundled baseline.yaml is missing stitching.projection_framing "
-            f"{', '.join(missing)}; it must name them so game configs do not "
-            "fall back to a stale built-in default"
+            f"{baseline_label} is missing {_listed(missing)}; it must name them "
+            "so game configs do not fall back to a stale built-in default"
+        )
+    # Rotation and crop are the game's to choose, from a rink profile or the
+    # operator, so the baseline must not pre-empt them. It cannot be allowed to
+    # try: get_config deep-merges baseline.yaml into the game config, so a value
+    # it named would arrive inside framing_config, indistinguishable from one the
+    # operator typed, and beat the rink -- while a config that never saw the
+    # baseline would still take the rink. The two paths would resolve one game
+    # differently, which is the split this whole change exists to close.
+    owned = [key for key in _GAME_OWNED_FRAMING if key in baseline_framing]
+    if owned:
+        raise ValueError(
+            f"{baseline_label} must not name {_listed(owned)}; rotation and crop "
+            "come from stitching.rink_config or the game's own framing"
         )
     defaults = _read_framing(
-        baseline_framing,
-        _UNFRAMED,
-        _UNFRAMED.rotation_degrees,
-        "baseline.yaml stitching.projection_framing",
+        baseline_framing, _UNFRAMED, _UNFRAMED.rotation_degrees, baseline_label
     )
-    # Only a selected rink displaces the baseline's own rotation; without one the
-    # fallback has to stay the baseline's, or a rotation it names is dropped here
-    # and then read as operator intent by the automatic-framing check below.
-    # This orders rink over baseline, which is reachable only from a config that
-    # never saw baseline.yaml: get_config deep-merges it, so a rotation the
-    # baseline named arrives inside framing_config and wins there instead. The
-    # two agree while the baseline omits the key, and nothing here can tell a
-    # merged baseline value apart from one the operator typed.
-    framing = _read_framing(
-        framing_config,
-        defaults,
-        rotation if rink is not None and rink != "" else defaults.rotation_degrees,
-    )
+    framing = _read_framing(framing_config, defaults, rotation)
     if (
         backend == "nona"
         and not framing.auto_fov

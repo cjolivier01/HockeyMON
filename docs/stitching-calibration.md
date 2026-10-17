@@ -29,9 +29,12 @@ stitching:
 
 All 22 Hugin projections are supported. Parameterized projections are
 `albers-equal-area-conic`, `biplane`, `triplane`, and `general-panini`; values
-must respect Hugin's ranges and use increments of 0.01. Unsupported FOVs are
-rejected, including rectilinear FOVs above 179 degrees. The generated PTO is
-checked to detect Hugin clamping a requested value.
+must respect Hugin's ranges and use increments of 0.01. A requested FOV that the
+projection cannot reach is rejected, including rectilinear FOVs above 179
+degrees, and the generated PTO is checked to detect Hugin clamping it. Both
+apply to a fixed FOV only: under `projection_framing.auto_fov`, which the shared
+baseline enables, Hugin picks the angle and there is no request to exceed a
+limit or to clamp.
 
 Camera presets select source-image FOVs. Override either axis with
 `camera_fov.horizontal_fov` or `camera_fov.vertical_fov`. A custom camera identifier

@@ -484,23 +484,47 @@ def _bundle_baseline(tmp_path, monkeypatch, remove=(), **framing):
     )
 
 
-def should_apply_a_rotation_the_baseline_names(tmp_path, monkeypatch):
-    """A rotation the baseline names belongs to the resolved framing.
+@pytest.mark.parametrize(
+    "key, value", [("rotation_degrees", [0, -5, 0]), ("crop", [0.1, 0.9, 0, 1])]
+)
+def should_reject_a_baseline_that_claims_rotation_or_crop(tmp_path, monkeypatch, key, value):
+    """Rotation and crop belong to the rink profile or the operator.
 
-    The rink profile supplies the rotation fallback, but only when a rink is
-    selected. Letting it displace the baseline's own value unconditionally drops
-    a rotation NONA should have applied, and then reads the loss as if the
-    operator had asked for zero.
+    If the baseline named one, `get_config` would deep-merge it into the game
+    config, where it is indistinguishable from an operator's value and beats the
+    rink -- while a config that never saw the baseline would still take the
+    rink. One game would resolve two ways, which is the split this module is
+    supposed to have closed. Fail at the sync instead.
     """
-    _bundle_baseline(tmp_path, monkeypatch, rotation_degrees=[0, -5, 0])
-    settings = read_stitching_settings({"stitching": {"mapping_backend": "nona"}})
-    assert settings.framing.rotation_degrees == (0.0, -5.0, 0.0)
+    _bundle_baseline(tmp_path, monkeypatch, **{key: value})
+    with pytest.raises(ValueError, match=f"must not name {key}"):
+        read_stitching_settings({"stitching": {"mapping_backend": "nona"}})
 
-    # A selected rink still wins over it.
-    rinked = read_stitching_settings(
+
+def should_take_the_rink_rotation_over_the_unframed_default(tmp_path, monkeypatch):
+    """The rink profile still supplies the rotation when the game selects one."""
+    settings = read_stitching_settings(
         {"stitching": {"mapping_backend": "nona", "rink_config": "vallco"}}
     )
-    assert rinked.framing.rotation_degrees == (0.0, -23.8, 4.3)
+    assert settings.framing.rotation_degrees == (0.0, -23.8, 4.3)
+    # And an explicit zero still cancels it.
+    cancelled = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": "nona",
+                "rink_config": "vallco",
+                "projection_framing": {"rotation_degrees": [0, 0, 0]},
+            }
+        }
+    )
+    assert cancelled.framing.rotation_degrees == (0.0, 0.0, 0.0)
+
+
+def should_reject_a_baseline_framing_key_it_does_not_understand(tmp_path, monkeypatch):
+    """HStream owns this vocabulary, so an unknown key means the sync drifted."""
+    _bundle_baseline(tmp_path, monkeypatch, auto_rotate=True)
+    with pytest.raises(ValueError, match="unsupported key: auto_rotate"):
+        read_stitching_settings({"stitching": {}})
 
 
 def should_keep_reaching_opencv_when_the_baseline_moves_an_inert_fov(tmp_path, monkeypatch):
@@ -555,7 +579,7 @@ def should_reject_a_baseline_that_stops_naming_framing(tmp_path, monkeypatch, sp
         _bundle_baseline(tmp_path, monkeypatch, remove=("auto_fov",))
     else:
         _bundle_baseline(tmp_path, monkeypatch, auto_fov=None)
-    with pytest.raises(ValueError, match="missing stitching.projection_framing auto_fov"):
+    with pytest.raises(ValueError, match="is missing auto_fov"):
         read_stitching_settings({"stitching": {}})
 
 
