@@ -62,12 +62,22 @@ bitmap after calibration.
 
 NONA framing supports Auto FOV/canvas/crop and a manual crop expressed as
 `[left, right, top, bottom]` fractions of the full projected canvas. A custom crop
-and Auto crop cannot be active together. OpenCV mapping is determined by the fitted rectilinear transform. Non-default
-projection framing, including a selected rink with nonzero rotation, requires
-NONA; unsupported framing is rejected before calibration. "Default" here means
-the value in the shared `baseline.yaml`, not a value compiled into HockeyMON, so
-a stock game still reaches the OpenCV backends after HockeyMONStream moves a
-framing default.
+and Auto crop cannot be active together. OpenCV mapping is determined by the fitted rectilinear transform,
+so it applies no framing at all. Framing that asks for something specific —
+a fixed FOV (`auto_fov: false`), a fixed canvas (`auto_canvas: false`), Auto
+crop, a manual crop, or a selected rink with nonzero rotation — therefore
+requires NONA and is rejected before calibration rather than silently dropped.
+Framing that leaves every decision to the backend is accepted, whoever supplied
+it, so a stock game reaches the OpenCV backends. `horizontal_fov` is not itself
+a request while `auto_fov` holds, because no backend reads it then.
+
+Values HockeyMON does not find in the game config come from the shared
+`baseline.yaml`, never from a default compiled into Python, so the resolved
+framing follows HockeyMONStream when it moves one. A baseline that stops naming
+`auto_fov`, `horizontal_fov`, `auto_canvas` or `auto_crop` is an error rather
+than a silent fallback. Note that a baseline which someday ships non-automatic
+framing would make the OpenCV backends unavailable, which is correct — they
+cannot honor it — but is a behavior change to watch for when syncing.
 
 `max_output_dimension` caps both canvas dimensions. `max_output_width` caps width.
 For either setting, `0` and `null` both mean no user-specified cap; canvas safety

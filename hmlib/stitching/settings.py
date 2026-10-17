@@ -208,8 +208,8 @@ class ProjectionFraming:
 
 # Framing that asks for nothing: no rotation and the whole canvas. This is only
 # ever the fallback for a key the bundled baseline itself omits, which today is
-# rotation_degrees and crop; the FOV pair here is inert because the baseline
-# always names both, which _baseline_framing enforces. These literals are not
+# rotation_degrees and crop; the FOV pair here is inert because
+# _REQUIRED_BASELINE_FRAMING makes the baseline name both. These literals are not
 # "the default framing" and must not be compared against as if they were —
 # read_stitching_settings derives that from baseline.yaml, so it keeps
 # following HStream when a default moves.
@@ -401,8 +401,13 @@ def read_stitching_settings(
     # Resolve the baseline's framing first so a config that omits a key lands on
     # the same value whether or not it was merged with baseline.yaml, instead of
     # on a literal that has to be edited every time HStream moves one.
-    baseline_framing = _mapping(baseline.get("projection_framing"), "stitching.projection_framing")
-    missing = [key for key in _REQUIRED_BASELINE_FRAMING if key not in baseline_framing]
+    baseline_framing = _mapping(
+        baseline.get("projection_framing"), "baseline.yaml stitching.projection_framing"
+    )
+    # `null` has to count as missing: baseline.yaml spells "unset" that way all
+    # over, and _defaulted turns it back into the _UNFRAMED literal this check
+    # exists to keep out of the resolution.
+    missing = [key for key in _REQUIRED_BASELINE_FRAMING if baseline_framing.get(key) is None]
     if missing:
         raise ValueError(
             "Bundled baseline.yaml is missing stitching.projection_framing "
@@ -418,6 +423,11 @@ def read_stitching_settings(
     # Only a selected rink displaces the baseline's own rotation; without one the
     # fallback has to stay the baseline's, or a rotation it names is dropped here
     # and then read as operator intent by the automatic-framing check below.
+    # This orders rink over baseline, which is reachable only from a config that
+    # never saw baseline.yaml: get_config deep-merges it, so a rotation the
+    # baseline named arrives inside framing_config and wins there instead. The
+    # two agree while the baseline omits the key, and nothing here can tell a
+    # merged baseline value apart from one the operator typed.
     framing = _read_framing(
         framing_config,
         defaults,

@@ -419,7 +419,7 @@ def should_forward_effective_config_to_calibration_worker(monkeypatch, tmp_path)
         {"projection_framing": {"auto_canvas": False}},
     ],
 )
-def should_require_nona_for_nondefault_effective_framing(values):
+def should_require_nona_for_framing_that_asks_for_something(values):
     with pytest.raises(ValueError, match="requires mapping_backend=nona"):
         read_stitching_settings({"stitching": {"mapping_backend": "opencv-magsac", **values}})
 
@@ -463,16 +463,19 @@ def should_accept_baseline_framing_on_opencv_backends(backend):
     )
 
 
-def _bundle_baseline(tmp_path, monkeypatch, **framing):
-    """Point settings.py at a copy of the baseline with framing overridden."""
+def _bundle_baseline(tmp_path, monkeypatch, remove=(), **framing):
+    """Point settings.py at a copy of the baseline with framing overridden.
+
+    ``remove`` deletes keys outright; passing ``None`` through ``framing``
+    instead writes an explicit YAML ``null``, which is how baseline.yaml spells
+    "unset" and is a different thing to resolve.
+    """
     source = Path(settings_module.__file__).resolve().parents[1] / "config" / "baseline.yaml"
     document = yaml.safe_load(source.read_text())
     block = document["stitching"]["projection_framing"]
-    for key, value in framing.items():
-        if value is None:
-            del block[key]
-        else:
-            block[key] = value
+    for key in remove:
+        del block[key]
+    block.update(framing)
     bundled = tmp_path / "hmlib" / "config" / "baseline.yaml"
     bundled.parent.mkdir(parents=True)
     bundled.write_text(yaml.safe_dump(document))
@@ -541,9 +544,17 @@ def should_accept_an_unread_fov_that_differs_from_the_baseline():
     assert settings.framing.auto_fov is True
 
 
-def should_reject_a_baseline_that_stops_naming_framing(tmp_path, monkeypatch):
-    """Losing the block during a sync must fail loudly, not revert to a literal."""
-    _bundle_baseline(tmp_path, monkeypatch, auto_fov=None)
+@pytest.mark.parametrize("spelling", ["absent", "null"])
+def should_reject_a_baseline_that_stops_naming_framing(tmp_path, monkeypatch, spelling):
+    """Losing a key during a sync must fail loudly, not revert to a literal.
+
+    `null` matters as much as a deleted key: baseline.yaml spells "unset" that
+    way throughout, and it resolves back to the same stale literal.
+    """
+    if spelling == "absent":
+        _bundle_baseline(tmp_path, monkeypatch, remove=("auto_fov",))
+    else:
+        _bundle_baseline(tmp_path, monkeypatch, auto_fov=None)
     with pytest.raises(ValueError, match="missing stitching.projection_framing auto_fov"):
         read_stitching_settings({"stitching": {}})
 
