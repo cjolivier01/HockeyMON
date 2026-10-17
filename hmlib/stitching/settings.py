@@ -12,7 +12,7 @@ import math
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import yaml
 
@@ -198,12 +198,118 @@ def maximum_projection_fov(projection: str, parameters: tuple[float, ...]) -> fl
 
 @dataclass(frozen=True)
 class ProjectionFraming:
-    auto_fov: bool = False
-    horizontal_fov: float = 180.0
-    auto_canvas: bool = True
-    auto_crop: bool = False
-    rotation_degrees: tuple[float, ...] = (0.0, 0.0, 0.0)
-    crop: tuple[float, ...] = (0.0, 1.0, 0.0, 1.0)
+    auto_fov: bool
+    horizontal_fov: float
+    auto_canvas: bool
+    auto_crop: bool
+    rotation_degrees: tuple[float, ...]
+    crop: tuple[float, ...]
+
+
+# Last-resort per-key fallbacks, not a framing anybody should resolve to as a
+# whole: note _framing_is_automatic(_FRAMING_FALLBACK) is False, because the FOV
+# pair spells a fixed 180-degree request. Only `crop` is ever actually read off
+# it -- _REQUIRED_BASELINE_FRAMING makes the baseline supply the other four, and
+# `rotation_degrees` is only a seed for the rink lookup. This is emphatically
+# not "the default framing" and must not be compared against as if it were;
+# read_stitching_settings derives that from baseline.yaml, so it keeps following
+# HStream when a default moves.
+_FRAMING_FALLBACK = ProjectionFraming(
+    auto_fov=False,
+    horizontal_fov=180.0,
+    auto_canvas=True,
+    auto_crop=False,
+    rotation_degrees=(0.0, 0.0, 0.0),
+    crop=(0.0, 1.0, 0.0, 1.0),
+)
+# Keys the bundled baseline must name, so that losing one during a sync with
+# HStream fails here instead of quietly reverting to the fallback literal.
+_REQUIRED_BASELINE_FRAMING = ("auto_fov", "horizontal_fov", "auto_canvas", "auto_crop")
+# ...and the two it must not, which belong to the rink profile or the operator.
+_GAME_OWNED_FRAMING = ("rotation_degrees", "crop")
+
+
+def _listed(keys: Iterable[Any]) -> str:
+    """Name config keys in an error. YAML keys are not necessarily strings."""
+    return ", ".join(sorted(key if isinstance(key, str) else repr(key) for key in keys))
+
+
+def _framing_is_automatic(framing: ProjectionFraming) -> bool:
+    """Whether this framing leaves every decision to the mapping backend.
+
+    Only NONA applies projection framing: ``apply_projection_framing`` runs
+    behind ``mapping_backend == "nona"``, and the OpenCV backends derive their
+    mapping from the fitted rectilinear transform without ever seeing a
+    ``StitchingSettings``. Letting the backend choose costs nothing when the
+    framing is dropped, so it stays allowed; a fixed FOV or canvas, a rotation
+    or a crop is a request that would vanish silently, so it does not.
+
+    ``horizontal_fov`` is deliberately not checked: it is read only in the
+    fixed-FOV branch, so while ``auto_fov`` holds it is inert under every
+    backend, including NONA.
+    """
+    return (
+        framing.auto_fov
+        and framing.auto_canvas
+        and not framing.auto_crop
+        and framing.crop == _FRAMING_FALLBACK.crop
+        and not any(framing.rotation_degrees)
+    )
+
+
+def _read_framing(
+    framing_config: Mapping[str, Any],
+    defaults: ProjectionFraming,
+    rotation: tuple[float, ...],
+    source: str = "stitching.projection_framing",
+) -> ProjectionFraming:
+    """Resolve one projection_framing layer over ``defaults``.
+
+    ``rotation`` supplies the fallback rotation, which is the selected rink
+    profile's when the game layer does not name one of its own. ``source``
+    names the layer in errors, so a bad value in the bundled baseline is not
+    reported as something the operator typed.
+    """
+    crop = _array(_defaulted(framing_config, "crop", defaults.crop), 4, f"{source}.crop")
+    if not (0 <= crop[0] < crop[1] <= 1 and 0 <= crop[2] < crop[3] <= 1):
+        raise ValueError(f"{source}.crop must be normalized left,right,top,bottom bounds")
+    resolved = _array(
+        _defaulted(framing_config, "rotation_degrees", rotation),
+        3,
+        f"{source}.rotation_degrees",
+    )
+    if any(abs(angle) > 180 for angle in resolved):
+        raise ValueError(f"{source}.rotation_degrees must be between -180 and 180")
+    framing = ProjectionFraming(
+        auto_fov=_boolean(
+            _defaulted(framing_config, "auto_fov", defaults.auto_fov),
+            f"{source}.auto_fov",
+        ),
+        horizontal_fov=_number(
+            _defaulted(framing_config, "horizontal_fov", defaults.horizontal_fov),
+            f"{source}.horizontal_fov",
+        ),
+        auto_canvas=_boolean(
+            _defaulted(framing_config, "auto_canvas", defaults.auto_canvas),
+            f"{source}.auto_canvas",
+        ),
+        auto_crop=_boolean(
+            _defaulted(framing_config, "auto_crop", defaults.auto_crop),
+            f"{source}.auto_crop",
+        ),
+        rotation_degrees=resolved,
+        crop=crop,
+    )
+    if framing.auto_crop and crop != _FRAMING_FALLBACK.crop:
+        # Either side may be inherited rather than named in this layer, so say
+        # which values collided instead of blaming whoever wrote the crop.
+        raise ValueError(
+            f"{source} resolves to crop {list(crop)} with auto_crop enabled; "
+            "they are mutually exclusive"
+        )
+    if not 0 < framing.horizontal_fov <= 360:
+        raise ValueError(f"{source}.horizontal_fov must be between 0 and 360")
+    return framing
 
 
 @dataclass(frozen=True)
@@ -289,11 +395,50 @@ def read_stitching_settings(
         raise ValueError(
             "Camera FOV must be between 0 and 360 horizontally, and 0 and 180 vertically"
         )
+    # Check and resolve the baseline's framing before the game's, so a config
+    # that omits a key lands on the same value whether or not it was merged with
+    # baseline.yaml, instead of on a literal that has to be edited every time
+    # HStream moves one. Order matters: get_config deep-merges the baseline, so
+    # a key it gained is also in framing_config, and the game-layer check below
+    # would otherwise report a sync error as something the operator typed.
+    baseline_label = "baseline.yaml stitching.projection_framing"
+    baseline_framing = _mapping(baseline.get("projection_framing"), baseline_label)
+    unsupported = set(baseline_framing) - set(ProjectionFraming.__dataclass_fields__)
+    if unsupported:
+        raise ValueError(f"{baseline_label} contains an unsupported key: {_listed(unsupported)}")
+    # `null` counts as unset throughout: baseline.yaml spells it that way all
+    # over, HStream's own parser reads a null framing entry as inherited, and
+    # _defaulted passes it through to the fallback. So a required key must be
+    # non-null, and a forbidden one is only forbidden when it carries a value.
+    missing = [key for key in _REQUIRED_BASELINE_FRAMING if baseline_framing.get(key) is None]
+    if missing:
+        raise ValueError(
+            f"{baseline_label} is missing {_listed(missing)}; it must name them "
+            "so game configs do not fall back to a stale built-in default"
+        )
+    # Rotation and crop are the game's to choose, from a rink profile or the
+    # operator, so the baseline must not pre-empt them. It cannot be allowed to
+    # try: get_config deep-merges baseline.yaml into the game config, so a value
+    # it named would arrive inside framing_config, indistinguishable from one the
+    # operator typed, and beat the rink -- while a config that never saw the
+    # baseline would still take the rink. The two paths would resolve one game
+    # differently, which is the split this whole change exists to close. A null
+    # cannot do that, so it stays legal.
+    owned = [key for key in _GAME_OWNED_FRAMING if baseline_framing.get(key) is not None]
+    if owned:
+        raise ValueError(
+            f"{baseline_label} must not name {_listed(owned)}; rotation and crop "
+            "come from stitching.rink_config or the game's own framing"
+        )
+    defaults = _read_framing(baseline_framing, _FRAMING_FALLBACK, (0.0, 0.0, 0.0), baseline_label)
     framing_config = _mapping(stitch.get("projection_framing"), "stitching.projection_framing")
-    if set(framing_config) - set(ProjectionFraming.__dataclass_fields__):
-        raise ValueError("stitching.projection_framing contains an unsupported key")
+    unsupported = set(framing_config) - set(ProjectionFraming.__dataclass_fields__)
+    if unsupported:
+        raise ValueError(
+            f"stitching.projection_framing contains an unsupported key: {_listed(unsupported)}"
+        )
     rink = stitch.get("rink_config")
-    rotation = (0.0, 0.0, 0.0)
+    rotation = _FRAMING_FALLBACK.rotation_degrees
     if rink is not None and rink != "":
         rinks = _mapping(
             _defaulted(stitch, "rink_configs", baseline.get("rink_configs")),
@@ -305,36 +450,7 @@ def read_stitching_settings(
         rotation = _array(
             profile.get("rotation_degrees"), 3, f"rink_configs.{rink}.rotation_degrees"
         )
-    rotation = _array(
-        _defaulted(framing_config, "rotation_degrees", rotation),
-        3,
-        "projection_framing.rotation_degrees",
-    )
-    if any(abs(angle) > 180 for angle in rotation):
-        raise ValueError("projection_framing.rotation_degrees must be between -180 and 180")
-    crop = _array(_defaulted(framing_config, "crop", (0, 1, 0, 1)), 4, "projection_framing.crop")
-    if not (0 <= crop[0] < crop[1] <= 1 and 0 <= crop[2] < crop[3] <= 1):
-        raise ValueError("projection_framing.crop must be normalized left,right,top,bottom bounds")
-    framing = ProjectionFraming(
-        auto_fov=_boolean(
-            _defaulted(framing_config, "auto_fov", False), "projection_framing.auto_fov"
-        ),
-        horizontal_fov=_number(
-            _defaulted(framing_config, "horizontal_fov", 180), "projection_framing.horizontal_fov"
-        ),
-        auto_canvas=_boolean(
-            _defaulted(framing_config, "auto_canvas", True), "projection_framing.auto_canvas"
-        ),
-        auto_crop=_boolean(
-            _defaulted(framing_config, "auto_crop", False), "projection_framing.auto_crop"
-        ),
-        rotation_degrees=rotation,
-        crop=crop,
-    )
-    if framing.auto_crop and crop != (0, 1, 0, 1):
-        raise ValueError("projection_framing.crop and auto_crop are mutually exclusive")
-    if not 0 < framing.horizontal_fov <= 360:
-        raise ValueError("projection_framing.horizontal_fov must be between 0 and 360")
+    framing = _read_framing(framing_config, defaults, rotation)
     if (
         backend == "nona"
         and not framing.auto_fov
@@ -343,10 +459,14 @@ def read_stitching_settings(
         raise ValueError(
             f"{projection} horizontal FOV exceeds projection limit {maximum_projection_fov(projection, parameters):.6g}"
         )
-    if backend != "nona" and framing != ProjectionFraming():
+    # A selected rink's rotation reaches `framing` through `rotation`, so it is
+    # a request here and rejected, which is what the OpenCV path requires.
+    if backend != "nona" and not _framing_is_automatic(framing):
         raise ValueError(
-            "Non-default projection framing (including rink rotation and crop) requires "
-            "mapping_backend=nona and run_autooptimizer=true"
+            "Projection framing that fixes the FOV or canvas, or asks for a rink "
+            "rotation or a crop, requires mapping_backend=nona and "
+            "run_autooptimizer=true; the OpenCV backends fit a rectilinear "
+            "transform and would drop it"
         )
     width = normalize_max_output_dimension(stitch.get("max_output_width"))
     frame_count = _number(

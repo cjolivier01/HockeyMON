@@ -10,9 +10,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import yaml
 from stitching_fixtures import write_generation
 
 from hmlib.stitching import configure_stitching
+from hmlib.stitching import settings as settings_module
 from hmlib.stitching.projections import (
     apply_projection,
     cap_projection_canvas,
@@ -149,8 +151,13 @@ def should_validate_projection_parameters_and_dynamic_fov():
     assert maximum_projection_fov("general-panini", (0, 0, 0)) == pytest.approx(160)
     assert maximum_projection_fov("general-panini", (100, 0, 0)) > 300
     assert maximum_projection_fov("biplane", (45, 0)) == 224
+    # The limit is only checked against a fixed FOV, and the baseline ships
+    # auto_fov, so name both explicitly rather than leaning on the default.
     with pytest.raises(ValueError, match="projection limit"):
-        _nona(projection="rectilinear")
+        _nona(
+            projection="rectilinear",
+            projection_framing={"auto_fov": False, "horizontal_fov": 180},
+        )
     with pytest.raises(ValueError, match="increments"):
         projection_parameters("general-panini", [100.001, 0, 0])
     with pytest.raises(ValueError, match="exactly"):
@@ -207,8 +214,12 @@ def should_reject_changed_hugin_output_without_replacing_input(tmp_path, pto, me
     def run(command):
         Path(command[command.index("-o") + 1]).write_text(pto)
 
+    # A clamped FOV is only detectable against a fixed request, and the fixture
+    # PTO reports 180, so pin the framing to match instead of inheriting the
+    # baseline's auto_fov.
+    settings = _nona(projection_framing={"auto_fov": False, "horizontal_fov": 180})
     with pytest.raises(ValueError, match=message):
-        apply_projection(project, _nona(), run)
+        apply_projection(project, settings, run)
     assert project.read_text() == original
     assert list(tmp_path.iterdir()) == [project]
 
@@ -401,14 +412,205 @@ def should_forward_effective_config_to_calibration_worker(monkeypatch, tmp_path)
         {"projection_framing": {"rotation_degrees": [0, -20, 0]}},
         {"projection_framing": {"crop": [0.1, 0.9, 0, 1]}},
         {"projection_framing": {"auto_crop": True}},
-        {"projection_framing": {"auto_fov": True}},
+        # The baseline ships auto_fov, so turning it off is the real ask; a FOV
+        # only counts as one once it is going to be read.
+        {"projection_framing": {"auto_fov": False}},
+        {"projection_framing": {"auto_fov": False, "horizontal_fov": 150}},
         {"projection_framing": {"auto_canvas": False}},
-        {"projection_framing": {"horizontal_fov": 150}},
     ],
 )
-def should_require_nona_for_nondefault_effective_framing(values):
+def should_require_nona_for_framing_that_asks_for_something(values):
     with pytest.raises(ValueError, match="requires mapping_backend=nona"):
         read_stitching_settings({"stitching": {"mapping_backend": "opencv-magsac", **values}})
+
+
+@pytest.mark.parametrize("backend", ["opencv-magsac", "opencv-affine-ransac"])
+def should_accept_baseline_framing_on_opencv_backends(backend):
+    """A stock game must reach the OpenCV backends.
+
+    `get_config` merges baseline.yaml into every real config, so the framing an
+    operator never touched still arrives populated. Resolving the default from
+    a literal rather than the baseline silently made that stock framing look
+    operator-chosen and rejected every OpenCV run.
+    """
+    baseline = yaml.safe_load(
+        (
+            Path(settings_module.__file__).resolve().parents[1] / "config" / "baseline.yaml"
+        ).read_text()
+    )
+    stitching = dict(baseline["stitching"])
+    stitching.update(
+        {"mapping_backend": backend, "projection": "rectilinear", "run_autooptimizer": False}
+    )
+    merged = read_stitching_settings({"stitching": stitching})
+    assert merged.mapping_backend == backend
+
+    # A config that never saw the baseline must resolve the same framing, or the
+    # two paths disagree on calibration provenance for one game.
+    bare = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": backend,
+                "projection": "rectilinear",
+                "run_autooptimizer": False,
+            }
+        }
+    )
+    assert bare.framing == merged.framing
+    assert (merged.framing.auto_fov, merged.framing.horizontal_fov) == (
+        baseline["stitching"]["projection_framing"]["auto_fov"],
+        baseline["stitching"]["projection_framing"]["horizontal_fov"],
+    )
+
+
+def _bundle_baseline(tmp_path, monkeypatch, remove=(), **framing):
+    """Point settings.py at a copy of the baseline with framing overridden.
+
+    ``remove`` deletes keys outright; passing ``None`` through ``framing``
+    instead writes an explicit YAML ``null``, which is how baseline.yaml spells
+    "unset" and is a different thing to resolve.
+    """
+    source = Path(settings_module.__file__).resolve().parents[1] / "config" / "baseline.yaml"
+    document = yaml.safe_load(source.read_text())
+    block = document["stitching"]["projection_framing"]
+    for key in remove:
+        del block[key]
+    block.update(framing)
+    bundled = tmp_path / "hmlib" / "config" / "baseline.yaml"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text(yaml.safe_dump(document))
+    monkeypatch.setattr(
+        settings_module, "__file__", str(tmp_path / "hmlib" / "stitching" / "settings.py")
+    )
+
+
+@pytest.mark.parametrize(
+    "key, value", [("rotation_degrees", [0, -5, 0]), ("crop", [0.1, 0.9, 0, 1])]
+)
+def should_reject_a_baseline_that_claims_rotation_or_crop(tmp_path, monkeypatch, key, value):
+    """Rotation and crop belong to the rink profile or the operator.
+
+    If the baseline named one, `get_config` would deep-merge it into the game
+    config, where it is indistinguishable from an operator's value and beats the
+    rink -- while a config that never saw the baseline would still take the
+    rink. One game would resolve two ways, which is the split this module is
+    supposed to have closed. Fail at the sync instead.
+    """
+    _bundle_baseline(tmp_path, monkeypatch, **{key: value})
+    with pytest.raises(ValueError, match=f"must not name {key}"):
+        read_stitching_settings({"stitching": {"mapping_backend": "nona"}})
+
+
+@pytest.mark.parametrize("key", ["rotation_degrees", "crop"])
+def should_allow_a_baseline_to_spell_rotation_or_crop_null(tmp_path, monkeypatch, key):
+    """`null` is how both repositories spell "inherit", so it is not a claim.
+
+    HStream's own parser reads a null framing entry as inherited, and
+    `baseline.yaml` uses `null` for "unset" throughout. It cannot split the two
+    config paths the way a real value would, because `_defaulted` passes it
+    through to the same fallback either way -- so refusing it would brick every
+    entry point over a legal upstream spelling.
+    """
+    _bundle_baseline(tmp_path, monkeypatch, **{key: None})
+    game = {"mapping_backend": "nona", "rink_config": "vallco"}
+    bare = read_stitching_settings({"stitching": dict(game)})
+    assert bare.framing.rotation_degrees == (0.0, -23.8, 4.3)
+    assert bare.framing.crop == (0.0, 1.0, 0.0, 1.0)
+
+
+def should_take_the_rink_rotation_when_the_game_selects_one():
+    """The rink profile supplies the rotation the baseline is forbidden to."""
+    settings = read_stitching_settings(
+        {"stitching": {"mapping_backend": "nona", "rink_config": "vallco"}}
+    )
+    assert settings.framing.rotation_degrees == (0.0, -23.8, 4.3)
+    # And an explicit zero still cancels it.
+    cancelled = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": "nona",
+                "rink_config": "vallco",
+                "projection_framing": {"rotation_degrees": [0, 0, 0]},
+            }
+        }
+    )
+    assert cancelled.framing.rotation_degrees == (0.0, 0.0, 0.0)
+
+
+def should_blame_the_baseline_for_its_own_unknown_framing_key(tmp_path, monkeypatch):
+    """A key HStream adds must be reported against the baseline, on both paths.
+
+    `get_config` deep-merges the baseline, so the new key is also in the game
+    config. Checking the game layer first would report a sync error as an
+    operator typo, on the path the application actually runs.
+    """
+    _bundle_baseline(tmp_path, monkeypatch, auto_rotate=True)
+    merged = {"projection_framing": {"auto_rotate": True, "auto_fov": True}}
+    with pytest.raises(ValueError, match=r"baseline\.yaml.*unsupported key: auto_rotate"):
+        read_stitching_settings({"stitching": merged})
+
+
+def should_reject_a_baseline_framing_key_it_does_not_understand(tmp_path, monkeypatch):
+    """HStream owns this vocabulary, so an unknown key means the sync drifted."""
+    _bundle_baseline(tmp_path, monkeypatch, auto_rotate=True)
+    with pytest.raises(ValueError, match="unsupported key: auto_rotate"):
+        read_stitching_settings({"stitching": {}})
+
+
+def should_keep_reaching_opencv_when_the_baseline_moves_an_inert_fov(tmp_path, monkeypatch):
+    """Moving horizontal_fov under auto_fov must not strand the OpenCV backends.
+
+    This is the original failure from the other side: the baseline names a
+    value, the game config asks for nothing, and an OpenCV run still has to
+    start. A fixed FOV is only a request once auto_fov is off.
+    """
+    _bundle_baseline(tmp_path, monkeypatch, auto_fov=True, horizontal_fov=171.5)
+    settings = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": "opencv-magsac",
+                "projection": "rectilinear",
+                "run_autooptimizer": False,
+            }
+        }
+    )
+    assert settings.framing.horizontal_fov == 171.5
+
+
+def should_accept_an_unread_fov_that_differs_from_the_baseline():
+    """Only a FOV that is going to be read counts as a request.
+
+    While auto_fov holds, horizontal_fov is read by no backend, NONA included,
+    so differing from the baseline is not something the OpenCV path can drop.
+    Rejecting on bare inequality would refuse a config that renders identically.
+    """
+    settings = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": "opencv-magsac",
+                "projection": "rectilinear",
+                "run_autooptimizer": False,
+                "projection_framing": {"auto_fov": True, "horizontal_fov": 150},
+            }
+        }
+    )
+    assert settings.framing.horizontal_fov == 150
+    assert settings.framing.auto_fov is True
+
+
+@pytest.mark.parametrize("spelling", ["absent", "null"])
+def should_reject_a_baseline_that_stops_naming_framing(tmp_path, monkeypatch, spelling):
+    """Losing a key during a sync must fail loudly, not revert to a literal.
+
+    `null` matters as much as a deleted key: baseline.yaml spells "unset" that
+    way throughout, and it resolves back to the same stale literal.
+    """
+    if spelling == "absent":
+        _bundle_baseline(tmp_path, monkeypatch, remove=("auto_fov",))
+    else:
+        _bundle_baseline(tmp_path, monkeypatch, auto_fov=None)
+    with pytest.raises(ValueError, match="is missing auto_fov"):
+        read_stitching_settings({"stitching": {}})
 
 
 def should_allow_explicit_zero_rotation_to_disable_native_rink_default():

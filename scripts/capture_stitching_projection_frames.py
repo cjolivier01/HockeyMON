@@ -119,13 +119,20 @@ def expand_cases(matrix: dict[str, Any], source_config: dict[str, Any] | None = 
                     "calibration_frame_count": values.get("frame_count", 4),
                     "max_output_width": width,
                     "stitch_frame_time": str(values.get("stitch_frame_time", "00:00:00")),
+                    # The matrix compares projections, so rotation and crop stay
+                    # pinned neutral: the source game's rink_config would
+                    # otherwise tilt every capture. The remaining keys are
+                    # baseline-owned, so carry only what a case names and let
+                    # read_stitching_settings resolve the rest -- spelling
+                    # defaults here would pin this script to values HStream moves.
                     "projection_framing": {
-                        "auto_fov": values.get("auto_fov", False),
-                        "horizontal_fov": values.get("horizontal_fov", 180),
-                        "auto_canvas": values.get("auto_canvas", True),
-                        "auto_crop": values.get("auto_crop", False),
                         "rotation_degrees": values.get("rotation_degrees", [0, 0, 0]),
                         "crop": values.get("crop", [0, 1, 0, 1]),
+                        **{
+                            key: values[key]
+                            for key in ("auto_fov", "horizontal_fov", "auto_canvas", "auto_crop")
+                            if key in values
+                        },
                     },
                 }
             )

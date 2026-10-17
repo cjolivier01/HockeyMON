@@ -18,6 +18,12 @@ defaults:
   # review grid reviews the projections people actually ship.
   control_point_matcher: akaze-hamming
   mapping_backend: nona
+  # A framing key named here or in a case is passed through; one left out
+  # resolves from baseline.yaml, so leaving all four out tracks HStream. A case
+  # wanting a fixed angle must name auto_fov: false alongside horizontal_fov,
+  # which is read only then -- otherwise the capture is AUTO whatever the label
+  # says. rotation_degrees and crop are always pinned neutral by the script, so
+  # the source game's rink_config cannot tilt the grid.
   auto_fov: true
   horizontal_fov: 180  # Retained in metadata but ignored while auto_fov is true.
   auto_canvas: true

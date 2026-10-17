@@ -29,9 +29,12 @@ stitching:
 
 All 22 Hugin projections are supported. Parameterized projections are
 `albers-equal-area-conic`, `biplane`, `triplane`, and `general-panini`; values
-must respect Hugin's ranges and use increments of 0.01. Unsupported FOVs are
-rejected, including rectilinear FOVs above 179 degrees. The generated PTO is
-checked to detect Hugin clamping a requested value.
+must respect Hugin's ranges and use increments of 0.01. A requested FOV that the
+projection cannot reach is rejected, including rectilinear FOVs above 179
+degrees, and the generated PTO is checked to detect Hugin clamping it. Both
+apply to a fixed FOV only: under `projection_framing.auto_fov`, which the shared
+baseline enables, Hugin picks the angle and there is no request to exceed a
+limit or to clamp.
 
 Camera presets select source-image FOVs. Override either axis with
 `camera_fov.horizontal_fov` or `camera_fov.vertical_fov`. A custom camera identifier
@@ -62,9 +65,35 @@ bitmap after calibration.
 
 NONA framing supports Auto FOV/canvas/crop and a manual crop expressed as
 `[left, right, top, bottom]` fractions of the full projected canvas. A custom crop
-and Auto crop cannot be active together. OpenCV mapping is determined by the fitted rectilinear transform. Non-default
-projection framing, including a selected rink with nonzero rotation, requires
-NONA; unsupported framing is rejected before calibration.
+and Auto crop cannot be active together. OpenCV mapping is determined by the fitted rectilinear transform,
+so it applies no framing at all. Framing that asks for something specific —
+a fixed FOV (`auto_fov: false`), a fixed canvas (`auto_canvas: false`), Auto
+crop, a manual crop, or a selected rink with nonzero rotation — therefore
+requires NONA and is rejected before calibration rather than silently dropped.
+Framing that leaves every decision to the backend is accepted, whoever supplied
+it, so a stock game reaches the OpenCV backends. `horizontal_fov` is not itself
+a request while `auto_fov` holds, because no backend reads it then.
+
+`auto_fov`, `horizontal_fov`, `auto_canvas` and `auto_crop` come from the shared
+`baseline.yaml` when the game config does not name them, never from a default
+compiled into Python, so the resolved framing follows HockeyMONStream when it
+moves one. The baseline is required to name all four; dropping one, or setting
+it to `null`, is an error rather than a silent fallback.
+
+`rotation_degrees` and `crop` work the other way round: they belong to the game,
+from `stitching.rink_config` or the operator, and fall back to no rotation and
+the whole canvas. The baseline must **not** name either with a value, and doing
+so is rejected — `get_config` deep-merges `baseline.yaml` into the game config,
+so a rotation it supplied would be indistinguishable from the operator's and
+would beat the rink, while a config that never saw the baseline would still take
+the rink, leaving one game to resolve two ways. `null` is fine for both, since
+it means "inherit" on either side and cannot cause that split.
+
+Two things to watch when syncing: a framing key HockeyMON does not know is
+rejected rather than ignored, because HockeyMONStream owns this vocabulary and
+enforces the same closed set; and a baseline that someday ships non-automatic
+framing would make the OpenCV backends unavailable, which is correct — they
+cannot honor it — but is a behavior change worth noticing.
 
 `max_output_dimension` caps both canvas dimensions. `max_output_width` caps width.
 For either setting, `0` and `null` both mean no user-specified cap; canvas safety

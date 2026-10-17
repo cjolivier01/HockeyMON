@@ -85,6 +85,30 @@ def should_reject_invalid_width_instead_of_disabling_cap(matrix, value):
         capture.expand_cases(matrix)
 
 
+def should_pin_framing_neutral_and_inherit_baseline_fov(matrix):
+    """The matrix compares projections, so framing must not drift under it.
+
+    Rotation and crop stay pinned, or the source game's rink tilts every
+    capture. The baseline-owned keys must come from baseline.yaml rather than
+    literals here, which would silently disagree once HStream moves one.
+    """
+    source = {"stitching": {"rink_config": "vallco"}}
+    cases = capture.expand_cases(matrix, source)
+    framing = cases[0]["effective_config"]["stitching"]["projection_framing"]
+    assert framing["rotation_degrees"] == [0, 0, 0]
+    assert framing["crop"] == [0, 1, 0, 1]
+
+    baseline = yaml.safe_load(
+        (
+            Path(capture.__file__).resolve().parents[1] / "hmlib" / "config" / "baseline.yaml"
+        ).read_text()
+    )["stitching"]["projection_framing"]
+    resolved = json.loads(cases[0]["settings"]["calibration_settings"])["framing"]
+    assert resolved["rotation_degrees"] == [0.0, 0.0, 0.0]
+    # Unnamed by the matrix defaults, so it has to be the baseline's.
+    assert resolved["horizontal_fov"] == baseline["horizontal_fov"]
+
+
 def should_apply_camera_presets_and_variant_fov_overrides(matrix):
     matrix["defaults"]["camera_config"] = "gopro-hero-11"
     matrix["projections"][0]["variants"][1].update(
