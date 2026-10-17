@@ -10,9 +10,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pytest
+import yaml
 from stitching_fixtures import write_generation
 
 from hmlib.stitching import configure_stitching
+from hmlib.stitching import settings as settings_module
 from hmlib.stitching.projections import (
     apply_projection,
     cap_projection_canvas,
@@ -149,8 +151,13 @@ def should_validate_projection_parameters_and_dynamic_fov():
     assert maximum_projection_fov("general-panini", (0, 0, 0)) == pytest.approx(160)
     assert maximum_projection_fov("general-panini", (100, 0, 0)) > 300
     assert maximum_projection_fov("biplane", (45, 0)) == 224
+    # The limit is only checked against a fixed FOV, and the baseline ships
+    # auto_fov, so name both explicitly rather than leaning on the default.
     with pytest.raises(ValueError, match="projection limit"):
-        _nona(projection="rectilinear")
+        _nona(
+            projection="rectilinear",
+            projection_framing={"auto_fov": False, "horizontal_fov": 180},
+        )
     with pytest.raises(ValueError, match="increments"):
         projection_parameters("general-panini", [100.001, 0, 0])
     with pytest.raises(ValueError, match="exactly"):
@@ -207,8 +214,12 @@ def should_reject_changed_hugin_output_without_replacing_input(tmp_path, pto, me
     def run(command):
         Path(command[command.index("-o") + 1]).write_text(pto)
 
+    # A clamped FOV is only detectable against a fixed request, and the fixture
+    # PTO reports 180, so pin the framing to match instead of inheriting the
+    # baseline's auto_fov.
+    settings = _nona(projection_framing={"auto_fov": False, "horizontal_fov": 180})
     with pytest.raises(ValueError, match=message):
-        apply_projection(project, _nona(), run)
+        apply_projection(project, settings, run)
     assert project.read_text() == original
     assert list(tmp_path.iterdir()) == [project]
 
@@ -401,7 +412,8 @@ def should_forward_effective_config_to_calibration_worker(monkeypatch, tmp_path)
         {"projection_framing": {"rotation_degrees": [0, -20, 0]}},
         {"projection_framing": {"crop": [0.1, 0.9, 0, 1]}},
         {"projection_framing": {"auto_crop": True}},
-        {"projection_framing": {"auto_fov": True}},
+        # The baseline ships auto_fov, so turning it off is the non-default ask.
+        {"projection_framing": {"auto_fov": False}},
         {"projection_framing": {"auto_canvas": False}},
         {"projection_framing": {"horizontal_fov": 150}},
     ],
@@ -409,6 +421,45 @@ def should_forward_effective_config_to_calibration_worker(monkeypatch, tmp_path)
 def should_require_nona_for_nondefault_effective_framing(values):
     with pytest.raises(ValueError, match="requires mapping_backend=nona"):
         read_stitching_settings({"stitching": {"mapping_backend": "opencv-magsac", **values}})
+
+
+@pytest.mark.parametrize("backend", ["opencv-magsac", "opencv-affine-ransac"])
+def should_accept_baseline_framing_on_opencv_backends(backend):
+    """A stock game must reach the OpenCV backends.
+
+    `get_config` merges baseline.yaml into every real config, so the framing an
+    operator never touched still arrives populated. Resolving the default from
+    a literal rather than the baseline silently made that stock framing look
+    operator-chosen and rejected every OpenCV run.
+    """
+    baseline = yaml.safe_load(
+        (
+            Path(settings_module.__file__).resolve().parents[1] / "config" / "baseline.yaml"
+        ).read_text()
+    )
+    stitching = dict(baseline["stitching"])
+    stitching.update(
+        {"mapping_backend": backend, "projection": "rectilinear", "run_autooptimizer": False}
+    )
+    merged = read_stitching_settings({"stitching": stitching})
+    assert merged.mapping_backend == backend
+
+    # A config that never saw the baseline must resolve the same framing, or the
+    # two paths disagree on calibration provenance for one game.
+    bare = read_stitching_settings(
+        {
+            "stitching": {
+                "mapping_backend": backend,
+                "projection": "rectilinear",
+                "run_autooptimizer": False,
+            }
+        }
+    )
+    assert bare.framing == merged.framing
+    assert (merged.framing.auto_fov, merged.framing.horizontal_fov) == (
+        baseline["stitching"]["projection_framing"]["auto_fov"],
+        baseline["stitching"]["projection_framing"]["horizontal_fov"],
+    )
 
 
 def should_allow_explicit_zero_rotation_to_disable_native_rink_default():

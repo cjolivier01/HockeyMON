@@ -198,12 +198,75 @@ def maximum_projection_fov(projection: str, parameters: tuple[float, ...]) -> fl
 
 @dataclass(frozen=True)
 class ProjectionFraming:
-    auto_fov: bool = False
-    horizontal_fov: float = 180.0
-    auto_canvas: bool = True
-    auto_crop: bool = False
-    rotation_degrees: tuple[float, ...] = (0.0, 0.0, 0.0)
-    crop: tuple[float, ...] = (0.0, 1.0, 0.0, 1.0)
+    auto_fov: bool
+    horizontal_fov: float
+    auto_canvas: bool
+    auto_crop: bool
+    rotation_degrees: tuple[float, ...]
+    crop: tuple[float, ...]
+
+
+# Framing that asks for nothing: no rotation and the whole canvas. This is only
+# ever the fallback for a key the bundled baseline itself omits, which today is
+# rotation_degrees and crop; the FOV pair here is inert because the baseline
+# always names both. These literals are not "the default framing" and must not
+# be compared against as if they were — read_stitching_settings derives that
+# from baseline.yaml, so it keeps following HStream when a default moves.
+_UNFRAMED = ProjectionFraming(
+    auto_fov=False,
+    horizontal_fov=180.0,
+    auto_canvas=True,
+    auto_crop=False,
+    rotation_degrees=(0.0, 0.0, 0.0),
+    crop=(0.0, 1.0, 0.0, 1.0),
+)
+
+
+def _read_framing(
+    framing_config: Mapping[str, Any],
+    defaults: ProjectionFraming,
+    rotation: tuple[float, ...],
+) -> ProjectionFraming:
+    """Resolve one projection_framing layer over ``defaults``.
+
+    ``rotation`` is the rink profile's rotation, which stands in for the
+    fallback's own when the layer does not name one.
+    """
+    crop = _array(_defaulted(framing_config, "crop", defaults.crop), 4, "projection_framing.crop")
+    if not (0 <= crop[0] < crop[1] <= 1 and 0 <= crop[2] < crop[3] <= 1):
+        raise ValueError("projection_framing.crop must be normalized left,right,top,bottom bounds")
+    resolved = _array(
+        _defaulted(framing_config, "rotation_degrees", rotation),
+        3,
+        "projection_framing.rotation_degrees",
+    )
+    if any(abs(angle) > 180 for angle in resolved):
+        raise ValueError("projection_framing.rotation_degrees must be between -180 and 180")
+    framing = ProjectionFraming(
+        auto_fov=_boolean(
+            _defaulted(framing_config, "auto_fov", defaults.auto_fov),
+            "projection_framing.auto_fov",
+        ),
+        horizontal_fov=_number(
+            _defaulted(framing_config, "horizontal_fov", defaults.horizontal_fov),
+            "projection_framing.horizontal_fov",
+        ),
+        auto_canvas=_boolean(
+            _defaulted(framing_config, "auto_canvas", defaults.auto_canvas),
+            "projection_framing.auto_canvas",
+        ),
+        auto_crop=_boolean(
+            _defaulted(framing_config, "auto_crop", defaults.auto_crop),
+            "projection_framing.auto_crop",
+        ),
+        rotation_degrees=resolved,
+        crop=crop,
+    )
+    if framing.auto_crop and crop != (0, 1, 0, 1):
+        raise ValueError("projection_framing.crop and auto_crop are mutually exclusive")
+    if not 0 < framing.horizontal_fov <= 360:
+        raise ValueError("projection_framing.horizontal_fov must be between 0 and 360")
+    return framing
 
 
 @dataclass(frozen=True)
@@ -305,36 +368,16 @@ def read_stitching_settings(
         rotation = _array(
             profile.get("rotation_degrees"), 3, f"rink_configs.{rink}.rotation_degrees"
         )
-    rotation = _array(
-        _defaulted(framing_config, "rotation_degrees", rotation),
-        3,
-        "projection_framing.rotation_degrees",
+    # Resolve the baseline's framing first so a config that omits a key lands on
+    # the same value whether or not it was merged with baseline.yaml, and so the
+    # OpenCV check below compares against the shipped default rather than a
+    # literal that has to be edited every time HStream moves one.
+    defaults = _read_framing(
+        _mapping(baseline.get("projection_framing"), "stitching.projection_framing"),
+        _UNFRAMED,
+        _UNFRAMED.rotation_degrees,
     )
-    if any(abs(angle) > 180 for angle in rotation):
-        raise ValueError("projection_framing.rotation_degrees must be between -180 and 180")
-    crop = _array(_defaulted(framing_config, "crop", (0, 1, 0, 1)), 4, "projection_framing.crop")
-    if not (0 <= crop[0] < crop[1] <= 1 and 0 <= crop[2] < crop[3] <= 1):
-        raise ValueError("projection_framing.crop must be normalized left,right,top,bottom bounds")
-    framing = ProjectionFraming(
-        auto_fov=_boolean(
-            _defaulted(framing_config, "auto_fov", False), "projection_framing.auto_fov"
-        ),
-        horizontal_fov=_number(
-            _defaulted(framing_config, "horizontal_fov", 180), "projection_framing.horizontal_fov"
-        ),
-        auto_canvas=_boolean(
-            _defaulted(framing_config, "auto_canvas", True), "projection_framing.auto_canvas"
-        ),
-        auto_crop=_boolean(
-            _defaulted(framing_config, "auto_crop", False), "projection_framing.auto_crop"
-        ),
-        rotation_degrees=rotation,
-        crop=crop,
-    )
-    if framing.auto_crop and crop != (0, 1, 0, 1):
-        raise ValueError("projection_framing.crop and auto_crop are mutually exclusive")
-    if not 0 < framing.horizontal_fov <= 360:
-        raise ValueError("projection_framing.horizontal_fov must be between 0 and 360")
+    framing = _read_framing(framing_config, defaults, rotation)
     if (
         backend == "nona"
         and not framing.auto_fov
@@ -343,7 +386,9 @@ def read_stitching_settings(
         raise ValueError(
             f"{projection} horizontal FOV exceeds projection limit {maximum_projection_fov(projection, parameters):.6g}"
         )
-    if backend != "nona" and framing != ProjectionFraming():
+    # A selected rink's rotation reaches `framing` through `rotation`, so it is
+    # non-default here and rejected, which is what the OpenCV path requires.
+    if backend != "nona" and framing != defaults:
         raise ValueError(
             "Non-default projection framing (including rink rotation and crop) requires "
             "mapping_backend=nona and run_autooptimizer=true"

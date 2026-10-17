@@ -64,7 +64,10 @@ NONA framing supports Auto FOV/canvas/crop and a manual crop expressed as
 `[left, right, top, bottom]` fractions of the full projected canvas. A custom crop
 and Auto crop cannot be active together. OpenCV mapping is determined by the fitted rectilinear transform. Non-default
 projection framing, including a selected rink with nonzero rotation, requires
-NONA; unsupported framing is rejected before calibration.
+NONA; unsupported framing is rejected before calibration. "Default" here means
+the value in the shared `baseline.yaml`, not a value compiled into HockeyMON, so
+a stock game still reaches the OpenCV backends after HockeyMONStream moves a
+framing default.
 
 `max_output_dimension` caps both canvas dimensions. `max_output_width` caps width.
 For either setting, `0` and `null` both mean no user-specified cap; canvas safety
