@@ -301,7 +301,12 @@ def _read_framing(
         crop=crop,
     )
     if framing.auto_crop and crop != _FRAMING_FALLBACK.crop:
-        raise ValueError(f"{source}.crop and auto_crop are mutually exclusive")
+        # Either side may be inherited rather than named in this layer, so say
+        # which values collided instead of blaming whoever wrote the crop.
+        raise ValueError(
+            f"{source} resolves to crop {list(crop)} with auto_crop enabled; "
+            "they are mutually exclusive"
+        )
     if not 0 < framing.horizontal_fov <= 360:
         raise ValueError(f"{source}.horizontal_fov must be between 0 and 360")
     return framing
