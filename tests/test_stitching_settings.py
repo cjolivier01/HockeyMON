@@ -501,8 +501,25 @@ def should_reject_a_baseline_that_claims_rotation_or_crop(tmp_path, monkeypatch,
         read_stitching_settings({"stitching": {"mapping_backend": "nona"}})
 
 
-def should_take_the_rink_rotation_over_the_unframed_default(tmp_path, monkeypatch):
-    """The rink profile still supplies the rotation when the game selects one."""
+@pytest.mark.parametrize("key", ["rotation_degrees", "crop"])
+def should_allow_a_baseline_to_spell_rotation_or_crop_null(tmp_path, monkeypatch, key):
+    """`null` is how both repositories spell "inherit", so it is not a claim.
+
+    HStream's own parser reads a null framing entry as inherited, and
+    `baseline.yaml` uses `null` for "unset" throughout. It cannot split the two
+    config paths the way a real value would, because `_defaulted` passes it
+    through to the same fallback either way -- so refusing it would brick every
+    entry point over a legal upstream spelling.
+    """
+    _bundle_baseline(tmp_path, monkeypatch, **{key: None})
+    game = {"mapping_backend": "nona", "rink_config": "vallco"}
+    bare = read_stitching_settings({"stitching": dict(game)})
+    assert bare.framing.rotation_degrees == (0.0, -23.8, 4.3)
+    assert bare.framing.crop == (0.0, 1.0, 0.0, 1.0)
+
+
+def should_take_the_rink_rotation_when_the_game_selects_one():
+    """The rink profile supplies the rotation the baseline is forbidden to."""
     settings = read_stitching_settings(
         {"stitching": {"mapping_backend": "nona", "rink_config": "vallco"}}
     )
@@ -518,6 +535,19 @@ def should_take_the_rink_rotation_over_the_unframed_default(tmp_path, monkeypatc
         }
     )
     assert cancelled.framing.rotation_degrees == (0.0, 0.0, 0.0)
+
+
+def should_blame_the_baseline_for_its_own_unknown_framing_key(tmp_path, monkeypatch):
+    """A key HStream adds must be reported against the baseline, on both paths.
+
+    `get_config` deep-merges the baseline, so the new key is also in the game
+    config. Checking the game layer first would report a sync error as an
+    operator typo, on the path the application actually runs.
+    """
+    _bundle_baseline(tmp_path, monkeypatch, auto_rotate=True)
+    merged = {"projection_framing": {"auto_rotate": True, "auto_fov": True}}
+    with pytest.raises(ValueError, match=r"baseline\.yaml.*unsupported key: auto_rotate"):
+        read_stitching_settings({"stitching": merged})
 
 
 def should_reject_a_baseline_framing_key_it_does_not_understand(tmp_path, monkeypatch):

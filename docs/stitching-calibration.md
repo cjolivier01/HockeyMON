@@ -74,13 +74,26 @@ Framing that leaves every decision to the backend is accepted, whoever supplied
 it, so a stock game reaches the OpenCV backends. `horizontal_fov` is not itself
 a request while `auto_fov` holds, because no backend reads it then.
 
-Values HockeyMON does not find in the game config come from the shared
-`baseline.yaml`, never from a default compiled into Python, so the resolved
-framing follows HockeyMONStream when it moves one. A baseline that stops naming
-`auto_fov`, `horizontal_fov`, `auto_canvas` or `auto_crop` is an error rather
-than a silent fallback. Note that a baseline which someday ships non-automatic
+`auto_fov`, `horizontal_fov`, `auto_canvas` and `auto_crop` come from the shared
+`baseline.yaml` when the game config does not name them, never from a default
+compiled into Python, so the resolved framing follows HockeyMONStream when it
+moves one. The baseline is required to name all four; dropping one, or setting
+it to `null`, is an error rather than a silent fallback.
+
+`rotation_degrees` and `crop` work the other way round: they belong to the game,
+from `stitching.rink_config` or the operator, and fall back to no rotation and
+the whole canvas. The baseline must **not** name either with a value, and doing
+so is rejected — `get_config` deep-merges `baseline.yaml` into the game config,
+so a rotation it supplied would be indistinguishable from the operator's and
+would beat the rink, while a config that never saw the baseline would still take
+the rink, leaving one game to resolve two ways. `null` is fine for both, since
+it means "inherit" on either side and cannot cause that split.
+
+Two things to watch when syncing: a framing key HockeyMON does not know is
+rejected rather than ignored, because HockeyMONStream owns this vocabulary and
+enforces the same closed set; and a baseline that someday ships non-automatic
 framing would make the OpenCV backends unavailable, which is correct — they
-cannot honor it — but is a behavior change to watch for when syncing.
+cannot honor it — but is a behavior change worth noticing.
 
 `max_output_dimension` caps both canvas dimensions. `max_output_width` caps width.
 For either setting, `0` and `null` both mean no user-specified cap; canvas safety
