@@ -796,8 +796,13 @@ sh_test(
     srcs=["runtime_pytest.sh"],
     args=[
         "tests/test_aspen_graph_baseline_params.py",
-        # The graph YAMLs are read as data; importing the plugin for its
-        # constructor signature is what pulls in torch and the rest.
+        # Importing the plugin for its constructor signature pulls in the whole
+        # detector stack, so probe the heavy modules too: this list is what
+        # rejects an interpreter that cannot satisfy them, and a short one lets
+        # resolve_repo_python pick a lean interpreter that then fails at import.
+        "cv2",
+        "mmengine",
+        "networkx",
         "numpy",
         "pytest",
         "torch",

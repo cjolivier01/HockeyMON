@@ -53,6 +53,11 @@ def _graph_files():
     return sorted(_GRAPHS.rglob("*.yaml"))
 
 
+def _rel(path):
+    """Graph identity. Basenames collide once the sweep recurses."""
+    return path.relative_to(_GRAPHS).as_posix()
+
+
 def _declarations():
     """Every (file, trunk, spec) declaring a plugin with baseline-backed params."""
     found = []
@@ -73,7 +78,10 @@ def should_find_declarations_to_check():
     """
     found = _declarations()
     assert found, "no graph declares a baseline-backed plugin; the sweep is broken"
-    names = {path.name for path, _, _ in found}
+    # Keyed by path, not basename: the recursive sweep can see two files with
+    # one name, and an examples/tracking.yaml would otherwise stand in for a
+    # real tracking.yaml that stopped declaring the plugin.
+    names = {_rel(path) for path, _, _ in found}
     # A superset, so adding a graph is not a failure: the point is that these
     # three are still being reached, not that no fourth may exist.
     known = {"tracking.yaml", "tracking_pose.yaml", "tracking_pose_jersey.yaml"}
@@ -86,13 +94,13 @@ def should_find_declarations_to_check():
 @pytest.mark.parametrize(
     "path, name, spec",
     _declarations(),
-    ids=[f"{path.name}:{name}" for path, name, _ in _declarations()],
+    ids=[f"{_rel(path)}:{name}" for path, name, _ in _declarations()],
 )
 def should_reference_the_baseline_for_backed_plugin_params(path, name, spec):
     params = spec.get("params") or {}
     for param, reference in _BASELINE_BACKED[spec["class"]].items():
         assert params.get(param) == reference, (
-            f"{path.name}: trunk {name!r} must pass {param}: {reference}; "
+            f"{_rel(path)}: trunk {name!r} must pass {param}: {reference}; "
             "omitting it silently applies the constructor default instead of "
             "the baseline value"
         )
