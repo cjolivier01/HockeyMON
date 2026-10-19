@@ -15,7 +15,7 @@
 - Run a Bazel target: `./run.sh //path:target --args`.
 - Package wheel: `./run.sh //hmlib:bdist_wheel`.
 - Run tracker locally (example): `EXP_NAME=dev VIDEO=video.mp4 ./hm_run.sh`.
- - Exclude wheels: `bazelisk build --config=no-python-wheels //...` (or `./bld --no-python-wheels`).
+ - Plain `bazelisk` defaults to `--config=rocm` (`.bazelrc`); on a CUDA machine pass `--config=cuda` or use `./bazel/bazel.sh`, which appends the detected backend.
 
 ### Handy local debugging command
 
@@ -69,10 +69,12 @@
 - Secrets: never commit credentials; prefer environment variables.
 - Large files: keep outside the repo (symlinks `datasets/`, `pretrained/`).
 - Reproducibility: run via Bazel for consistent tooling; avoid ad‑hoc local installs unless developing isolated modules.
+- Two config loaders exist and they are not interchangeable. `get_config` seeds from `baseline_config` and merges rink/camera/game/private; `get_game_config` merges only the public and private game YAML and never sees the baseline. `hmlib/cli/create_control_points.py` uses the latter, so that CLI's `stitching` section arrives without baseline defaults — 25 keys and 12 whole top-level sections differ from what `hmtrack`/`hmstitch` see for the same game. Resolved `StitchingSettings` happen to agree today, because `read_stitching_settings` baselines the keys it owns internally, but anything reading `game_config` directly does not get that protection. Prefer `get_config` for new callers, and do not assume a config reaching `read_stitching_settings` was baseline-merged.
 - Versioned recordings/publications start at `-1`; video and telemetry companions share one positive version. Telemetry uses `<game-id>_telemetry-N.db`, with legacy unnumbered names retained for reading. `hmlib/utils/output_publication.py` owns publication and `hmlib/telemetry/recorder.py` owns working database allocation. See `docs/output-publication.md` and `docs/telemetry-databases.md`.
 
 ## AspenNet Architecture
-- Graph runner built from YAML `aspen.trunks` mapping (`class`, `depends`, `params`, optional `enabled`); missing deps or cycles raise; disabled trunks become no-op stubs to preserve graph shape; graph is exported to `aspennet.dot` on init.
+- Graph runner built from the YAML `aspen.plugins` mapping (`class`, `depends`, `params`, optional `enabled`); `AspenNet.__init__` raises without it, so a config spelling the node mapping `aspen.trunks` cannot run. "Trunk" remains the name for a node throughout the code and this document. Missing deps or cycles raise; disabled trunks become no-op stubs to preserve graph shape; graph is exported to `aspennet.dot` on init.
+- `AspenNet._instantiate` calls `cls(**params)`, so a parameter a graph omits takes the plugin constructor's own literal, silently. When that literal disagrees with `baseline.yaml` the graph runs something other than the shipped default: reference the baseline with `GLOBAL.<path>` in every graph declaring the plugin rather than relying on the constructor. `tests/test_aspen_graph_baseline_params.py` guards the parameters listed in its `_BASELINE_BACKED` table; add an entry when a parameter starts taking its shipped value from the baseline.
 - Execution modes set under `aspen.pipeline`/`threaded_trunks`: sequential topological order by default, or threaded pipeline with one worker per trunk connected by bounded `Queue(queue_size)`; optional per-trunk CUDA streams (`cuda_streams`) wrap each trunk and synchronize before handoff; grad/no-grad follows the `training` flag.
 - Context flow: `forward` threads a shared mutable `context` (injects `shared` and `trunks` namespaces); trunks can declare `input_keys`/`output_keys` and, when `minimal_context` is true, only requested keys plus `shared` are passed; outputs update context, `DeleteKey` removes entries, and each trunk's outputs are stored under `context["trunks"][name]`.
 - Device selection for stream usage is inferred from `context`/`shared` (`device`, `cuda_stream`, tensor devices) with CUDA current-device fallback; profiling is plumbed through `shared["profiler"]` using trunk `profile_scope`.
