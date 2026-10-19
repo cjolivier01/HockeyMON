@@ -132,12 +132,15 @@ def should_route_the_no_wide_start_flag_into_the_config():
     Without a mapping entry the flag parses and is then read by nobody, so an
     operator who sets it gets silence.
 
-    Membership also nulls the argparse default, and that nulling is what keeps
-    an unset store_true out of the config: `_iter_arg_config_updates` drops a
-    None before it consults `_is_cli_arg_selected`, so the argv scan is a
-    second gate that only matters for a value that is present but equal to its
-    default. Un-null the default and an unset flag overwrites a baseline
-    `true` with False.
+    Membership also nulls the argparse default, and `_iter_arg_config_updates`
+    drops a None at `hm_opts.py:251` before it consults `_is_cli_arg_selected`,
+    so for an unset store_true that drop is the gate that fires, in every call
+    shape. It is not the only one, and not strictly necessary: every production
+    caller also passes `explicit_arg_names`, and `_is_cli_arg_selected` then
+    admits only names found on argv -- independently of whether the value
+    equals its default. Its other branch, taken when a parser is given but no
+    explicit names, is the one with default-equality semantics. The cases below
+    pin all three.
     """
     assert hm_opts.ALL_YAML_ARG_TO_CONFIG_MAP["no_wide_start"] == "play_tracker.no_wide_start"
     assert hm_opts._config_value_for_arg({"play_tracker": {"no_wide_start": True}}, "no_wide_start")
@@ -153,15 +156,28 @@ def should_route_the_no_wide_start_flag_into_the_config():
     assert parser.parse_known_args([])[0].no_wide_start is None
     assert parser.parse_known_args(["--no-wide-start"])[0].no_wide_start is True
 
-    # And that the nulling is the gate, not merely cosmetic: the same override
-    # pass preserves a baseline `true` for None and clobbers it for False.
+    # Each gate, against a baseline `true`. `shape` names what the caller
+    # supplies; production supplies both, so the argv branch is the live one.
     paths = {"no_wide_start": "play_tracker.no_wide_start"}
-    for value, expected in ((None, True), (False, False), (True, True)):
+
+    def override(value, **kw):
         config = {"play_tracker": {"no_wide_start": True}}
         hm_opts.apply_arg_config_overrides(
-            config, argparse.Namespace(no_wide_start=value), arg_to_config=paths
+            config, argparse.Namespace(no_wide_start=value), arg_to_config=paths, **kw
         )
-        assert config["play_tracker"]["no_wide_start"] is expected, value
+        return config["play_tracker"]["no_wide_start"]
+
+    # The None drop, which needs no parser and no explicit names.
+    assert override(None) is True
+    assert override(False) is False
+    assert override(True) is True
+    # The argv branch drops a present value absent from argv even though False
+    # differs from the nulled default -- so it is not default-equality.
+    assert override(False, parser=parser, explicit_arg_names=set()) is True
+    assert override(True, parser=parser, explicit_arg_names={"no_wide_start"}) is True
+    # The parser branch, reached only without explicit names, is the one that
+    # compares against the default.
+    assert override(False, parser=parser) is False
     assert parser.parse_known_args(["--no-wide-start"])[0].no_wide_start is True
 
 
