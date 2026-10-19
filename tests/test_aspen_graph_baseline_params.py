@@ -9,6 +9,10 @@ in the baseline, honored by two graphs, and `False` in the third.
 `baseline.yaml` is byte-identical to HockeyMONStream's `configs/baseline.yaml`,
 and HStream honors this key natively, so a graph that drops it also puts the
 two applications out of step.
+
+`_BASELINE_BACKED` is maintained by hand, so this guards the parameters listed
+there rather than the whole class. Add an entry when a plugin parameter starts
+taking its shipped value from the baseline.
 """
 
 from __future__ import annotations
@@ -29,7 +33,7 @@ _BASELINE = Path(__file__).resolve().parents[1] / "hmlib" / "config" / "baseline
 _BASELINE_BACKED = {
     "hmlib.aspen.plugins.play_tracker_plugin.PlayTrackerPlugin": {
         "no_wide_start": "GLOBAL.play_tracker.no_wide_start",
-    }
+    },
 }
 
 
@@ -45,7 +49,8 @@ def _trunks(document):
 
 
 def _graph_files():
-    return sorted(_GRAPHS.glob("*.yaml"))
+    # Recursive, so a graph under examples/ is swept rather than exempt.
+    return sorted(_GRAPHS.rglob("*.yaml"))
 
 
 def _declarations():
@@ -69,7 +74,13 @@ def should_find_declarations_to_check():
     found = _declarations()
     assert found, "no graph declares a baseline-backed plugin; the sweep is broken"
     names = {path.name for path, _, _ in found}
-    assert names == {"tracking.yaml", "tracking_pose.yaml", "tracking_pose_jersey.yaml"}, names
+    # A superset, so adding a graph is not a failure: the point is that these
+    # three are still being reached, not that no fourth may exist.
+    known = {"tracking.yaml", "tracking_pose.yaml", "tracking_pose_jersey.yaml"}
+    assert names >= known, (
+        f"the sweep stopped reaching {sorted(known - names)}; the glob, the "
+        "`aspen.plugins` key or the plugin class path has moved"
+    )
 
 
 @pytest.mark.parametrize(
@@ -91,9 +102,10 @@ def should_route_the_no_wide_start_flag_into_the_config():
     """`--no-wide-start` has to reach the key it names.
 
     Without a mapping entry the flag parses and is then read by nobody, so an
-    operator who sets it gets silence. Being in the map also nulls its argparse
-    default, which is what stops an unset store_true from overwriting the
-    baseline with False.
+    operator who sets it gets silence. Membership also nulls the argparse
+    default, so the namespace carries None rather than a False that could be
+    mistaken for a choice; what actually keeps an unset flag out of the config
+    is `collect_explicit_arg_names` scanning argv.
     """
     assert hm_opts.ALL_YAML_ARG_TO_CONFIG_MAP["no_wide_start"] == "play_tracker.no_wide_start"
     assert hm_opts._config_value_for_arg({"play_tracker": {"no_wide_start": True}}, "no_wide_start")
@@ -101,6 +113,13 @@ def should_route_the_no_wide_start_flag_into_the_config():
         hm_opts._config_value_for_arg({"play_tracker": {"no_wide_start": False}}, "no_wide_start")
         is False
     )
+    # The nulled default, asserted rather than described. The flag is declared
+    # by hmtrack's parser, and finalize_parser is what nulls it.
+    from hmlib.cli.hmtrack import make_parser
+
+    parser = make_parser()
+    assert parser.parse_known_args([])[0].no_wide_start is None
+    assert parser.parse_known_args(["--no-wide-start"])[0].no_wide_start is True
 
 
 def should_disagree_between_the_plugin_default_and_the_baseline():
