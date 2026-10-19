@@ -17,7 +17,9 @@ taking its shipped value from the baseline.
 
 from __future__ import annotations
 
+import argparse
 import inspect
+import os
 from pathlib import Path
 
 import pytest
@@ -26,8 +28,23 @@ import yaml
 from hmlib.aspen.plugins.play_tracker_plugin import PlayTrackerPlugin
 from hmlib.hm_opts import hm_opts
 
-_GRAPHS = Path(__file__).resolve().parents[1] / "hmlib" / "config" / "aspen"
-_BASELINE = Path(__file__).resolve().parents[1] / "hmlib" / "config" / "baseline.yaml"
+
+def _repo_root() -> Path:
+    """Read the staged copies under Bazel, the checkout under bare pytest.
+
+    Runfiles are a symlink tree, so `Path(__file__).resolve()` escapes back
+    into the source checkout and the target's `data` list stops being
+    load-bearing: it would keep passing with every staged YAML broken, while
+    Bazel quietly stopped re-running it on a real change.
+    """
+    srcdir, workspace = os.environ.get("TEST_SRCDIR"), os.environ.get("TEST_WORKSPACE")
+    if srcdir and workspace:
+        return Path(srcdir) / workspace
+    return Path(__file__).resolve().parents[1]
+
+
+_GRAPHS = _repo_root() / "hmlib" / "config" / "aspen"
+_BASELINE = _repo_root() / "hmlib" / "config" / "baseline.yaml"
 # Parameters whose shipped value lives in baseline.yaml. Every graph declaring
 # the plugin has to reference it rather than inherit the constructor literal.
 _BASELINE_BACKED = {
@@ -38,13 +55,16 @@ _BASELINE_BACKED = {
 
 
 def _trunks(document):
-    """Graph nodes, which these configs spell `aspen.plugins`."""
+    """Graph nodes.
+
+    `aspen.plugins` only: `AspenNet.__init__` raises without it, so a file
+    spelling `aspen.trunks` could never run and must not be treated as a graph
+    this guard covers.
+    """
     aspen = document.get("aspen") if isinstance(document, dict) else None
     if not isinstance(aspen, dict):
         return {}
     nodes = aspen.get("plugins")
-    if not isinstance(nodes, dict):
-        nodes = aspen.get("trunks")
     return nodes if isinstance(nodes, dict) else {}
 
 
@@ -110,10 +130,14 @@ def should_route_the_no_wide_start_flag_into_the_config():
     """`--no-wide-start` has to reach the key it names.
 
     Without a mapping entry the flag parses and is then read by nobody, so an
-    operator who sets it gets silence. Membership also nulls the argparse
-    default, so the namespace carries None rather than a False that could be
-    mistaken for a choice; what actually keeps an unset flag out of the config
-    is `collect_explicit_arg_names` scanning argv.
+    operator who sets it gets silence.
+
+    Membership also nulls the argparse default, and that nulling is what keeps
+    an unset store_true out of the config: `_iter_arg_config_updates` drops a
+    None before it consults `_is_cli_arg_selected`, so the argv scan is a
+    second gate that only matters for a value that is present but equal to its
+    default. Un-null the default and an unset flag overwrites a baseline
+    `true` with False.
     """
     assert hm_opts.ALL_YAML_ARG_TO_CONFIG_MAP["no_wide_start"] == "play_tracker.no_wide_start"
     assert hm_opts._config_value_for_arg({"play_tracker": {"no_wide_start": True}}, "no_wide_start")
@@ -127,6 +151,17 @@ def should_route_the_no_wide_start_flag_into_the_config():
 
     parser = make_parser()
     assert parser.parse_known_args([])[0].no_wide_start is None
+    assert parser.parse_known_args(["--no-wide-start"])[0].no_wide_start is True
+
+    # And that the nulling is the gate, not merely cosmetic: the same override
+    # pass preserves a baseline `true` for None and clobbers it for False.
+    paths = {"no_wide_start": "play_tracker.no_wide_start"}
+    for value, expected in ((None, True), (False, False), (True, True)):
+        config = {"play_tracker": {"no_wide_start": True}}
+        hm_opts.apply_arg_config_overrides(
+            config, argparse.Namespace(no_wide_start=value), arg_to_config=paths
+        )
+        assert config["play_tracker"]["no_wide_start"] is expected, value
     assert parser.parse_known_args(["--no-wide-start"])[0].no_wide_start is True
 
 
