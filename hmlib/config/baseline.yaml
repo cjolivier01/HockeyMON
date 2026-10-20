@@ -37,9 +37,11 @@ plot:
   # Home/away (or dark/light) labels under each tracked player. Drawn from the
   # team feature's output in both applications; see the `team` block below.
   plot_teams: false
-  # Badge match officials in the tracking overlay. Only has an effect with a
-  # detector whose head distinguishes them (--detector-model hockeyref); on a
-  # single-class person detector there is no referee index and this is inert.
+  # Badge match officials in the tracking overlay. Two preconditions, and it
+  # is inert without either: a detector whose head distinguishes them
+  # (--detector-model hockeyref), because a single-class head has no referee
+  # index; and plot_individual_player_tracking, because the badges are drawn
+  # alongside the per-player boxes.
   plot_referees: true
   plot_actions: false
   plot_pose: false

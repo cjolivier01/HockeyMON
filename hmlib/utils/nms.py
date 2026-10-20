@@ -79,6 +79,10 @@ class TrtNmsConfig:
     max_per_img: int
     share_location: bool = True
     background_label_id: int = -1
+    # Suppress across classes rather than within each. Only a multi-class head
+    # needs it -- two anchors claiming one skater under different labels --
+    # and it stays off by default so single-class profiles are unchanged.
+    class_agnostic: bool = False
     is_normalized: bool = False
     clip_boxes: bool = False
     score_bits: int = 16
@@ -149,6 +153,7 @@ class TrtBatchedNMS:
 
         score_thr = 0.0
         iou_thr = 0.5
+        class_agnostic = False
         nms_pre = max_num_boxes
 
         try:
@@ -161,6 +166,7 @@ class TrtBatchedNMS:
                     iou_thr = float(nms_cfg["iou_threshold"])
                 elif "iou_thr" in nms_cfg:
                     iou_thr = float(nms_cfg["iou_thr"])
+                class_agnostic = bool(nms_cfg.get("class_agnostic", class_agnostic))
                 nms_pre = int(test_cfg.get("nms_pre", nms_pre))
         except Exception:
             pass
@@ -196,6 +202,7 @@ class TrtBatchedNMS:
             iou_threshold=float(iou_thr),
             max_per_img=int(max_per_img),
             plugin=str(plugin or "batched").lower(),
+            class_agnostic=bool(class_agnostic),
         )
         return TrtBatchedNMS(cfg, stream=stream)
 
@@ -301,7 +308,9 @@ class TrtBatchedNMS:
             # 0 = no activation (scores already in [0,1]), 1 = sigmoid
             add_field("score_activation", 0, trt.PluginFieldType.INT32)
             # 0 = per-class NMS, 1 = class-agnostic
-            add_field("class_agnostic", 0, trt.PluginFieldType.INT32)
+            add_field(
+                "class_agnostic", int(bool(self.cfg.class_agnostic)), trt.PluginFieldType.INT32
+            )
             # 0 = boxes in [x1, y1, x2, y2], 1 = [x, y, w, h]
             add_field("box_coding", 0, trt.PluginFieldType.INT32)
 

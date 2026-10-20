@@ -193,3 +193,32 @@ def should_draw_nothing_for_unknown_labels():
     rendered = out["img"]
     rendered = rendered.wait() if hasattr(rendered, "wait") else rendered
     assert int((rendered != background).sum()) == 0
+
+
+def should_keep_officials_out_of_the_clustering():
+    """Officials are on neither side and would skew the two-way split.
+
+    With a referee-aware head they are 2-4 of roughly fourteen detections --
+    a fifth of the clusterer's window, which is the lopsided split that makes
+    it refuse to name the sides at all. They stay tracked and drawn; they just
+    do not contribute crops or receive a side.
+    """
+    import torch
+    from mmengine.structures import InstanceData
+
+    from hmlib.aspen.plugins.team_plugin import TeamAffiliationPlugin
+
+    plugin = TeamAffiliationPlugin(enabled=True, referee_label=1)
+    tracks = InstanceData()
+    tracks.bboxes = torch.tensor([[0, 0, 10, 20], [20, 0, 30, 20], [40, 0, 50, 20]]).float()
+    tracks.instances_id = torch.tensor([7, 8, 9])
+    tracks.labels = torch.tensor([0, 1, 0])  # the middle track is an official
+
+    boxes, ids = plugin._drop_officials(tracks, tracks.bboxes, tracks.instances_id, None)
+    assert ids.tolist() == [7, 9]
+    assert boxes.shape[0] == 2
+
+    # A single-class head cannot name them, so nothing is dropped.
+    plain = TeamAffiliationPlugin(enabled=True, referee_label=None)
+    boxes, ids = plain._drop_officials(tracks, tracks.bboxes, tracks.instances_id, None)
+    assert ids.tolist() == [7, 8, 9]

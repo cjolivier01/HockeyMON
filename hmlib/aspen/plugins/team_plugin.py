@@ -91,6 +91,7 @@ class TeamAffiliationPlugin(Plugin):
         min_margin: float = 0.12,
         min_lightness_gap: float = 6.0,
         min_cluster_share: float = 0.25,
+        referee_label: int | None = None,
         frame_stride: int = 1,
         min_track_height: int = 60,
         home_is_dark: bool | None = None,
@@ -102,6 +103,10 @@ class TeamAffiliationPlugin(Plugin):
         self._backend_name = str(backend)
         self._frame_stride = max(1, int(frame_stride))
         self._min_track_height = int(min_track_height)
+        # Written by hmlib/models/detector_selection.py from the chosen
+        # profile; None on every single-class head, where officials are
+        # indistinguishable from skaters and cannot be excluded.
+        self._referee_label = None if referee_label is None else int(referee_label)
         self._prtreid_kwargs = {
             "prtreid_weights": prtreid_weights,
             "prtreid_backbone_weights": prtreid_backbone_weights,
@@ -180,6 +185,27 @@ class TeamAffiliationPlugin(Plugin):
             rois.append(roi)
         return rois
 
+    def _drop_officials(self, pred_tracks: Any, boxes: torch.Tensor, ids: torch.Tensor, base_mask):
+        """Remove match officials from the crops this frame contributes."""
+        if self._referee_label is None:
+            return boxes, ids
+        labels = getattr(pred_tracks, "labels", None)
+        if labels is None:
+            return boxes, ids
+        if isinstance(labels, StreamTensorBase):
+            labels = labels.wait()
+        if not torch.is_tensor(labels):
+            return boxes, ids
+        if isinstance(base_mask, torch.Tensor):
+            labels = labels[base_mask.to(device=labels.device)]
+        if labels.shape[0] != boxes.shape[0]:
+            raise ValueError(
+                f"track labels have {labels.shape[0]} rows against {boxes.shape[0]} boxes; "
+                "the tracker emitted misaligned per-track fields"
+            )
+        keep = labels.to(device=boxes.device) != self._referee_label
+        return boxes[keep], ids[keep.to(device=ids.device)]
+
     @staticmethod
     def _cut_crops(
         frame: torch.Tensor,
@@ -247,7 +273,9 @@ class TeamAffiliationPlugin(Plugin):
         img_h = int(image_height(original_images))
 
         pose_results: list[Any] | None = context.get("pose_results")
-        frame_id0 = int(context.get("frame_id", 0))
+        # -1 where every sibling trunk uses it, so a missing frame_id is
+        # distinguishable from frame zero rather than silently becoming it.
+        frame_id0 = int(context.get("frame_id", -1))
         backend = self._ensure_backend()
 
         all_results: list[list[TrackTeamInfo]] = []
@@ -267,6 +295,13 @@ class TeamAffiliationPlugin(Plugin):
             if isinstance(base_mask, torch.Tensor):
                 boxes = boxes[base_mask.to(device=boxes.device)]
                 ids = ids[base_mask.to(device=ids.device)]
+            # Officials are not on either team, and with a referee-aware head
+            # they are 2-4 of ~14 detections -- a fifth of the window, which
+            # is the lopsided split `min_cluster_share` exists to refuse. Keep
+            # them out of the fit entirely where the head can name them. This
+            # does not touch `track_mask`: they stay tracked and drawn, they
+            # just do not get a side.
+            boxes, ids = self._drop_officials(pred_tracks, boxes, ids, base_mask)
             if boxes.numel() == 0:
                 all_results.append([])
                 continue

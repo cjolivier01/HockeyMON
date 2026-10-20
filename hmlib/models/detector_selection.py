@@ -334,10 +334,16 @@ def configure_detector_selection(args, game_config: dict) -> None:
         if not isinstance(plugin, dict):
             continue
         cls = str(plugin.get("class", ""))
-        # The overlay badges officials; the detector trunk caps how many of
-        # them a frame may contain. Both need the index, and neither can read
-        # it from `plot.*` because GLOBAL.* is resolved before this runs.
-        if "OverlayPlugin" in cls or "DetectorInferencePlugin" in cls:
+        # The overlay badges officials, the detector trunk caps how many of
+        # them a frame may contain, and the team trunk keeps them out of the
+        # clustering -- they are on neither side, and with this head they are
+        # a fifth of the crops. All three need the index, and none can read it
+        # from `plot.*` because GLOBAL.* is resolved before this runs.
+        if (
+            "OverlayPlugin" in cls
+            or "DetectorInferencePlugin" in cls
+            or "TeamAffiliationPlugin" in cls
+        ):
             plugin.setdefault("params", {})["referee_label"] = referee_label
 
     _apply_input_scale(game_config, selected)

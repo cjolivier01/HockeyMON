@@ -69,6 +69,16 @@ _BASELINE_BACKED = {
         "prtreid_backbone_weights": "GLOBAL.team.prtreid.backbone_weights",
         "prtreid_device": "GLOBAL.team.prtreid.device",
     },
+    # `max_referees` is a fact about the game, not about the model, so it is
+    # the operator's to set; the constructor literal matching the baseline
+    # today is a coincidence worth guarding rather than relying on.
+    "hmlib.aspen.plugins.detector_plugin.DetectorInferencePlugin": {
+        "max_referees": "GLOBAL.detector.max_referees",
+    },
+    "hmlib.aspen.plugins.overlay_plugin.OverlayPlugin": {
+        "plot_referees": "GLOBAL.plot.plot_referees",
+        "plot_teams": "GLOBAL.plot.plot_teams",
+    },
 }
 
 
