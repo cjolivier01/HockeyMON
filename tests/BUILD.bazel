@@ -7,6 +7,14 @@ CUDA_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "cuda" else ["@platforms//:in
 ROCM_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "rocm" else ["@platforms//:incompatible"]
 
 sh_test(
+    name = "test_hockey_pose_contract",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_hockey_pose_contract.py", "pytest"],
+    data = ["//:pyproject.toml", "//:scripts/hockey_pose_contract.py", "python_runtime.sh", "test_hockey_pose_contract.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
     name = "test_hockey_dataset",
     srcs = ["runtime_pytest.sh"],
     args = ["tests/test_hockey_dataset.py", "h5py", "numpy", "PIL", "pytest"],

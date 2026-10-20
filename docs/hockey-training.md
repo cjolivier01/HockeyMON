@@ -91,6 +91,16 @@ The selected checkpoints and portable graphs are available as release assets:
 
 The [training record archive](https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/hockey-harpet18-training-record-33a11f97542bceee.tar.gz) includes scripts, configurations, package provenance, audit hashes, metrics and native parity reports.
 
+For MMPose `init_model`/`inference_topdown`, use the
+[portable inference config](https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/rtmpose-m-harpet18-inference-d39ac0bd2b77f3b9.py)
+(SHA256 `d39ac0bd2b77f3b9de32ccd29a5a3b6e1e9906e0d222c25023b7f48aef400210`).
+It includes the image/box pipeline and supersedes the initial checkpoint-named
+`.py`, which omitted that pipeline. Checkpoint and ONNX bytes are unchanged.
+All four real-image fixtures reproduce the saved PyTorch joint coordinates
+through this public MMPose API. The immutable training archive retains the
+original export code; the current exporter adds pipeline validation and this
+portable config fix.
+
 Final results use the frozen weights and native-matched OpenCV preprocessing.
 [The JSON record](hockey-training-results.json) contains confusion matrices,
 checkpoint hashes and confidence-gate counts.
@@ -162,6 +172,8 @@ immutable to prevent an experiment silently overwriting another one.
 
 `export_hockey_models.py --feature pose --config ... --checkpoint ... --output ...`
 creates the portable inference config, optimizer-free checkpoint and ONNX.
+It rejects preprocessing settings outside the fixed native profile, including
+non-3.5 crop padding, RGB normalization changes, flip testing and DARK decoding.
 For action, use `--feature action --predictions ... --checkpoint ... --output ...`.
 Every validation row is checked against PyTorch, including dynamic batches 1,2,8.
 The exporter emits HStream-compatible `export.json` and binary parity fixtures.

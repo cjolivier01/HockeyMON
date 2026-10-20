@@ -14,6 +14,7 @@ import onnx
 import onnxruntime as ort
 import torch
 from hockey_data import LABELS, METAINFO, configure_native_crops, digest, software_provenance
+from hockey_pose_contract import PREPROCESSING, portable_pose_config
 from torch import nn
 
 
@@ -45,6 +46,7 @@ def load_model(args, state):
     configure_native_crops()
     register_all_modules()
     cfg = Config.fromfile(args.config)
+    inference = Config(portable_pose_config(cfg.to_dict(), METAINFO))
     model = MODELS.build(cfg.model).eval()
     model.load_state_dict(state, strict=True)
     dataset = DATASETS.build(cfg.val_dataloader.dataset)
@@ -54,7 +56,6 @@ def load_model(args, state):
             rows = [dataset[i] for i in range(start, min(start + 8, len(dataset)))]
             batch = {key: [row[key] for row in rows] for key in ("inputs", "data_samples")}
             images.append(model.data_preprocessor(batch, training=False)["inputs"].numpy())
-    inference = Config({"model": cfg.model, "dataset_meta": METAINFO, "default_scope": "mmpose"})
     inference.dump(str(args.output / "inference.py"))
     return PoseNetwork(model).eval(), np.concatenate(images), cfg.model.to_dict()
 
@@ -177,15 +178,7 @@ def main():
                 )
             cases.append(case)
     preprocessing = (
-        {
-            "id": "rtmpose-harpet18-affine-v1",
-            "color": "rgb",
-            "padding": 3.5,
-            "mean": [123.675, 116.28, 103.53],
-            "std": [58.395, 57.12, 57.375],
-            "simcc_split_ratio": 2.0,
-            "flip_test": False,
-        }
+        PREPROCESSING
         if args.feature == "pose"
         else {
             "id": "stgcnpp-harpet18-causal-v1",
