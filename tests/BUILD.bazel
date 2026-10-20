@@ -567,6 +567,7 @@ pytest_test(
         "-c",
         "$(location //:pyproject.toml)",
     ],
+    data=["//hmlib:config_data_files"],
     deps=[
         "//hmlib:hmlib.lib",
         requirement("pytest"),

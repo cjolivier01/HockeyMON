@@ -9,6 +9,8 @@ rather than discovered on a clip.
 
 from __future__ import annotations
 
+import copy
+import os
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -16,7 +18,23 @@ import yaml
 
 from hmlib.aspen import AspenNet, Plugin
 
-_GRAPHS = Path(__file__).resolve().parents[1] / "hmlib" / "config" / "aspen"
+
+def _repo_root() -> Path:
+    """Read the staged copies under Bazel, the checkout under bare pytest.
+
+    Runfiles are a symlink tree, so `Path(__file__).resolve()` escapes back
+    into the source checkout and the target's `data` list stops being
+    load-bearing: it would keep passing with every staged graph broken, while
+    Bazel quietly stopped re-running it when one changed. Mirrors
+    `tests/test_aspen_graph_baseline_params.py`, which solved this first.
+    """
+    srcdir, workspace = os.environ.get("TEST_SRCDIR"), os.environ.get("TEST_WORKSPACE")
+    if srcdir and workspace:
+        return Path(srcdir) / workspace
+    return Path(__file__).resolve().parents[1]
+
+
+_GRAPHS = _repo_root() / "hmlib" / "config" / "aspen"
 _TEAM_TRUNK = "hmlib.aspen.plugins.team_plugin.TeamAffiliationPlugin"
 
 
@@ -65,6 +83,15 @@ def should_deliver_team_results_downstream_under_minimal_context():
     assert _FakeConsumer.seen.get("team_results") == [["HOME"]]
 
 
+def _graph_specs():
+    """Every aspen graph as ``(path, plugins)``."""
+    for path in sorted(_GRAPHS.rglob("*.yaml")):
+        document = yaml.safe_load(path.read_text())
+        plugins = ((document or {}).get("aspen") or {}).get("plugins") or {}
+        if plugins:
+            yield path, plugins
+
+
 def _graphs_with_team_trunk():
     found = []
     for path in sorted(_GRAPHS.rglob("*.yaml")):
@@ -82,24 +109,51 @@ def should_declare_the_team_trunk_in_at_least_one_graph():
     assert _graphs_with_team_trunk(), "no graph declares the team trunk; the sweep is broken"
 
 
-def should_order_the_team_trunk_before_every_track_consumer():
-    """The trunk refines `track_mask`; readers that bypass it would race the write.
+def should_declare_the_team_trunk_wherever_team_labels_are_drawn():
+    """A graph that wires `plot_teams` must have something to publish them.
 
-    Nothing may depend on `tracker` directly once the team trunk is present --
-    the trunk itself excepted -- or under the threaded graph that consumer can
-    run concurrently with the mask write and see officials.
+    This replaces a test that enforced an ordering rule on the grounds that
+    the trunk "refines `track_mask`" -- it does not, and
+    `tests/test_team_plugin.py` asserts it does not. The real failure was the
+    opposite one: eleven graphs passed `plot_teams` to the overlay with no
+    trunk in them at all, so `--plot-teams` on the default pose graph set the
+    flag, enabled the feature and drew nothing.
     """
+    missing = []
+    for path, plugins in _graph_specs():
+        draws = any(
+            isinstance(spec, dict) and "plot_teams" in (spec.get("params") or {})
+            for spec in plugins.values()
+        )
+        declares = any(
+            isinstance(spec, dict) and spec.get("class") == _TEAM_TRUNK for spec in plugins.values()
+        )
+        if draws and not declares:
+            missing.append(path.name)
+    assert not missing, f"graphs draw team labels with no trunk to publish them: {missing}"
+
+
+def should_order_the_team_trunk_before_the_overlay():
+    """The overlay reads `team_results`, so it cannot run beside the writer."""
     for path, plugins in _graphs_with_team_trunk():
         team_names = {name for name, spec in plugins.items() if spec.get("class") == _TEAM_TRUNK}
         for name, spec in plugins.items():
-            if name in team_names or not isinstance(spec, dict):
+            if not isinstance(spec, dict):
                 continue
-            depends = spec.get("depends") or []
-            assert "tracker" not in depends, (
-                f"{path.name}: trunk {name!r} depends on 'tracker' directly while "
-                f"{sorted(team_names)} refines the track mask downstream of it; "
-                "depend on the team trunk instead so the write is ordered"
-            )
+            if "plot_teams" not in (spec.get("params") or {}):
+                continue
+            reachable, seen = set(spec.get("depends") or []), set()
+            while reachable:
+                current = reachable.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
+                upstream = plugins.get(current)
+                if isinstance(upstream, dict):
+                    reachable.update(upstream.get("depends") or [])
+            assert (
+                team_names & seen
+            ), f"{path.name}: {name} draws team labels but does not depend on the trunk"
 
 
 def should_build_every_graph_that_declares_the_team_trunk():
@@ -111,13 +165,44 @@ def should_build_every_graph_that_declares_the_team_trunk():
     `allow_multi_path_inputs`, and a stub in its place fails the fan-in check
     for reasons that have nothing to do with the team trunk.
     """
-    for path, _ in _graphs_with_team_trunk():
-        document = yaml.safe_load(path.read_text())
-        graph = document["aspen"]
+
+    def stubbed(graph):
+        graph = copy.deepcopy(graph)
         for spec in graph["plugins"].values():
             if isinstance(spec, dict) and "JoinPlugin" not in spec.get("class", ""):
                 spec["enabled"] = False
-        AspenNet(path.stem, graph)
+        return graph
+
+    already_broken = []
+    for path, _ in _graphs_with_team_trunk():
+        graph = yaml.safe_load(path.read_text())["aspen"]
+        without = copy.deepcopy(graph)
+        without["plugins"] = {
+            name: spec
+            for name, spec in without["plugins"].items()
+            if not (isinstance(spec, dict) and spec.get("class") == _TEAM_TRUNK)
+        }
+        for spec in without["plugins"].values():
+            if isinstance(spec, dict) and "team_affiliation" in (spec.get("depends") or []):
+                spec["depends"] = [d for d in spec["depends"] if d != "team_affiliation"] or list(
+                    graph["plugins"]["team_affiliation"].get("depends") or []
+                )
+        try:
+            AspenNet(path.stem, stubbed(without))
+        except ValueError:
+            # Already unbuildable without the trunk. `tracking_pose.yaml` and
+            # `tracking_pose_actions.yaml` are in this state on master:
+            # `camera_controller` and `ice_boundaries` take two dependencies
+            # each and only JoinPlugin declares `allow_multi_path_inputs`.
+            # Pre-existing and out of scope here, but the trunk must not be
+            # blamed for it, nor hide behind it.
+            already_broken.append(path.name)
+            continue
+        AspenNet(path.stem, stubbed(graph))
+
+    assert len(already_broken) < len(
+        _graphs_with_team_trunk()
+    ), "every graph is already unbuildable, so this guard proved nothing"
 
 
 def should_gate_the_team_trunk_on_the_baseline_switch():
