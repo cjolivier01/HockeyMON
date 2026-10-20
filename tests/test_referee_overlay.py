@@ -8,6 +8,7 @@ badges when a two-class head is active, nothing at all otherwise.
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -96,27 +97,61 @@ def should_ignore_labels_that_do_not_match_the_track_count():
     assert labels is None
 
 
-def should_find_the_best_checkpoint_under_any_metric_name(monkeypatch, tmp_path):
-    """`save_best="auto"` names the file after whichever metric came first.
+def should_verify_the_pinned_checkpoint_digest(monkeypatch, tmp_path):
+    """The weights are fetched by digest, not found on the training machine.
 
-    Under `classwise=True` the evaluator reports per-class precision ahead of
-    overall mAP, so the file is `best_coco_player_precision_epoch_N.pth` and a
-    glob pinned to `bbox_mAP` silently finds nothing.
+    `openmm/work_dirs/` only exists where the fine-tune ran, so a profile
+    resolved from it is unusable anywhere else. The digest is what makes the
+    download trustworthy: an interrupted transfer leaves a plausible file
+    behind, and half a checkpoint loads as a model that detects nothing rather
+    than raising.
     """
-    directory = tmp_path / "openmm/work_dirs/hm_hockeyref_yolov8_m_1984_736"
-    directory.mkdir(parents=True)
-    (directory / "best_coco_player_precision_epoch_10.pth").write_bytes(b"x")
-    monkeypatch.setattr(detector_selection, "ROOT", tmp_path)
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: str(tmp_path))
+    payload = b"weights"
+    digest = hashlib.sha256(payload).hexdigest()
+    calls = []
 
-    found = detector_selection.default_checkpoint("hockeyref")
-    assert found.endswith("best_coco_player_precision_epoch_10.pth")
+    def fake_download(url, target, progress=True):
+        calls.append(url)
+        Path(target).write_bytes(payload)
 
-    # When a pinned mAP checkpoint is also present it wins, so a run that set
-    # save_best explicitly stays deterministic.
-    (directory / "best_coco_bbox_mAP_epoch_20.pth").write_bytes(b"x")
-    assert detector_selection.default_checkpoint("hockeyref").endswith(
-        "best_coco_bbox_mAP_epoch_20.pth"
+    monkeypatch.setattr(torch.hub, "download_url_to_file", fake_download)
+
+    first = detector_selection.download_pinned_checkpoint("http://x/w.pth", digest, "w.pth")
+    assert Path(first).read_bytes() == payload
+    assert len(calls) == 1
+
+    # A good cache is reused rather than fetched again.
+    assert detector_selection.download_pinned_checkpoint("http://x/w.pth", digest, "w.pth") == first
+    assert len(calls) == 1
+
+    # A corrupted cache is replaced, not trusted.
+    Path(first).write_bytes(b"truncated")
+    assert detector_selection.download_pinned_checkpoint("http://x/w.pth", digest, "w.pth") == first
+    assert Path(first).read_bytes() == payload
+    assert len(calls) == 2
+
+    # A download that does not match the pin raises, and leaves nothing behind
+    # for the next run to mistake for a good copy.
+    with pytest.raises(ValueError, match="expected"):
+        detector_selection.download_pinned_checkpoint("http://x/w.pth", "0" * 64, "w.pth")
+    assert not Path(first).exists()
+
+
+def should_resolve_hockeyref_from_the_published_asset(monkeypatch):
+    """The profile uses the pin, not whatever happens to be on this machine."""
+    seen = {}
+
+    def fake_download(url, sha256, filename):
+        seen.update(url=url, sha256=sha256, filename=filename)
+        return "/cache/" + filename
+
+    monkeypatch.setattr(detector_selection, "download_pinned_checkpoint", fake_download)
+    assert detector_selection.default_checkpoint("hockeyref") == (
+        "/cache/" + Path(detector_selection.HOCKEYREF_WEIGHTS_URL).name
     )
+    assert seen["url"] == detector_selection.HOCKEYREF_WEIGHTS_URL
+    assert seen["sha256"] == detector_selection.HOCKEYREF_WEIGHTS_SHA256
 
 
 def should_report_a_missing_checkpoint_clearly():
