@@ -53,6 +53,11 @@ build:cuda --repo_env=GPU_BACKEND=cuda
 # sm_89 is the RTX 4090; sm_120 covers the RTX 5070 and 5090. The trailing
 # compute_120 PTX lets a newer card JIT rather than fail outright.
 build:cuda --@rules_cuda//cuda:archs=compute_89:sm_89;compute_120:compute_120,sm_120
+# The bytetrack kernels are not a cuda_library -- a genrule in
+# hockeymon/csrc/pytorch/BUILD.bazel drives nvcc itself and reads its gencode
+# flags from CUDA_BAZEL_ARCHS, so the rules_cuda flag above does not reach
+# them. Keep the two specs identical; the genrule parses the same syntax.
+build:cuda --action_env=CUDA_BAZEL_ARCHS=compute_89:sm_89;compute_120:compute_120,sm_120
 
 build:jetson --cpu=k8
 build:jetson --repo_env=CC=/usr/bin/aarch64-linux-gnu-gcc
