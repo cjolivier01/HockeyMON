@@ -62,6 +62,8 @@
 
 ## Security & Configuration Tips
 
+- `hmlib/scoreboard/proposal.py` supplies an ephemeral initial polygon only when the selector has no saved selection. Its pinned TorchScript export shares the native HStream scoreboard model contract; CUDA is preferred, GPU OOM releases resources and retries once on CPU, and other failures remain visible with manual selection available. Saved and disabled polygons bypass model work. Keep inference out of per-frame transforms; see `hmlib/scoreboard/README.md`.
+
 - Keep `hmlib/config/baseline.yaml` byte-for-byte synchronized with HockeyMONStream's `configs/baseline.yaml`. `stitching.control_point_execution_provider` defaults to `cuda` (`cpu` is an explicit alternative without a UI switch). `stitching.control_point_resolution` is the native HStream matcher setting (`2k` is the default on every platform, including missing or `auto` settings; explicit `native`/`1k` choices remain available); its runtime policy is documented in that repository's `docs/native-feature-matchers.md`.
 - The shared `stitching.rink_mask_frame_time` and rink-profile field configure native HStream final-mask sampling: `null` inherits, `auto` uses the first stitched frame, and negative `HH:MM:SS[.mmm]` is relative to the synchronized recording end. TV Dublin defaults to `-00:00:01`; Python mask sampling is unchanged. Runtime ownership and UI overrides are documented in HockeyMONStream's `docs/rink-mask-frame-time-design.md`.
 - The shared baseline also carries HStream's detector menu and the seam settings both applications read: `stitching.blend_mode` defaults to `laplacian`, and `blend_feather_fraction` defaults to `0.05` for the alpha blend. Keep the copies synchronized when either application's defaults change.

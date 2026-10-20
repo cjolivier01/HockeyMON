@@ -7,6 +7,7 @@ import html
 import io
 import ipaddress
 import json
+import logging
 import math
 import os
 import re
@@ -21,7 +22,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from numbers import Integral
 from pathlib import Path
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 import numpy as np
@@ -51,8 +52,8 @@ _MAXIMUM_SOURCE_PIXELS = 256 * 1024 * 1024
 
 
 def _bounded_preview_size(
-    source_size: Tuple[int, int], max_display_height: Optional[int] = None
-) -> Tuple[int, int]:
+    source_size: tuple[int, int], max_display_height: int | None = None
+) -> tuple[int, int]:
     width, height = source_size
     if (
         width <= 0
@@ -78,9 +79,9 @@ def _bounded_preview_size(
 
 
 def _prepare_selector_image(
-    image: Union[Image.Image, np.ndarray, torch.Tensor],
-    max_display_height: Optional[int],
-) -> Tuple[Image.Image, Tuple[int, int]]:
+    image: Image.Image | np.ndarray | torch.Tensor,
+    max_display_height: int | None,
+) -> tuple[Image.Image, tuple[int, int]]:
     """Make a bounded display proxy and retain original selection coordinates."""
     if isinstance(image, torch.Tensor) and image.ndim == 4:
         image = image[0]
@@ -114,7 +115,7 @@ def _default_bind_host() -> str:
     return "0.0.0.0"
 
 
-def _iter_detected_ipv4_addresses(raw_output: str) -> List[str]:
+def _iter_detected_ipv4_addresses(raw_output: str) -> list[str]:
     addresses: set[str] = set()
     for match in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", raw_output):
         try:
@@ -126,7 +127,7 @@ def _iter_detected_ipv4_addresses(raw_output: str) -> List[str]:
     return sorted(addresses)
 
 
-def _iter_local_ipv4_addresses() -> List[str]:
+def _iter_local_ipv4_addresses() -> list[str]:
     addresses: set[str] = set()
     try:
         hostname = socket.gethostname()
@@ -152,8 +153,8 @@ def _iter_local_ipv4_addresses() -> List[str]:
     return sorted(addresses)
 
 
-def _build_access_urls(bind_host: str, port: int) -> List[str]:
-    urls: List[str] = []
+def _build_access_urls(bind_host: str, port: int) -> list[str]:
+    urls: list[str] = []
     seen: set[str] = set()
 
     def _add(host: str) -> None:
@@ -182,7 +183,7 @@ def _build_browser_url(port: int) -> str:
     return f"http://localhost:{port}/"
 
 
-def _parse_selector_cli_args(argv: Optional[List[str]] = None) -> Tuple[Any, List[str]]:
+def _parse_selector_cli_args(argv: list[str] | None = None) -> tuple[Any, list[str]]:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
         "--selector-bind-host",
@@ -214,22 +215,22 @@ def _parse_selector_cli_args(argv: Optional[List[str]] = None) -> Tuple[Any, Lis
     return parser.parse_known_args(argv)
 
 
-def get_max_screen_height() -> Optional[int]:
+def get_max_screen_height() -> int | None:
     return None
 
 
 class ScoreboardSelector:
-    NULL_POINTS = [(0, 0), (0, 0), (0, 0), (0, 0)]
+    NULL_POINTS: ClassVar[list[tuple[int, int]]] = [(0, 0), (0, 0), (0, 0), (0, 0)]
 
     def __init__(
         self,
-        image: Union[Image.Image, np.ndarray, torch.Tensor],
-        initial_points: Optional[List[Tuple[int, int]]] = None,
-        max_display_height: Optional[int] = None,
-        game_id: Optional[str] = None,
-        bind_host: Optional[str] = None,
+        image: Image.Image | np.ndarray | torch.Tensor,
+        initial_points: list[tuple[int, int]] | None = None,
+        max_display_height: int | None = None,
+        game_id: str | None = None,
+        bind_host: str | None = None,
         port: int = 0,
-        open_browser: Optional[bool] = None,
+        open_browser: bool | None = None,
     ) -> None:
         self.image, (self._image_width, self._image_height) = _prepare_selector_image(
             image, max_display_height
@@ -241,9 +242,9 @@ class ScoreboardSelector:
         self._port = int(port)
         self._open_browser = _has_local_display() if open_browser is None else open_browser
         self._completion_event = threading.Event()
-        self._shutdown_timer: Optional[threading.Timer] = None
-        self._server: Optional[ThreadingHTTPServer] = None
-        self._server_thread: Optional[threading.Thread] = None
+        self._shutdown_timer: threading.Timer | None = None
+        self._server: ThreadingHTTPServer | None = None
+        self._server_thread: threading.Thread | None = None
         self._server_lock = threading.Lock()
         self._completed = False
 
@@ -251,10 +252,11 @@ class ScoreboardSelector:
         self.image.save(image_buffer, format="PNG")
         self._image_bytes = image_buffer.getvalue()
         self._done_background_data_url = self._load_done_background_data_url()
-        self._access_urls: List[str] = []
-        self._browser_url: Optional[str] = None
+        self._access_urls: list[str] = []
+        self._browser_url: str | None = None
 
-        self.points: List[Tuple[int, int]] = []
+        self.points: list[tuple[int, int]] = []
+        self.proposal_message = "Zoom in and click the four scoreboard corners."
         if initial_points == ScoreboardSelector.NULL_POINTS:
             initial_points = []
         if initial_points:
@@ -272,7 +274,7 @@ class ScoreboardSelector:
         return self._access_urls[0]
 
     @property
-    def access_urls(self) -> List[str]:
+    def access_urls(self) -> list[str]:
         return list(self._access_urls)
 
     def _load_done_background_data_url(self) -> str:
@@ -282,18 +284,18 @@ class ScoreboardSelector:
 
     def _coerce_points(
         self,
-        points: List[Any],
+        points: list[Any],
         require_four: bool,
-    ) -> List[Tuple[int, int]]:
+    ) -> list[tuple[int, int]]:
         if require_four and len(points) != 4:
             raise ValueError("Please select exactly four scoreboard corners before saving.")
 
-        coerced: List[Tuple[int, int]] = []
+        coerced: list[tuple[int, int]] = []
         for point in points:
             if not isinstance(point, (list, tuple)) or len(point) != 2:
                 raise ValueError("Every scoreboard point must contain exactly two coordinates.")
-            x = int(round(float(point[0])))
-            y = int(round(float(point[1])))
+            x = round(float(point[0]))
+            y = round(float(point[1]))
             if not (0 <= x < self._image_width and 0 <= y < self._image_height):
                 raise ValueError(
                     f"Point ({x}, {y}) is outside the image bounds "
@@ -303,7 +305,7 @@ class ScoreboardSelector:
 
         return coerced
 
-    def order_points_clockwise(self, pts: Union[torch.Tensor, List[Tuple[int, int]]]):
+    def order_points_clockwise(self, pts: torch.Tensor | list[tuple[int, int]]):
         if isinstance(pts, torch.Tensor):
             pts_np = pts.to(torch.float32).cpu().numpy()
         else:
@@ -318,9 +320,9 @@ class ScoreboardSelector:
         ordered[1] = pts_np[np.argmin(diff)]
         ordered[3] = pts_np[np.argmax(diff)]
 
-        return [(int(round(x)), int(round(y))) for x, y in ordered.tolist()]
+        return [(round(x), round(y)) for x, y in ordered.tolist()]
 
-    def process_ok(self, points: Optional[List[Any]] = None) -> None:
+    def process_ok(self, points: list[Any] | None = None) -> None:
         selected_points = (
             self.points if points is None else self._coerce_points(points, require_four=True)
         )
@@ -351,12 +353,12 @@ class ScoreboardSelector:
             self._schedule_shutdown(delay_seconds=1.0)
 
     def _announce_urls(self) -> None:
-        print("", flush=True)
+        print(flush=True)
         print("Scoreboard selector is ready.", flush=True)
         print("Open any of these links in a browser to select the scoreboard:", flush=True)
         for url in self._access_urls:
             print(f"  {url}", flush=True)
-        print("", flush=True)
+        print(flush=True)
 
     def _maybe_open_browser(self) -> None:
         if not self._open_browser or self._browser_url is None:
@@ -365,7 +367,7 @@ class ScoreboardSelector:
         def _open() -> None:
             try:
                 webbrowser.open(self._browser_url, new=1, autoraise=True)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 print(f"Could not launch a browser automatically: {exc}")
 
         threading.Thread(target=_open, daemon=True).start()
@@ -454,7 +456,7 @@ class ScoreboardSelector:
                 except ValueError as exc:
                     self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                     return
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     traceback.print_exc()
                     self._send_json(
                         {"error": f"Unexpected selector failure: {exc}"},
@@ -504,15 +506,16 @@ class ScoreboardSelector:
         return ScoreboardSelectorHandler
 
     def _build_selection_page(self) -> str:
-        state = dict(
-            gameId=self._game_id,
-            imageWidth=self._image_width,
-            imageHeight=self._image_height,
-            imageUrl="/image",
-            initialPoints=[[point[0], point[1]] for point in self.points],
-            draftStorageKey=f"scoreboard-selector:{self._game_id}:{self._session_id}",
-        )
-        state_json = json.dumps(state)
+        state = {
+            "gameId": self._game_id,
+            "imageWidth": self._image_width,
+            "imageHeight": self._image_height,
+            "imageUrl": "/image",
+            "initialPoints": [[point[0], point[1]] for point in self.points],
+            "proposalMessage": self.proposal_message,
+            "draftStorageKey": f"scoreboard-selector:{self._game_id}:{self._session_id}",
+        }
+        state_json = json.dumps(state).replace("<", "\\u003c")
         page = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -981,7 +984,7 @@ class ScoreboardSelector:
       if (points.length === 4) {
         focusPoints();
       }
-      setStatus("Image ready", "Zoom in and click the four scoreboard corners.", "info");
+      setStatus("Image ready", INITIAL_STATE.proposalMessage, "info");
       updateUI();
       render();
     });
@@ -1637,11 +1640,11 @@ class ScoreboardSelector:
         return page.replace("__BACKGROUND_URL__", self._done_background_data_url)
 
 
-def parse_points(points_str_list: List[str]) -> Optional[List[Tuple[int, int]]]:
+def parse_points(points_str_list: list[str]) -> list[tuple[int, int]] | None:
     if len(points_str_list) != 4:
         print("Error: Exactly four points must be provided.")
         return None
-    points: List[Tuple[int, int]] = []
+    points: list[tuple[int, int]] = []
     for point_str in points_str_list:
         try:
             x_str, y_str = point_str.split(",")
@@ -1654,8 +1657,8 @@ def parse_points(points_str_list: List[str]) -> Optional[List[Tuple[int, int]]]:
     return points
 
 
-def _untuple_points(points: List[Tuple[int, int]]) -> List[List[int]]:
-    results: List[List[int]] = []
+def _untuple_points(points: list[tuple[int, int]]) -> list[list[int]]:
+    results: list[list[int]] = []
     for pt in points:
         assert len(pt) == 2
         results.append([int(pt[0]), int(pt[1])])
@@ -1664,13 +1667,13 @@ def _untuple_points(points: List[Tuple[int, int]]) -> List[List[int]]:
 
 def configure_scoreboard(
     game_id: str,
-    image: Optional[torch.Tensor] = None,
+    image: torch.Tensor | None = None,
     force: bool = False,
-    max_display_height: Optional[int] = None,
-    bind_host: Optional[str] = None,
+    max_display_height: int | None = None,
+    bind_host: str | None = None,
     port: int = 0,
-    open_browser: Optional[bool] = None,
-) -> List[List[int]]:
+    open_browser: bool | None = None,
+) -> list[list[int]]:
     assert game_id
     game_config = get_game_config(game_id=game_id)
     current_scoreboard = get_nested_value(game_config, "rink.scoreboard.perspective_polygon")
@@ -1695,6 +1698,31 @@ def configure_scoreboard(
             port=port,
             open_browser=open_browser,
         )
+    if current_scoreboard is None or current_scoreboard == []:
+        # Run once on the selector's bounded display proxy. A proposal is only
+        # a draft: reopening a saved/disabled selection never loads a model.
+        from hmlib.scoreboard.proposal import propose
+
+        try:
+            points = propose(selector.image, (selector._image_width, selector._image_height))
+            if points:
+                selector.points = selector._coerce_points(points, require_four=True)
+                selector.proposal_message = (
+                    "Suggested scoreboard corners. Review or adjust them, then save."
+                )
+            else:
+                selector.proposal_message = (
+                    "No confident scoreboard found. Please select its four corners."
+                )
+        except Exception as error:
+            # Assistance must not prevent manual selection. Surface the failure
+            # in both the log and UI; never silently accept a substitute polygon.
+            logging.getLogger(__name__).exception(
+                "Scoreboard proposal failed; manual selection remains available"
+            )
+            selector.proposal_message = (
+                f"Automatic scoreboard detection failed: {error}. Select corners manually."
+            )
     selector.run()
     current_scoreboard = selector.points
     current_scoreboard = _untuple_points(current_scoreboard)
