@@ -792,6 +792,36 @@ sh_test(
 )
 
 sh_test(
+    name="test_aspen_graph_baseline_params",
+    srcs=["runtime_pytest.sh"],
+    args=[
+        "tests/test_aspen_graph_baseline_params.py",
+        # Importing the plugin for its constructor signature pulls in the whole
+        # detector stack, so probe the heavy modules too: this list is what
+        # rejects an interpreter that cannot satisfy them, and a short one lets
+        # resolve_repo_python pick a lean interpreter that then fails at import.
+        "cv2",
+        "mmengine",
+        "networkx",
+        "numpy",
+        "pytest",
+        "torch",
+        "yaml",
+    ],
+    data=[
+        "//:pyproject.toml",
+        "//hmlib:config_data_files",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_aspen_graph_baseline_params.py",
+    ],
+    env_inherit=[
+        "CONDA_PREFIX",
+        "PYTHON_BIN_PATH",
+    ],
+)
+
+sh_test(
     name="test_control_point_matcher_defaults",
     srcs=["runtime_pytest.sh"],
     args=[
