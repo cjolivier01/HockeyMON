@@ -154,10 +154,33 @@ def should_resolve_hockeyref_from_the_published_asset(monkeypatch):
     assert seen["sha256"] == detector_selection.HOCKEYREF_WEIGHTS_SHA256
 
 
-def should_report_a_missing_checkpoint_clearly():
-    """A fresh checkout has not trained this profile; say so, do not guess."""
-    directory = detector_selection.ROOT / "openmm/work_dirs/hm_hockeyref_yolov8_m_1984_736"
-    if list(directory.glob("best_*.pth")):
-        pytest.skip("hockeyref checkpoint is present in this tree")
-    with pytest.raises(ValueError, match="hm_hockeyref_yolov8_m_1984_736"):
-        detector_selection.default_checkpoint("hockeyref")
+def should_resolve_a_cached_checkpoint_without_the_network(monkeypatch, tmp_path):
+    """A warm cache must not reach the network.
+
+    Stubbing `download_pinned_checkpoint` -- the only thing
+    `default_checkpoint("hockeyref")` calls -- would make this tautological,
+    so the real resolver runs against a pre-seeded cache with
+    `torch.hub.download_url_to_file` replaced by a tripwire. That is what
+    keeps 104 MB out of a Bazel target with no network tag.
+    """
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: str(tmp_path))
+
+    def tripwire(*args, **kwargs):
+        raise AssertionError("default_checkpoint reached the network on a warm cache")
+
+    monkeypatch.setattr(torch.hub, "download_url_to_file", tripwire)
+
+    cached = tmp_path / "checkpoints" / Path(detector_selection.HOCKEYREF_WEIGHTS_URL).name
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"weights")
+    monkeypatch.setattr(
+        detector_selection, "HOCKEYREF_WEIGHTS_SHA256", hashlib.sha256(b"weights").hexdigest()
+    )
+
+    assert detector_selection.default_checkpoint("hockeyref") == str(cached)
+
+
+def should_report_a_profile_without_an_automatic_checkpoint():
+    """`deployed` has no work dir to search; say so rather than guess."""
+    with pytest.raises(ValueError, match="No automatic checkpoint"):
+        detector_selection.default_checkpoint("deployed")

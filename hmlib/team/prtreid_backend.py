@@ -106,13 +106,24 @@ def _apply_compat_shims() -> None:
 
 
 def _resolve_weights(path: str, url: str, filename: str) -> str:
-    """Return a local path for ``path``, downloading ``url`` when it is absent."""
-    if path and os.path.isfile(path):
-        return path
+    """Return a local path for ``path``, downloading ``url`` when none is given.
+
+    An operator who names a path and mistypes it gets an error, not a
+    download: the old code used the missing path as the *download target*, so
+    the run succeeded on weights nobody asked for. Only the unnamed case --
+    the documented "download to the hub cache" default -- fetches.
+    """
+    if path:
+        if os.path.isfile(path):
+            return path
+        raise FileNotFoundError(
+            f"PRTReid weights were configured as {path!r} but no such file exists; "
+            "leave the setting empty to download the published weights instead"
+        )
 
     hub_dir = os.path.join(torch.hub.get_dir(), "checkpoints")
     os.makedirs(hub_dir, exist_ok=True)
-    target = path if path else os.path.join(hub_dir, filename)
+    target = os.path.join(hub_dir, filename)
     if os.path.isfile(target):
         return target
 
@@ -186,11 +197,14 @@ class PrtreidModel:
         device: str = "cuda",
         batch_size: int = 64,
     ) -> None:
-        self._device = torch.device(
-            device if (device != "cuda" or torch.cuda.is_available()) else "cpu"
-        )
-        if str(device) == "cuda" and self._device.type != "cuda":
-            logger.warning("PRTReid requested cuda but no GPU is visible; running on CPU")
+        # `cuda:0` is a CUDA request too. Matching only the bare string let a
+        # device-indexed setting past this check, so the fallback never fired
+        # and the failure surfaced later inside `.to()`.
+        requested = torch.device(device)
+        if requested.type == "cuda" and not torch.cuda.is_available():
+            logger.warning("PRTReid requested %s but no GPU is visible; running on CPU", device)
+            requested = torch.device("cpu")
+        self._device = requested
         self._batch_size = int(batch_size)
 
         try:

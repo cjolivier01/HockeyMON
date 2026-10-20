@@ -1070,7 +1070,10 @@ class hm_opts(object):
                 "download on first use) or 'lab' (mean CIELAB torso colour, no extra deps)."
             ),
         )
-        team.add_argument(
+        # Both write `game.home_is_dark`, so giving both would resolve by
+        # dict order rather than reporting the contradiction.
+        home_side = team.add_mutually_exclusive_group()
+        home_side.add_argument(
             "--home-is-dark",
             action="store_true",
             help=(
@@ -1078,7 +1081,7 @@ class hm_opts(object):
                 "labelled HOME. Without this or --home-is-light the overlay reads DARK/LIGHT."
             ),
         )
-        team.add_argument(
+        home_side.add_argument(
             "--home-is-light",
             action="store_true",
             help="The home side wore white/light sweaters, so the lighter cluster is HOME",

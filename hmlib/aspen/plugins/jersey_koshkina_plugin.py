@@ -592,6 +592,10 @@ class KoshkinaJerseyNumberPlugin(Plugin):
                         )
                     if roi is None:
                         roi = self._bbox_torso_fallback(tb.to(dtype=torch.int64), W, H)
+                    if roi is None:
+                        # The band left the frame entirely; there is nothing to
+                        # read, and a mostly-black crop is not a number.
+                        continue
                     rois.append((ti, roi, 1.0))
                     if (
                         self._side_view_enabled
@@ -619,7 +623,10 @@ class KoshkinaJerseyNumberPlugin(Plugin):
                 # Fallback: bbox-based torso crops
                 for ti in range(bboxes_xyxy.shape[0]):
                     bb = bboxes_xyxy[ti].to(dtype=torch.int64)
-                    rois.append((ti, self._bbox_torso_fallback(bb, W, H), 1.0))
+                    roi = self._bbox_torso_fallback(bb, W, H)
+                    if roi is None:
+                        continue
+                    rois.append((ti, roi, 1.0))
 
             # Optional legibility filtering per-crop
             keep_indices = list(range(len(rois)))

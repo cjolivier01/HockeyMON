@@ -67,3 +67,88 @@ def should_accept_channels_first_and_uint8_and_float_crops():
     c = lab_torso_feature(hwc_f)
     assert torch.allclose(a, b, atol=1e-4)
     assert torch.allclose(a, c, atol=1e-4)
+
+
+def should_refuse_a_torso_band_that_left_the_frame():
+    """A box mostly off-canvas has no torso to sample; say so, do not substitute.
+
+    The old behaviour returned the whole detection box, which `roi_align`
+    zero-fills: on a uniform frame the crop read near-black, joined the dark
+    cluster and dragged its centroid. The caller cannot tell a body from a
+    torso, so the band has to decline.
+    """
+    import torch
+
+    from hmlib.bbox.torso import bbox_upper_torso_fallback
+
+    inside = torch.tensor([100, 100, 180, 300])
+    assert bbox_upper_torso_fallback(inside, 1920, 1080) is not None
+
+    # Off the right edge, and off the left edge.
+    assert bbox_upper_torso_fallback(torch.tensor([1900, 300, 1990, 500]), 1920, 1080) is None
+    assert bbox_upper_torso_fallback(torch.tensor([-90, 300, 10, 500]), 1920, 1080) is None
+
+
+def should_treat_crop_batches_as_0_255():
+    """`batched_lab_mean` is the production entry point and assumes 0-255.
+
+    The whole CIELAB path hangs on that convention -- `_cut_crops` documents
+    it, and sniffing the range instead would cost a GPU sync per frame -- but
+    only the per-crop helpers were covered, so dropping the `/255` scaling
+    went unnoticed.
+    """
+    import torch
+
+    from hmlib.team.features import batched_lab_mean, rgb_to_lab
+
+    mid = torch.full((1, 3, 8, 8), 128.0)
+    got = batched_lab_mean(mid)
+    want = rgb_to_lab(torch.full((1, 3), 128.0 / 255.0))
+    assert torch.allclose(got, want, atol=1e-3), f"{got} != {want}"
+    # Mid grey is L~53; without the scaling it saturates to 100.
+    assert 50.0 < float(got[0, 0]) < 56.0
+
+
+def should_report_lightness_from_the_l_axis():
+    """The backend's `lightness` must be L, not a chroma axis.
+
+    The dark/light ranking is the only thing that turns two clusters into
+    HOME and AWAY, and it reads this field. A chroma axis would rank by hue.
+    """
+    import torch
+
+    from hmlib.team.backends import LabBackend
+
+    backend = LabBackend()
+
+    # Neutral probes would not separate L from a: both chroma axes sit near
+    # zero on grey, so a `<` between them holds on float noise alone.
+    # Saturated red is *darker* than saturated green but has a far larger a.
+    red = torch.zeros((1, 3, 8, 8))
+    red[:, 0] = 255.0
+    green = torch.zeros((1, 3, 8, 8))
+    green[:, 1] = 255.0
+    assert float(backend.extract(red).lightness[0]) < float(
+        backend.extract(green).lightness[0]
+    ), "lightness is not reading the L axis"
+
+    # Mid grey is L ~= 53, which pins the scale as well as the axis.
+    grey = torch.full((1, 3, 8, 8), 128.0)
+    assert 50.0 < float(backend.extract(grey).lightness[0]) < 56.0
+
+
+def should_keep_the_measured_torso_band():
+    """The band constants carry a measurement table; pin them.
+
+    Widening toward the jersey band cost 8 points of team accuracy. Nothing
+    held the numbers, so loosening them to the whole box was invisible.
+    """
+    import torch
+
+    from hmlib.bbox.torso import bbox_upper_torso_fallback
+
+    box = torch.tensor([0, 0, 100, 200])
+    x1, y1, x2, y2 = bbox_upper_torso_fallback(box, 1920, 1080)
+    assert (x1, y1, x2, y2) == (32, 40, 68, 90), "the measured 32-68% / 20-45% band moved"
+    # Strictly inside the detection box on every side.
+    assert x1 > 0 and y1 > 0 and x2 < 100 and y2 < 200

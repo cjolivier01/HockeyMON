@@ -60,12 +60,24 @@ _BASELINE_BACKED = {
         "warmup_samples": "GLOBAL.team.warmup_samples",
         "refit_interval": "GLOBAL.team.refit_interval",
         "min_margin": "GLOBAL.team.min_margin",
+        "min_lightness_gap": "GLOBAL.team.min_lightness_gap",
+        "min_cluster_share": "GLOBAL.team.min_cluster_share",
         "frame_stride": "GLOBAL.team.frame_stride",
         "min_track_height": "GLOBAL.team.min_track_height",
         "home_is_dark": "GLOBAL.game.home_is_dark",
         "prtreid_weights": "GLOBAL.team.prtreid.weights",
         "prtreid_backbone_weights": "GLOBAL.team.prtreid.backbone_weights",
         "prtreid_device": "GLOBAL.team.prtreid.device",
+    },
+    # `max_referees` is a fact about the game, not about the model, so it is
+    # the operator's to set; the constructor literal matching the baseline
+    # today is a coincidence worth guarding rather than relying on.
+    "hmlib.aspen.plugins.detector_plugin.DetectorInferencePlugin": {
+        "max_referees": "GLOBAL.detector.max_referees",
+    },
+    "hmlib.aspen.plugins.overlay_plugin.OverlayPlugin": {
+        "plot_referees": "GLOBAL.plot.plot_referees",
+        "plot_teams": "GLOBAL.plot.plot_teams",
     },
 }
 

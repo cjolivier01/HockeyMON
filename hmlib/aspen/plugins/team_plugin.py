@@ -89,6 +89,9 @@ class TeamAffiliationPlugin(Plugin):
         warmup_samples: int = 200,
         refit_interval: int = 600,
         min_margin: float = 0.12,
+        min_lightness_gap: float = 6.0,
+        min_cluster_share: float = 0.25,
+        referee_label: int | None = None,
         frame_stride: int = 1,
         min_track_height: int = 60,
         home_is_dark: bool | None = None,
@@ -100,6 +103,10 @@ class TeamAffiliationPlugin(Plugin):
         self._backend_name = str(backend)
         self._frame_stride = max(1, int(frame_stride))
         self._min_track_height = int(min_track_height)
+        # Written by hmlib/models/detector_selection.py from the chosen
+        # profile; None on every single-class head, where officials are
+        # indistinguishable from skaters and cannot be excluded.
+        self._referee_label = None if referee_label is None else int(referee_label)
         self._prtreid_kwargs = {
             "prtreid_weights": prtreid_weights,
             "prtreid_backbone_weights": prtreid_backbone_weights,
@@ -111,6 +118,8 @@ class TeamAffiliationPlugin(Plugin):
             warmup_samples=warmup_samples,
             refit_interval=refit_interval,
             min_margin=min_margin,
+            min_lightness_gap=min_lightness_gap,
+            min_cluster_share=min_cluster_share,
         )
         self._tracker = TeamTracker(home_is_dark=home_is_dark)
 
@@ -134,8 +143,14 @@ class TeamAffiliationPlugin(Plugin):
         pose_inst: Any | None,
         img_w: int,
         img_h: int,
-    ) -> list[tuple[int, int, int, int]]:
-        """One torso ROI per track, pose-guided where a pose matches."""
+    ) -> list[tuple[int, int, int, int] | None]:
+        """One torso ROI per track, pose-guided where a pose matches.
+
+        ``None`` for a track whose torso band does not survive clamping to the
+        frame -- a skater far enough off the edge that there is nothing to
+        sample. The caller drops those rather than cropping a mostly-black
+        region that would read near-black and drag the dark centroid.
+        """
         if pose_inst is None or not hasattr(pose_inst, "keypoints"):
             return [
                 bbox_upper_torso_fallback(boxes[i].to(dtype=torch.int64), img_w, img_h)
@@ -170,6 +185,30 @@ class TeamAffiliationPlugin(Plugin):
             rois.append(roi)
         return rois
 
+    def _drop_officials(self, pred_tracks: Any, boxes: torch.Tensor, ids: torch.Tensor, base_mask):
+        """Remove match officials from the crops this frame contributes."""
+        if self._referee_label is None:
+            return boxes, ids
+        labels = getattr(pred_tracks, "labels", None)
+        if labels is None:
+            raise ValueError(
+                "a referee-aware detector is configured but the tracker published no `labels`, "
+                "so officials cannot be told apart and would enter the team fit"
+            )
+        if isinstance(labels, StreamTensorBase):
+            labels = labels.wait()
+        if not torch.is_tensor(labels):
+            return boxes, ids
+        if isinstance(base_mask, torch.Tensor):
+            labels = labels[base_mask.to(device=labels.device)]
+        if labels.shape[0] != boxes.shape[0]:
+            raise ValueError(
+                f"track labels have {labels.shape[0]} rows against {boxes.shape[0]} boxes; "
+                "the tracker emitted misaligned per-track fields"
+            )
+        keep = labels.to(device=boxes.device) != self._referee_label
+        return boxes[keep], ids[keep.to(device=ids.device)]
+
     @staticmethod
     def _cut_crops(
         frame: torch.Tensor,
@@ -182,9 +221,21 @@ class TeamAffiliationPlugin(Plugin):
         per skater. Both backends consume the same batch, so the frame is read
         once however many of them are enabled.
 
-        The result is float in 0-255, which is the convention every backend
-        assumes. Letting them sniff the range instead would put a `.max()`
-        -- a GPU->CPU sync -- on the per-frame path.
+        The result is float in 0-255 **RGB**, which is the convention every
+        backend assumes. Letting them sniff the range instead would put a
+        `.max()` -- a GPU->CPU sync -- on the per-frame path.
+
+        The swap at the end is load-bearing. This pipeline is BGR throughout:
+        `hmlib/video/video_stream.py` decodes `bgr24`, the stitcher tags its
+        output `channel_order = "bgr"`, and every detector and pose config
+        carries `bgr_to_rgb=True` in its data_preprocessor for exactly this
+        reason. Both backends here want RGB -- `rgb_to_lab` by name, and
+        PRTReid because HRNet was trained on it. Feeding BGR to the CIELAB
+        conversion does not merely shift the colours, it reorders the two
+        teams: for a red side against a blue one the true lightnesses are
+        L=43.3 and L=22.2, so blue is darker, while the unswapped bytes
+        compute L=28.2 and L=32.1 and name red the darker side. With
+        `game.home_is_dark` set, every badge then lands on the wrong team.
         """
         boxes = torch.tensor(
             [[float(x1), float(y1), float(x2), float(y2)] for x1, y1, x2, y2 in rois],
@@ -193,12 +244,15 @@ class TeamAffiliationPlugin(Plugin):
         )
         # roi_align wants a batch index column; every ROI comes from this frame.
         indexed = torch.cat((torch.zeros((boxes.shape[0], 1), device=boxes.device), boxes), dim=1)
-        return roi_align(
+        crops = roi_align(
             frame.to(dtype=torch.float32).unsqueeze(0),
             indexed,
             output_size=CROP_SIZE,
             aligned=True,
         )
+        # Reversed on the crops, not the frame: a dozen 256x128 tiles rather
+        # than the whole panorama.
+        return crops.flip(1)
 
     def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
@@ -222,7 +276,17 @@ class TeamAffiliationPlugin(Plugin):
         img_h = int(image_height(original_images))
 
         pose_results: list[Any] | None = context.get("pose_results")
-        frame_id0 = int(context.get("frame_id", 0))
+        # Required, not defaulted. It drives both the sampling stride and the
+        # evidence decay, and neither default is harmless: 0 makes a missing
+        # id indistinguishable from the first frame, and -1 leaves every
+        # stored id negative, which `TeamTracker._decay` reads as "no history"
+        # and skips -- so evidence would never age at all.
+        if "frame_id" not in context:
+            raise KeyError(
+                "TeamAffiliationPlugin requires `frame_id` in the context; it orders the "
+                "evidence decay and the sampling stride"
+            )
+        frame_id0 = int(context["frame_id"])
         backend = self._ensure_backend()
 
         all_results: list[list[TrackTeamInfo]] = []
@@ -242,6 +306,13 @@ class TeamAffiliationPlugin(Plugin):
             if isinstance(base_mask, torch.Tensor):
                 boxes = boxes[base_mask.to(device=boxes.device)]
                 ids = ids[base_mask.to(device=ids.device)]
+            # Officials are not on either team, and with a referee-aware head
+            # they are 2-4 of ~14 detections -- a fifth of the window, which
+            # is the lopsided split `min_cluster_share` exists to refuse. Keep
+            # them out of the fit entirely where the head can name them. This
+            # does not touch `track_mask`: they stay tracked and drawn, they
+            # just do not get a side.
+            boxes, ids = self._drop_officials(pred_tracks, boxes, ids, base_mask)
             if boxes.numel() == 0:
                 all_results.append([])
                 continue
@@ -261,7 +332,10 @@ class TeamAffiliationPlugin(Plugin):
 
             keep_rois: list[tuple[int, int, int, int]] = []
             crop_track_index: list[int] = []
-            for ti, (x1, y1, x2, y2) in enumerate(rois):
+            for ti, roi in enumerate(rois):
+                if roi is None:
+                    continue
+                x1, y1, x2, y2 = roi
                 if (y2 - y1) < 4 or (x2 - x1) < 4:
                     continue
                 if float(boxes[ti][3] - boxes[ti][1]) < self._min_track_height:

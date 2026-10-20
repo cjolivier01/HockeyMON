@@ -464,9 +464,10 @@ class OverlayPlugin(Plugin):
         """Render settled home/away labels published by the team trunk.
 
         The labels are already aggregated upstream, so this only smooths the
-        anchor point and draws. Referee tracks are normally absent by this point
-        -- the team trunk removes them from ``track_mask`` -- so nothing here
-        needs to filter them again.
+        anchor point and draws. Officials are *not* filtered out on the way
+        here: the team trunk does not touch ``track_mask``. It skips them when
+        clustering where the detector head can tell them apart, but a track
+        the head called a player is clustered and badged like any other.
         """
         if not self._plot_teams:
             return img

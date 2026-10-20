@@ -114,3 +114,86 @@ def should_reject_mismatched_draw_inputs():
             tracking_ids=torch.tensor([1, 2]),
             bboxes=torch.zeros((1, 4)),
         )
+
+
+def should_decay_evidence_with_frame_distance():
+    """Decay is what lets a track recover from an early run of bad crops.
+
+    It does not blank a settled label -- affiliation does not lapse -- so the
+    observable effect is that a stale incumbent is easier to overtake. The
+    same contrary reads that flip a decayed track leave an undecayed one
+    alone, which is what pins the constant: with `evidence_decay` at 1.0 both
+    halves below behave identically.
+    """
+
+    def run(decay: float) -> TeamLabel:
+        tracker = TeamTracker(evidence_decay=decay, min_display_evidence=1.0, switch_ratio=1.35)
+        tracker.set_dark_cluster(0)
+        for _ in range(4):
+            tracker.observe(
+                frame_id=0, info=TrackTeamInfo(tracking_id=1, cluster=0, margin=1.0, score=1.0)
+            )
+        # A long gap, then a short run of contrary reads.
+        for frame in range(60, 64):
+            tracker.observe(
+                frame_id=frame,
+                info=TrackTeamInfo(tracking_id=1, cluster=1, margin=1.0, score=1.0),
+            )
+        return tracker.label_for(1)
+
+    assert run(0.92) is TeamLabel.LIGHT, "a stale incumbent was not overtaken"
+    assert run(1.0) is TeamLabel.DARK, "evidence aged without any decay configured"
+
+
+def should_hold_the_label_until_the_switch_ratio_is_exceeded():
+    """A challenger below the ratio must not take the label, one above must.
+
+    The existing hysteresis test only ever feeds the incumbent's own cluster,
+    so `_select_cluster` returns before reaching the switch branch and the
+    ratio is never bounded from below.
+    """
+    tracker = TeamTracker(evidence_decay=1.0, min_display_evidence=1.0, switch_ratio=1.35)
+    tracker.set_dark_cluster(0)
+    for _ in range(4):
+        tracker.observe(
+            frame_id=0, info=TrackTeamInfo(tracking_id=1, cluster=0, margin=1.0, score=1.0)
+        )
+    assert tracker.label_for(1) is TeamLabel.DARK
+
+    # Four contrary reads: level with the incumbent, short of 1.35x.
+    for frame in range(1, 5):
+        tracker.observe(
+            frame_id=frame, info=TrackTeamInfo(tracking_id=1, cluster=1, margin=1.0, score=1.0)
+        )
+    assert tracker.label_for(1) is TeamLabel.DARK, "switched before clearing the ratio"
+
+    # Keep going until the challenger is decisively ahead.
+    for frame in range(5, 20):
+        tracker.observe(
+            frame_id=frame, info=TrackTeamInfo(tracking_id=1, cluster=1, margin=1.0, score=1.0)
+        )
+    assert tracker.label_for(1) is TeamLabel.LIGHT, "never switched on decisive evidence"
+
+
+def should_keep_its_aggregation_constants():
+    """The three constants that decide when a badge appears and when it moves.
+
+    They are not graph parameters, so `_BASELINE_BACKED` does not reach them
+    and nothing else would notice them drifting. The behavioural tests above
+    pass explicit values -- deliberately, so they test behaviour rather than
+    defaults -- which leaves the defaults themselves unpinned without this.
+    """
+    import inspect
+
+    defaults = {
+        name: param.default
+        for name, param in inspect.signature(TeamTracker.__init__).parameters.items()
+        if param.default is not inspect.Parameter.empty
+    }
+    # Roughly two confident reads before a badge appears, and a challenger
+    # must beat the incumbent by a third to take it.
+    assert defaults["min_display_evidence"] == 1.0
+    assert defaults["switch_ratio"] == 1.35
+    # Below 1.0 or evidence never ages; at 1.0 a stale read keeps full weight.
+    assert 0.0 < defaults["evidence_decay"] < 1.0
+    assert defaults["evidence_decay"] == 0.92

@@ -256,9 +256,27 @@ aspen:
         plot_actions: GLOBAL.plot.plot_actions
         no_wide_start: GLOBAL.play_tracker.no_wide_start
 
+    team_affiliation:
+      class: hmlib.aspen.plugins.team_plugin.TeamAffiliationPlugin
+      depends: [pose_play_join]
+      enabled: GLOBAL.team.enabled
+      params:
+        backend: GLOBAL.team.backend
+        warmup_samples: GLOBAL.team.warmup_samples
+        refit_interval: GLOBAL.team.refit_interval
+        min_margin: GLOBAL.team.min_margin
+        min_lightness_gap: GLOBAL.team.min_lightness_gap
+        min_cluster_share: GLOBAL.team.min_cluster_share
+        frame_stride: GLOBAL.team.frame_stride
+        min_track_height: GLOBAL.team.min_track_height
+        home_is_dark: GLOBAL.game.home_is_dark
+        prtreid_weights: GLOBAL.team.prtreid.weights
+        prtreid_backbone_weights: GLOBAL.team.prtreid.backbone_weights
+        prtreid_device: GLOBAL.team.prtreid.device
+
     overlays:
       class: hmlib.aspen.plugins.overlay_plugin.OverlayPlugin
-      depends: [pose_play_join]
+      depends: [team_affiliation]
       enabled: true
       params:
         plot_pose: GLOBAL.plot.plot_pose
