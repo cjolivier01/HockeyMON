@@ -26,16 +26,36 @@ def _snapshot_tensor(value):
 _VALID_COUNT_KEYS = ("num_detections", "num_valid_after_nms", "num_valid")
 
 
-def _valid_prefix(instances, total: int) -> tuple[str | None, Any | None, int]:
-    """The ``(key, value, limit)`` of whichever prefix-count field is present."""
+def _valid_prefix(instances, total: int) -> tuple[str | None, Any | None, Any]:
+    """The ``(key, value, limit)`` of whichever prefix-count field is present.
+
+    ``limit`` is a 0-dim tensor on ``device``, clamped to ``[0, total]``, never
+    a Python int. Reading the count would block the host until the detector's
+    kernels retire, on every frame; `hmlib/utils/nms.py` keeps `num_valid` on
+    device for that reason and `_strip_static_padding` carries a whole GPU-mask
+    branch for it. A count larger than the array is clamped rather than
+    rejected -- telling the two apart needs the value on the host -- but the
+    clamped figure is what gets written back, so the bogus one cannot reach
+    `hmlib/telemetry/capture.py` and trip its allocation check.
+
+    A malformed count raises. `tracker_plugin` and `ice_rink_boundaries_plugins`
+    both raise on an empty count tensor and `_strip_static_padding` reads it as
+    zero valid rows; silently substituting "every row is valid" here would make
+    this the one path that disagrees with all three.
+    """
     for key in _VALID_COUNT_KEYS:
         candidate = unwrap_tensor(getattr(instances, key, None))
-        if candidate is not None:
-            try:
-                limit = max(0, min(total, int(torch.as_tensor(candidate).reshape(-1)[0])))
-            except (ValueError, IndexError, RuntimeError):
-                limit = total
-            return key, candidate, limit
+        if candidate is None:
+            continue
+        count = torch.as_tensor(candidate).reshape(-1)
+        if count.numel() == 0:
+            raise ValueError(f"{key} tensor must contain at least one value")
+        # Read it where it already lives. A host-resident count is free to
+        # read; moving it to the device would be a pageable copy, which
+        # serializes against queued work exactly like the read this avoids.
+        if count.device.type == "cpu":
+            return key, candidate, max(0, min(total, int(count[0])))
+        return key, candidate, count[0].to(dtype=torch.long).clamp(0, total)
     return None, None, total
 
 
@@ -55,31 +75,40 @@ def _cap_referees(instances, referee_label: int, max_referees: int, demote_to: i
     Surplus referees are *relabelled* as players, not dropped. The detector
     did find a person there; it was only wrong about the role, and deleting
     the box would lose a skater from tracking entirely.
+
+    Entirely on device. Counting the officials to decide whether there is
+    anything to do would block the host on the detector's kernels every frame,
+    so the demotion is computed unconditionally from a rank and a mask. That
+    also means no per-frame log line: reporting how many were demoted would
+    need the number on the host, and on a clip where the cap bites it bites on
+    every frame.
     """
     labels = unwrap_tensor(getattr(instances, "labels", None))
     scores = unwrap_tensor(getattr(instances, "scores", None))
     if not torch.is_tensor(labels) or not torch.is_tensor(scores) or labels.numel() == 0:
         return instances
+    if scores.shape[0] != labels.shape[0]:
+        raise ValueError(
+            f"scores has {scores.shape[0]} rows against {labels.shape[0]} labels; "
+            "the detector emitted misaligned per-instance fields"
+        )
 
-    _, _, limit = _valid_prefix(instances, labels.shape[0])
-    is_referee = labels == int(referee_label)
-    is_referee[limit:] = False
-    indices = torch.nonzero(is_referee).reshape(-1)
-    if indices.numel() <= max_referees:
-        return instances
+    total = labels.shape[0]
+    _, _, limit = _valid_prefix(instances, total)
+    positions = torch.arange(total, device=labels.device)
+    is_referee = (labels == int(referee_label)) & (positions < limit)
 
-    # Keep the highest-scoring officials; demote the rest.
-    ranked = indices[torch.argsort(scores[indices], descending=True)]
-    demoted = ranked[max_referees:]
-    new_labels = labels.clone()
-    new_labels[demoted] = int(demote_to)
-    instances.labels = new_labels
-    logger.info(
-        "Capped referees at %d: demoted %d lower-scoring detection(s) to class %d",
-        max_referees,
-        int(demoted.numel()),
-        demote_to,
+    # Rank every row by score with non-referees pushed to the back, then demote
+    # the officials that placed past the cap. `argsort` of the ranking gives
+    # each row its position without a host round trip.
+    ordered = torch.argsort(
+        torch.where(is_referee, scores.float(), torch.full_like(scores, float("-inf")).float()),
+        descending=True,
     )
+    rank = torch.empty_like(ordered)
+    rank[ordered] = positions
+    demote = is_referee & (rank >= max_referees)
+    instances.labels = torch.where(demote, torch.full_like(labels, int(demote_to)), labels)
     return instances
 
 
@@ -101,10 +130,19 @@ def _drop_degenerate_boxes(instances):
     place -- survivors slide to the front, the tail stays padding -- and the
     count is lowered to match.
 
-    Returns the instances unchanged when everything is already valid, so the
-    common path allocates nothing.
+    The compaction is unconditional and entirely on device. Asking whether
+    anything needs compacting means reading a count on the host, which blocks
+    until the detector's kernels retire -- every frame, for every profile, to
+    skip a reorder of a few hundred rows that the GPU does in microseconds.
+    A stable `argsort` of the invalid mask puts the survivors first in their
+    original order, so NMS's score ordering is preserved.
     """
     boxes = unwrap_tensor(getattr(instances, "bboxes", None))
+    # mmdet heads may hand back a box structure rather than a bare tensor;
+    # `unwrap_tensor` passes those through untouched, and returning early would
+    # make the guard quietly disappear rather than fail.
+    if not torch.is_tensor(boxes) and hasattr(boxes, "tensor"):
+        boxes = boxes.tensor
     if not torch.is_tensor(boxes) or boxes.numel() == 0 or boxes.ndim != 2:
         return instances
 
@@ -112,22 +150,24 @@ def _drop_degenerate_boxes(instances):
     count_key, valid, limit = _valid_prefix(instances, total)
 
     ok = (boxes[:, 2] > boxes[:, 0]) & (boxes[:, 3] > boxes[:, 1]) & torch.isfinite(boxes).all(1)
-    within = ok.clone()
-    within[limit:] = False
-    kept = int(within.sum())
-    if kept == limit:
-        return instances
+    within = ok & (torch.arange(total, device=boxes.device) < limit)
 
-    order = torch.cat(
-        (
-            torch.nonzero(within).reshape(-1),
-            torch.nonzero(~within).reshape(-1),
-        )
-    )
-    compacted = instances[order.to(device=boxes.device)]
+    order = torch.argsort((~within).to(torch.uint8), stable=True)
+    compacted = instances[order]
     if count_key is not None:
-        new_count = torch.as_tensor(valid).reshape(-1).clone()
-        new_count[0] = kept
+        # Written on the mask's device, whichever side the old count was on:
+        # assigning a device sum into a host tensor is the read this avoids.
+        # Consumers already coerce with `int()`, which syncs once at the point
+        # that genuinely needs the value rather than once per plugin per frame.
+        kept = within.sum()
+        previous = torch.as_tensor(valid).reshape(-1)
+        if previous.numel() == 1:
+            # Built from the device sum rather than copied from the old tensor:
+            # `numel` and `dtype` are metadata, so nothing crosses the bus.
+            new_count = kept.reshape(1).to(dtype=previous.dtype)
+        else:
+            new_count = previous.to(device=kept.device).clone()
+            new_count[0] = kept.to(dtype=previous.dtype)
         # The count is a scalar, so it lives in metainfo: InstanceData requires
         # every *data* field to match the instance count and refuses a length-1
         # tensor on an N-row container.

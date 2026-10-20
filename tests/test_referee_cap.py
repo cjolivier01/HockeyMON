@@ -58,11 +58,21 @@ def should_keep_the_boxes_rather_than_dropping_them():
 
 
 def should_not_count_rows_past_the_valid_prefix():
-    """Static padding rows are not real detections and must not use up the cap."""
+    """Static padding rows are not real detections and must not use up the cap.
+
+    Asserting only the first two rows cannot catch the prefix mask going
+    missing: both answers agree there. The padding rows are what separate
+    them -- honouring the prefix leaves all four labels alone, ignoring it
+    spends the cap on the two real officials and demotes the padding.
+    """
     inst = _instances([1, 1, 1, 1], [0.9, 0.8, 0.1, 0.1], valid=2)
     out = _cap_referees(inst, referee_label=REFEREE, max_referees=2)
-    # Only the first two are real, so nothing is demoted.
-    assert out.labels[:2].tolist() == [1, 1]
+    assert out.labels.tolist() == [1, 1, 1, 1]
+
+    # And a real official past the cap inside the prefix is still demoted.
+    inst = _instances([1, 1, 1, 1], [0.9, 0.8, 0.7, 0.1], valid=3)
+    out = _cap_referees(inst, referee_label=REFEREE, max_referees=2)
+    assert out.labels.tolist() == [1, 1, 0, 1]
 
 
 def should_handle_a_cap_of_zero():

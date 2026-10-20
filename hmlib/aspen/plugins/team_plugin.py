@@ -182,9 +182,21 @@ class TeamAffiliationPlugin(Plugin):
         per skater. Both backends consume the same batch, so the frame is read
         once however many of them are enabled.
 
-        The result is float in 0-255, which is the convention every backend
-        assumes. Letting them sniff the range instead would put a `.max()`
-        -- a GPU->CPU sync -- on the per-frame path.
+        The result is float in 0-255 **RGB**, which is the convention every
+        backend assumes. Letting them sniff the range instead would put a
+        `.max()` -- a GPU->CPU sync -- on the per-frame path.
+
+        The swap at the end is load-bearing. This pipeline is BGR throughout:
+        `hmlib/video/video_stream.py` decodes `bgr24`, the stitcher tags its
+        output `channel_order = "bgr"`, and every detector and pose config
+        carries `bgr_to_rgb=True` in its data_preprocessor for exactly this
+        reason. Both backends here want RGB -- `rgb_to_lab` by name, and
+        PRTReid because HRNet was trained on it. Feeding BGR to the CIELAB
+        conversion does not merely shift the colours, it reorders the two
+        teams: for a red side against a blue one the true lightnesses are
+        L=43.3 and L=22.2, so blue is darker, while the unswapped bytes
+        compute L=28.2 and L=32.1 and name red the darker side. With
+        `game.home_is_dark` set, every badge then lands on the wrong team.
         """
         boxes = torch.tensor(
             [[float(x1), float(y1), float(x2), float(y2)] for x1, y1, x2, y2 in rois],
@@ -193,12 +205,15 @@ class TeamAffiliationPlugin(Plugin):
         )
         # roi_align wants a batch index column; every ROI comes from this frame.
         indexed = torch.cat((torch.zeros((boxes.shape[0], 1), device=boxes.device), boxes), dim=1)
-        return roi_align(
+        crops = roi_align(
             frame.to(dtype=torch.float32).unsqueeze(0),
             indexed,
             output_size=CROP_SIZE,
             aligned=True,
         )
+        # Reversed on the crops, not the frame: a dozen 256x128 tiles rather
+        # than the whole panorama.
+        return crops.flip(1)
 
     def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:

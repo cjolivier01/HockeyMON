@@ -154,10 +154,31 @@ def should_resolve_hockeyref_from_the_published_asset(monkeypatch):
     assert seen["sha256"] == detector_selection.HOCKEYREF_WEIGHTS_SHA256
 
 
-def should_report_a_missing_checkpoint_clearly():
-    """A fresh checkout has not trained this profile; say so, do not guess."""
-    directory = detector_selection.ROOT / "openmm/work_dirs/hm_hockeyref_yolov8_m_1984_736"
-    if list(directory.glob("best_*.pth")):
-        pytest.skip("hockeyref checkpoint is present in this tree")
-    with pytest.raises(ValueError, match="hm_hockeyref_yolov8_m_1984_736"):
-        detector_selection.default_checkpoint("hockeyref")
+def should_not_reach_the_network_from_a_unit_test(monkeypatch):
+    """Resolving the profile must not fetch 104 MB from a test.
+
+    This replaces a test that guarded the deleted work-dirs glob. Its skip
+    fired only when `openmm/work_dirs/.../best_*.pth` existed -- on the one
+    machine that ran the fine-tune, the exact condition the release asset was
+    introduced to stop depending on. Anywhere else it did not skip, and the
+    profile now downloads instead of raising, so the test both failed and
+    pulled the asset into a target with no network tag.
+    """
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("default_checkpoint must not download during tests")
+
+    monkeypatch.setattr(torch.hub, "download_url_to_file", forbidden)
+    monkeypatch.setattr(detector_selection, "_file_sha256", lambda path: "deadbeef")
+
+    # A cache hit resolves without touching the network at all.
+    monkeypatch.setattr(
+        detector_selection, "download_pinned_checkpoint", lambda url, sha256, filename: "/cached"
+    )
+    assert detector_selection.default_checkpoint("hockeyref") == "/cached"
+
+
+def should_report_a_profile_without_an_automatic_checkpoint():
+    """`deployed` has no work dir to search; say so rather than guess."""
+    with pytest.raises(ValueError, match="No automatic checkpoint"):
+        detector_selection.default_checkpoint("deployed")
