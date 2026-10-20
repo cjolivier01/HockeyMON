@@ -177,3 +177,52 @@ def should_refuse_a_split_that_is_not_two_squads():
         clusterer.observe(_squad(rng, *spec).view(1, 3), torch.tensor([spec[0]]))
     assert clusterer.ready
     assert clusterer.dark_cluster is None, "an officials-against-everyone split was named"
+
+
+def should_standardise_axes_of_very_different_scale():
+    """Lab axes span different ranges, so a raw euclidean fit is dominated by L.
+
+    The squads here differ only in chroma, which is the narrow axis; L is
+    noisy and much wider. Without standardisation the fit follows the noise
+    and the split carries no team signal, so dropping `_standardise` -- or
+    running zero Lloyd iterations, which leaves the seeds unrefined -- both
+    show up as assignments that disagree with the squad that produced them.
+    """
+    rng = torch.Generator().manual_seed(11)
+    clusterer = OnlineTeamClusterer(
+        warmup_samples=60, refit_interval=60, min_margin=0.02, min_lightness_gap=0.0
+    )
+
+    def sample(second: bool) -> torch.Tensor:
+        # L: wide and identical for both squads. a/b: narrow and separating.
+        lightness = 50.0 + float(torch.randn(1, generator=rng)) * 25.0
+        chroma = 6.0 if second else -6.0
+        ab = torch.randn(2, generator=rng) * 1.5 + chroma
+        return torch.tensor([lightness, float(ab[0]), float(ab[1])])
+
+    for i in range(400):
+        clusterer.observe(sample(i % 2 == 1).view(1, 3), torch.tensor([50.0]))
+
+    agree = total = 0
+    for i in range(120):
+        second = i % 2 == 1
+        out = clusterer.observe(sample(second).view(1, 3), torch.tensor([50.0]))
+        cluster = int(out.clusters[0])
+        if cluster < 0:
+            continue
+        total += 1
+        agree += int(
+            cluster
+            == int(
+                clusterer.observe(
+                    (
+                        torch.tensor([50.0, 6.0, 6.0])
+                        if second
+                        else torch.tensor([50.0, -6.0, -6.0])
+                    ).view(1, 3),
+                    torch.tensor([50.0]),
+                ).clusters[0]
+            )
+        )
+    assert total > 60, f"only {total} of 120 crops were assignable"
+    assert agree / total > 0.9, f"only {agree}/{total} agreed with their squad"

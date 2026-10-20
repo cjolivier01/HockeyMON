@@ -87,3 +87,58 @@ def should_refuse_a_torso_band_that_left_the_frame():
     # Off the right edge, and off the left edge.
     assert bbox_upper_torso_fallback(torch.tensor([1900, 300, 1990, 500]), 1920, 1080) is None
     assert bbox_upper_torso_fallback(torch.tensor([-90, 300, 10, 500]), 1920, 1080) is None
+
+
+def should_treat_crop_batches_as_0_255():
+    """`batched_lab_mean` is the production entry point and assumes 0-255.
+
+    The whole CIELAB path hangs on that convention -- `_cut_crops` documents
+    it, and sniffing the range instead would cost a GPU sync per frame -- but
+    only the per-crop helpers were covered, so dropping the `/255` scaling
+    went unnoticed.
+    """
+    import torch
+
+    from hmlib.team.features import batched_lab_mean, rgb_to_lab
+
+    mid = torch.full((1, 3, 8, 8), 128.0)
+    got = batched_lab_mean(mid)
+    want = rgb_to_lab(torch.full((1, 3), 128.0 / 255.0))
+    assert torch.allclose(got, want, atol=1e-3), f"{got} != {want}"
+    # Mid grey is L~53; without the scaling it saturates to 100.
+    assert 50.0 < float(got[0, 0]) < 56.0
+
+
+def should_report_lightness_from_the_l_axis():
+    """The backend's `lightness` must be L, not a chroma axis.
+
+    The dark/light ranking is the only thing that turns two clusters into
+    HOME and AWAY, and it reads this field. A chroma axis would rank by hue.
+    """
+    import torch
+
+    from hmlib.team.backends import LabBackend
+
+    dark = torch.full((1, 3, 8, 8), 20.0)
+    light = torch.full((1, 3, 8, 8), 230.0)
+    backend = LabBackend()
+    assert float(backend.extract(dark).lightness[0]) < float(backend.extract(light).lightness[0])
+    # And it is on the CIELAB scale, not raw bytes.
+    assert 0.0 <= float(backend.extract(light).lightness[0]) <= 100.0
+
+
+def should_keep_the_measured_torso_band():
+    """The band constants carry a measurement table; pin them.
+
+    Widening toward the jersey band cost 8 points of team accuracy. Nothing
+    held the numbers, so loosening them to the whole box was invisible.
+    """
+    import torch
+
+    from hmlib.bbox.torso import bbox_upper_torso_fallback
+
+    box = torch.tensor([0, 0, 100, 200])
+    x1, y1, x2, y2 = bbox_upper_torso_fallback(box, 1920, 1080)
+    assert (x1, y1, x2, y2) == (32, 40, 68, 90), "the measured 32-68% / 20-45% band moved"
+    # Strictly inside the detection box on every side.
+    assert x1 > 0 and y1 > 0 and x2 < 100 and y2 < 200
