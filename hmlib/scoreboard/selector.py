@@ -1706,7 +1706,13 @@ def configure_scoreboard(
         try:
             points = propose(selector.image, (selector._image_width, selector._image_height))
             if points:
-                selector.points = selector._coerce_points(points, require_four=True)
+                candidate = selector._coerce_points(points, require_four=True)
+                ordered = selector.order_points_clockwise(candidate)
+                if len(set(ordered)) != 4:
+                    raise ValueError(
+                        "Suggested corners cannot be ordered without duplicating points"
+                    )
+                selector.points = ordered
                 selector.proposal_message = (
                     "Suggested scoreboard corners. Review or adjust them, then save."
                 )

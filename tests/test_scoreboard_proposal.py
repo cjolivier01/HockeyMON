@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import cv2
 import numpy as np
 import pytest
 import torch
@@ -132,3 +133,30 @@ def should_keep_manual_selection_available_and_explain_proposal_failure(monkeypa
 
     monkeypatch.setattr(selector.ScoreboardSelector, "run", review)
     assert selector.configure_scoreboard("test", image=Image.new("RGB", (64, 48))) == [[0, 0]] * 4
+
+
+def should_reject_a_tilted_proposal_that_save_would_collapse(monkeypatch):
+    from hmlib.scoreboard import selector
+
+    classes = np.full((1, 100, 2), -20, dtype=np.float32)
+    classes[:, :, 1] = 20
+    classes[0, 0] = [20, -20]
+    masks = np.full((1, 100, 192, 512), -20, dtype=np.float32)
+    cv2.fillConvexPoly(masks[0, 0], np.array([[25, 10], [50, 5], [75, 10], [50, 30]]), 20)
+    predicted = proposal.postprocess(classes, masks, (2048, 768), (2048, 768))
+    assert predicted is not None and len({tuple(point) for point in predicted}) == 4
+    monkeypatch.setattr(proposal, "propose", lambda *args: predicted)
+    monkeypatch.setattr(selector, "get_game_config", lambda **kwargs: {})
+    writes = []
+    monkeypatch.setattr(selector, "save_private_config", lambda **kwargs: writes.append(kwargs))
+    manual = [[10, 10], [90, 10], [90, 70], [10, 70]]
+
+    def review(self):
+        assert not writes
+        assert self.points == []
+        assert "cannot be ordered" in self.proposal_message
+        self.process_ok(manual)
+
+    monkeypatch.setattr(selector.ScoreboardSelector, "run", review)
+    assert selector.configure_scoreboard("test", image=Image.new("RGB", (2048, 768))) == manual
+    assert len(writes) == 1
