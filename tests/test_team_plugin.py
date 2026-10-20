@@ -272,3 +272,30 @@ def should_skip_tracks_shorter_than_the_configured_minimum():
     # Both produce a usable band; only the height filter separates them.
     assert rois_short[0] is not None and rois_tall[0] is not None
     assert (rois_short[0][3] - rois_short[0][1]) >= 4
+
+
+def should_actually_drop_officials_in_the_frame_loop():
+    """The call site, not just the helper.
+
+    `_drop_officials` had a unit test, but deleting its call from `forward`
+    left every test green -- which is the whole point of the change.
+    """
+    import inspect
+
+    from hmlib.aspen.plugins.team_plugin import TeamAffiliationPlugin
+
+    source = inspect.getsource(TeamAffiliationPlugin.forward)
+    assert "_drop_officials(" in source, "the frame loop no longer excludes officials"
+
+
+def should_declare_every_context_key_it_reads():
+    """`minimal_context` passes only the declared keys, so an omission is a crash.
+
+    The previous assertion checked a subset, so dropping `frame_id` -- which
+    drives both the stride and the evidence decay -- went unnoticed.
+    """
+    from hmlib.aspen.plugins.team_plugin import TeamAffiliationPlugin
+
+    declared = TeamAffiliationPlugin(enabled=True).input_keys()
+    for key in ("data_samples", "original_images", "frame_id", "pose_results"):
+        assert key in declared, f"{key} is read by forward() but not declared"

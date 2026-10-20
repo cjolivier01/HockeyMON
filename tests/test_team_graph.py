@@ -133,6 +133,35 @@ def should_declare_the_team_trunk_wherever_team_labels_are_drawn():
     assert not missing, f"graphs draw team labels with no trunk to publish them: {missing}"
 
 
+def should_place_the_team_trunk_after_the_tracks_it_reads():
+    """The trunk needs `pred_track_instances`, so the track source must precede it.
+
+    Inserting it next to the drawer is not enough: in
+    `tracking_pose_pose_det.yaml` the tracker is downstream of pose, so a
+    trunk placed beside the overlay ran before any tracks existed and
+    published an empty list every frame -- silently, because the trunk
+    returns early when `pred_track_instances` is absent.
+    """
+    for path, plugins in _graphs_with_team_trunk():
+        depends = {
+            name: list((spec or {}).get("depends") or [])
+            for name, spec in plugins.items()
+            if isinstance(spec, dict)
+        }
+        sources = [n for n in ("tracker", "load_tracking") if n in plugins]
+        assert sources, f"{path.name}: no track source to read from"
+        reachable, stack = set(), list(depends["team_affiliation"])
+        while stack:
+            current = stack.pop()
+            if current in reachable:
+                continue
+            reachable.add(current)
+            stack.extend(depends.get(current, []))
+        assert (
+            set(sources) & reachable
+        ), f"{path.name}: the team trunk runs before {sources}, so it sees no tracks"
+
+
 def should_order_the_team_trunk_before_the_overlay():
     """The overlay reads `team_results`, so it cannot run beside the writer."""
     for path, plugins in _graphs_with_team_trunk():

@@ -191,7 +191,10 @@ class TeamAffiliationPlugin(Plugin):
             return boxes, ids
         labels = getattr(pred_tracks, "labels", None)
         if labels is None:
-            return boxes, ids
+            raise ValueError(
+                "a referee-aware detector is configured but the tracker published no `labels`, "
+                "so officials cannot be told apart and would enter the team fit"
+            )
         if isinstance(labels, StreamTensorBase):
             labels = labels.wait()
         if not torch.is_tensor(labels):
@@ -273,9 +276,17 @@ class TeamAffiliationPlugin(Plugin):
         img_h = int(image_height(original_images))
 
         pose_results: list[Any] | None = context.get("pose_results")
-        # -1 where every sibling trunk uses it, so a missing frame_id is
-        # distinguishable from frame zero rather than silently becoming it.
-        frame_id0 = int(context.get("frame_id", -1))
+        # Required, not defaulted. It drives both the sampling stride and the
+        # evidence decay, and neither default is harmless: 0 makes a missing
+        # id indistinguishable from the first frame, and -1 leaves every
+        # stored id negative, which `TeamTracker._decay` reads as "no history"
+        # and skips -- so evidence would never age at all.
+        if "frame_id" not in context:
+            raise KeyError(
+                "TeamAffiliationPlugin requires `frame_id` in the context; it orders the "
+                "evidence decay and the sampling stride"
+            )
+        frame_id0 = int(context["frame_id"])
         backend = self._ensure_backend()
 
         all_results: list[list[TrackTeamInfo]] = []

@@ -226,3 +226,129 @@ def should_standardise_axes_of_very_different_scale():
         )
     assert total > 60, f"only {total} of 120 crops were assignable"
     assert agree / total > 0.9, f"only {agree}/{total} agreed with their squad"
+
+
+def should_keep_the_previous_split_when_the_window_holds_one_squad():
+    """The rejection branch itself, on the 3-D feature where it is hardest.
+
+    A settled track's evidence is keyed on the cluster index, so renaming the
+    groups inverts it permanently. The window goes single-squad whenever play
+    stays in one zone, and k=2 then splits that squad down the middle -- two
+    centroids inside one old group, which no pairing can relate to the old
+    pair. Deleting this branch left every other test green, and an angle-based
+    guard is a coin flip at this width.
+    """
+    flips = 0
+    for seed in range(40):
+        rng = torch.Generator().manual_seed(seed)
+        clusterer = OnlineTeamClusterer(
+            warmup_samples=60, refit_interval=60, min_margin=0.02, max_buffer=120
+        )
+        dark, light = (25.0, (6.0, -24.0)), (72.0, (-6.0, 26.0))
+
+        def sample(spec, rng=rng):
+            noise = torch.randn(3, generator=rng) * torch.tensor([3.0, 2.0, 2.0])
+            return (torch.tensor([spec[0], spec[1][0], spec[1][1]]) + noise).view(1, 3)
+
+        for i in range(240):
+            spec = dark if i % 2 else light
+            clusterer.observe(sample(spec), torch.tensor([spec[0]]))
+        probe = torch.tensor([dark[0], dark[1][0], dark[1][1]]).view(1, 3)
+        before = int(clusterer.observe(probe, torch.tensor([dark[0]])).clusters[0])
+        if before < 0 or clusterer.dark_cluster is None:
+            continue
+
+        # Sustained zone play: only the dark squad is sampled, long enough to
+        # fill the buffer and cross several refit intervals.
+        for _ in range(300):
+            clusterer.observe(sample(dark), torch.tensor([dark[0]]))
+        after = int(clusterer.observe(probe, torch.tensor([dark[0]])).clusters[0])
+        # The invariant is about what the operator sees: a *named* side must
+        # never silently invert. A long enough one-squad stretch eventually
+        # abandons the split and relearns -- that is the escape from the
+        # deadlock, and it is safe precisely because it unnames first, so no
+        # badge is on screen while the index is in flux.
+        if after >= 0 and after != before and clusterer.dark_cluster is not None:
+            flips += 1
+    assert flips == 0, f"{flips}/40 seeds renamed a named split from a one-squad window"
+
+
+def should_not_deadlock_on_an_untrustworthy_warmup_fit():
+    """A bad first fit must not lock the feature out of ever naming the sides.
+
+    `min_cluster_share` passes on a single squad -- k-means splits it near
+    50/50 -- so the warmup fit can latch a split that describes nothing. An
+    earlier version protected any balanced split from then on, which rejected
+    every later, better fit before the naming block and left `dark_cluster`
+    None for the whole game, with only a repeating log line to show for it.
+    """
+    rng = torch.Generator().manual_seed(5)
+    clusterer = OnlineTeamClusterer(warmup_samples=60, refit_interval=60, min_margin=0.02)
+    dark, light = (25.0, (6.0, -24.0)), (72.0, (-6.0, 26.0))
+
+    def sample(spec):
+        noise = torch.randn(3, generator=rng) * torch.tensor([3.0, 2.0, 2.0])
+        return (torch.tensor([spec[0], spec[1][0], spec[1][1]]) + noise).view(1, 3)
+
+    # Warmup sees one squad only: the fit is balanced but meaningless.
+    for _ in range(80):
+        clusterer.observe(sample(dark), torch.tensor([dark[0]]))
+    assert clusterer.ready and clusterer.dark_cluster is None
+
+    # Both squads from here on. Recovery takes three refits -- the buffer
+    # still holds the one-squad warmup crops for the first of them, and the
+    # ranking latch needs two agreeing fits after that. What matters is that
+    # it recovers at all: the version this guards against rejected every
+    # later fit before the naming block and stayed unnamed for the whole
+    # game.
+    for i in range(300):
+        spec = dark if i % 2 else light
+        clusterer.observe(sample(spec), torch.tensor([spec[0]]))
+    assert clusterer.dark_cluster is not None, "never recovered from the warmup fit"
+
+    # And the naming is right: the dark squad lands in the dark cluster.
+    probe = torch.tensor([dark[0], dark[1][0], dark[1][1]]).view(1, 3)
+    assigned = int(clusterer.observe(probe, torch.tensor([dark[0]])).clusters[0])
+    assert assigned == clusterer.dark_cluster, "the darker squad is not the dark cluster"
+
+
+def should_relearn_when_the_ice_stops_matching_its_split():
+    """A named split must not be protected forever against a changed scene.
+
+    Protecting it is right for a temporary one-squad window. It is wrong when
+    the scene genuinely changes -- a period break, a lighting change, a
+    different pair of teams -- because then every new fit disagrees with a
+    stale one and the feature would keep publishing a name that no longer
+    describes anybody.
+    """
+    rng = torch.Generator().manual_seed(9)
+    clusterer = OnlineTeamClusterer(
+        warmup_samples=60, refit_interval=60, min_margin=0.02, max_buffer=120
+    )
+
+    def sample(spec):
+        noise = torch.randn(3, generator=rng) * torch.tensor([3.0, 2.0, 2.0])
+        return (torch.tensor([spec[0], spec[1][0], spec[1][1]]) + noise).view(1, 3)
+
+    first = ((25.0, (6.0, -24.0)), (72.0, (-6.0, 26.0)))
+    for i in range(300):
+        spec = first[i % 2]
+        clusterer.observe(sample(spec), torch.tensor([spec[0]]))
+    assert clusterer.dark_cluster is not None
+    stale_probe = torch.tensor([first[0][0], first[0][1][0], first[0][1][1]]).view(1, 3)
+    assert int(clusterer.observe(stale_probe, torch.tensor([first[0][0]])).clusters[0]) >= 0
+
+    # Entirely different appearance: both squads elsewhere in the space.
+    second = ((48.0, (40.0, 38.0)), (52.0, (-38.0, -40.0)))
+    for i in range(600):
+        spec = second[i % 2]
+        clusterer.observe(sample(spec), torch.tensor([spec[0]]))
+
+    # It must have moved on: the new population is assignable under the
+    # centroids in force, rather than everything falling outside them.
+    assigned = sum(
+        int(clusterer.observe(sample(second[i % 2]), torch.tensor([second[i % 2][0]])).clusters[0])
+        >= 0
+        for i in range(40)
+    )
+    assert assigned > 30, f"only {assigned}/40 of the new scene was assignable; the split is stale"

@@ -119,12 +119,22 @@ def should_report_lightness_from_the_l_axis():
 
     from hmlib.team.backends import LabBackend
 
-    dark = torch.full((1, 3, 8, 8), 20.0)
-    light = torch.full((1, 3, 8, 8), 230.0)
     backend = LabBackend()
-    assert float(backend.extract(dark).lightness[0]) < float(backend.extract(light).lightness[0])
-    # And it is on the CIELAB scale, not raw bytes.
-    assert 0.0 <= float(backend.extract(light).lightness[0]) <= 100.0
+
+    # Neutral probes would not separate L from a: both chroma axes sit near
+    # zero on grey, so a `<` between them holds on float noise alone.
+    # Saturated red is *darker* than saturated green but has a far larger a.
+    red = torch.zeros((1, 3, 8, 8))
+    red[:, 0] = 255.0
+    green = torch.zeros((1, 3, 8, 8))
+    green[:, 1] = 255.0
+    assert float(backend.extract(red).lightness[0]) < float(
+        backend.extract(green).lightness[0]
+    ), "lightness is not reading the L axis"
+
+    # Mid grey is L ~= 53, which pins the scale as well as the axis.
+    grey = torch.full((1, 3, 8, 8), 128.0)
+    assert 50.0 < float(backend.extract(grey).lightness[0]) < 56.0
 
 
 def should_keep_the_measured_torso_band():

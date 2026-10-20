@@ -163,9 +163,14 @@ aspen:
       depends: [tracker]
       params: {}
 
+    # After `postprocess`, not after `pose`: in this graph the tracker is
+    # downstream of pose, so a trunk placed there would run before any
+    # `pred_track_instances` existed and publish nothing every frame. The
+    # overlay inherits the position, which also fixes its tracked-box drawing
+    # -- it was reading tracks that had not been produced yet.
     team_affiliation:
       class: hmlib.aspen.plugins.team_plugin.TeamAffiliationPlugin
-      depends: [pose]
+      depends: [postprocess]
       enabled: GLOBAL.team.enabled
       params:
         backend: GLOBAL.team.backend

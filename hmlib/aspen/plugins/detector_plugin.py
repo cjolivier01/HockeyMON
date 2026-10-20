@@ -29,14 +29,17 @@ _VALID_COUNT_KEYS = ("num_detections", "num_valid_after_nms", "num_valid")
 def _valid_prefix(instances, total: int) -> tuple[str | None, Any | None, Any]:
     """The ``(key, value, limit)`` of whichever prefix-count field is present.
 
-    ``limit`` is a 0-dim tensor on ``device``, clamped to ``[0, total]``, never
-    a Python int. Reading the count would block the host until the detector's
+    ``limit`` is clamped to ``[0, total]`` and comes back on whichever side
+    the count already lives: a Python int for a host-resident count, a 0-dim
+    tensor for a device-resident one. Both compare correctly against a
+    position tensor, and neither moves data. Reading the count would block the host until the detector's
     kernels retire, on every frame; `hmlib/utils/nms.py` keeps `num_valid` on
     device for that reason and `_strip_static_padding` carries a whole GPU-mask
     branch for it. A count larger than the array is clamped rather than
     rejected -- telling the two apart needs the value on the host -- but the
-    clamped figure is what gets written back, so the bogus one cannot reach
-    `hmlib/telemetry/capture.py` and trip its allocation check.
+    clamped figure is what `_drop_degenerate_boxes` writes back, so the bogus
+    one cannot reach `hmlib/telemetry/capture.py` and trip its allocation
+    check. `_cap_referees` only reads the prefix and writes no count.
 
     A malformed count raises. `tracker_plugin` and `ice_rink_boundaries_plugins`
     both raise on an empty count tensor and `_strip_static_padding` reads it as
@@ -154,27 +157,33 @@ def _drop_degenerate_boxes(instances):
 
     order = torch.argsort((~within).to(torch.uint8), stable=True)
     compacted = instances[order]
-    if count_key is not None:
-        # Written on the mask's device, whichever side the old count was on:
-        # assigning a device sum into a host tensor is the read this avoids.
-        # Consumers already coerce with `int()`, which syncs once at the point
-        # that genuinely needs the value rather than once per plugin per frame.
-        kept = within.sum()
-        previous = torch.as_tensor(valid).reshape(-1)
-        if previous.numel() == 1:
-            # Built from the device sum rather than copied from the old tensor:
-            # `numel` and `dtype` are metadata, so nothing crosses the bus.
-            new_count = kept.reshape(1).to(dtype=previous.dtype)
-        else:
-            new_count = previous.to(device=kept.device).clone()
-            new_count[0] = kept.to(dtype=previous.dtype)
-        # The count is a scalar, so it lives in metainfo: InstanceData requires
-        # every *data* field to match the instance count and refuses a length-1
-        # tensor on an N-row container.
-        if count_key in compacted.metainfo_keys():
-            compacted.set_metainfo({count_key: new_count})
-        else:
-            setattr(compacted, count_key, new_count)
+    if count_key is None:
+        # Nothing declares a valid prefix, so the array is all real rows and
+        # the bad ones can simply go. Reordering alone would leave them in
+        # the batch and `hmlib/telemetry/capture.py::_boxes` would still
+        # reject it -- the failure this function exists to prevent.
+        return compacted[within[order]]
+
+    # Written on the mask's device, whichever side the old count was on:
+    # assigning a device sum into a host tensor is the read this avoids.
+    # Consumers already coerce with `int()`, which syncs once at the point
+    # that genuinely needs the value rather than once per plugin per frame.
+    kept = within.sum()
+    previous = torch.as_tensor(valid).reshape(-1)
+    if previous.numel() == 1:
+        # Built from the device sum rather than copied from the old tensor:
+        # `numel` and `dtype` are metadata, so nothing crosses the bus.
+        new_count = kept.reshape(1).to(dtype=previous.dtype)
+    else:
+        new_count = previous.to(device=kept.device).clone()
+        new_count[0] = kept.to(dtype=previous.dtype)
+    # The count is a scalar, so it lives in metainfo: InstanceData requires
+    # every *data* field to match the instance count and refuses a length-1
+    # tensor on an N-row container.
+    if count_key in compacted.metainfo_keys():
+        compacted.set_metainfo({count_key: new_count})
+    else:
+        setattr(compacted, count_key, new_count)
     return compacted
 
 

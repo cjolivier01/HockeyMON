@@ -274,6 +274,17 @@ class TrtBatchedNMS:
             )
             plugin_kind = "efficient"
 
+        # BatchedNMSDynamic_TRT has no class-agnostic field. Dropping the
+        # setting silently would leave a multi-class head emitting the
+        # duplicate it was turned on to suppress -- two anchors claiming one
+        # skater under different labels -- with nothing in the log to say so.
+        if plugin_kind != "efficient" and self.cfg.class_agnostic:
+            raise RuntimeError(
+                "nms.class_agnostic requires the EfficientNMS_TRT plugin; "
+                f"{plugin_kind} cannot suppress across classes. Use nms_plugin: efficient, "
+                "or nms_backend: head."
+            )
+
         self.cfg.plugin = plugin_kind
 
         if plugin_kind == "efficient":

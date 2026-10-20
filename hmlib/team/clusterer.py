@@ -26,25 +26,41 @@ class ClusterAssignment:
     margins: torch.Tensor  # float32 (N,), 0.0 where unassigned
 
 
-#: How closely a refit's separating axis must line up with the previous one,
-#: as |cos|, before the pairing between them is believed. Not a tuning knob:
-#: it asks whether the two fits describe the same division at all. Two fits of
-#: the same squads separate them along nearly the same direction whatever the
-#: lighting has done, while a fit of one squad split down the middle picks an
-#: arbitrary direction inside it, orthogonal to the squad axis.
-_MIN_PAIRING_ALIGNMENT = 0.5
+#: How far a refit's centroids may sit from the previous pair, as a fraction
+#: of the squared distance between those two, before the pairing between them
+#: is disbelieved. Not a tuning knob: it asks whether the two fits describe
+#: the same division at all.
+#:
+#: Deliberately a distance ratio rather than an angle between the separating
+#: axes. A cosine threshold is dimension-dependent -- for a random direction
+#: P(|cos| >= 0.5) is 0.5 at D=3 and ~0 at D=256 -- so one constant cannot
+#: serve both the 3-D `lab` feature and the 256-D embedding, and at D=3 it
+#: would be a coin flip in exactly the case it exists to catch. This ratio
+#: behaves the same at every width: two fits of the same squads leave each
+#: centroid near where it was (measured median 0.01 under lighting drift),
+#: while a fit of one squad split down the middle must match one centroid to
+#: the far old group and cannot get below ~0.78.
+_MAX_PAIRING_DRIFT = 0.25
+
+#: Consecutive refits that may be rejected before the split is abandoned and
+#: relearned. Without a bound, a real change of scene leaves every new fit
+#: disagreeing with a stale one forever.
+_MAX_CONSECUTIVE_REJECTIONS = 3
 
 
-def _axis_alignment(current: torch.Tensor, previous: torch.Tensor) -> float:
-    """Cosine between two fits' separating axes.
+def _pairing(current: torch.Tensor, previous: torch.Tensor) -> tuple[float, bool]:
+    """``(drift, swapped)`` relating a new centroid pair to the previous one.
 
-    Positive means they number the groups the same way, negative means
-    reversed, and near zero means they are not describing the same division.
+    ``drift`` is the better of the two matchings, as a fraction of the old
+    pair's squared separation. ``swapped`` says the new fit numbered the
+    groups the other way round.
     """
-    a = current[0] - current[1]
-    b = previous[0] - previous[1]
-    scale = float(a.norm()) * float(b.norm())
-    return float(torch.dot(a, b)) / scale if scale > 1e-12 else 0.0
+    keep = float(((current[0] - previous[0]) ** 2).sum() + ((current[1] - previous[1]) ** 2).sum())
+    swap = float(((current[0] - previous[1]) ** 2).sum() + ((current[1] - previous[0]) ** 2).sum())
+    separation = float(((previous[0] - previous[1]) ** 2).sum())
+    if separation <= 1e-12:
+        return float("inf"), False
+    return min(keep, swap) / separation, swap < keep
 
 
 def _kmeans2(points: torch.Tensor, iters: int = 25) -> torch.Tensor:
@@ -113,6 +129,7 @@ class OnlineTeamClusterer:
         self._dark_cluster: int | None = None
         self._pending_dark: int | None = None
         self._balanced = False
+        self._rejections = 0
         self._since_fit = 0
 
     @property
@@ -134,7 +151,7 @@ class OnlineTeamClusterer:
         this clusterer -- and badging every skater the same with the referees
         opposite is worse than saying nothing.
         """
-        return self._dark_cluster if self._balanced else None
+        return self._dark_cluster
 
     @property
     def buffered(self) -> int:
@@ -164,7 +181,7 @@ class OnlineTeamClusterer:
 
         if previous_centroids is not None:
             current = centroids * self._scale_std + self._scale_mean
-            alignment = _axis_alignment(current, previous_centroids)
+            drift, swapped = _pairing(current, previous_centroids)
             # Once a split is good enough to publish, protect it. k-means
             # reseeds from whatever is buffered now, so nothing ties this
             # fit's index 0 to the last one's, and the tracker keys a
@@ -173,12 +190,47 @@ class OnlineTeamClusterer:
             # tracks no longer being sampled -- and k=2 then splits that one
             # squad down the middle, leaving the pairing a coin flip. Keep
             # the previous split rather than rename the game on a guess.
-            if self._balanced and (not balanced or abs(alignment) < _MIN_PAIRING_ALIGNMENT):
+            # Protect a split only once it is *named*, and only for a bounded
+            # number of refits.
+            #
+            # Protecting from `_balanced` deadlocked the feature. `_balanced`
+            # latches on the first fit that clears `min_cluster_share` -- and
+            # k-means on a single squad splits it near 50/50, so the warmup
+            # fit qualifies even though the class docstring calls that window
+            # untrustworthy. From then on every later, better fit disagreed
+            # with it and was rejected before the naming block, so the sides
+            # were never named at all. There is nothing to protect before a
+            # name exists: no badge is on screen for an index to be wrong
+            # about.
+            #
+            # The bound matters too. A genuine change of scene -- a period
+            # break, a lighting change -- leaves every new fit disagreeing
+            # with a stale one forever. After a few consecutive rejections
+            # the stored split is the thing that is wrong, so take the new
+            # fit and relearn the naming rather than keep a name that no
+            # longer describes the ice.
+            protecting = self._dark_cluster is not None
+            disagrees = not balanced or drift > _MAX_PAIRING_DRIFT
+            if protecting and disagrees and self._rejections < _MAX_CONSECUTIVE_REJECTIONS:
                 self._scale_mean, self._scale_std = previous_scale
+                self._rejections += 1
                 self._since_fit = 0
-                logger.info("Team clusterer kept its previous split: this window is not two squads")
+                logger.info(
+                    "Team clusterer kept its previous split (%s); %d consecutive",
+                    "window is not two squads" if not balanced else f"centroid drift {drift:.2f}",
+                    self._rejections,
+                )
                 return
-            if alignment < 0:
+            if protecting and disagrees:
+                logger.warning(
+                    "Team clusterer abandoning its split after %d rejected refits; "
+                    "relearning which side is which",
+                    self._rejections,
+                )
+                self._dark_cluster = None
+                self._pending_dark = None
+            self._rejections = 0
+            if swapped:
                 centroids = centroids.flip(0)
                 labels = 1 - labels
                 counts.reverse()

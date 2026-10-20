@@ -154,28 +154,30 @@ def should_resolve_hockeyref_from_the_published_asset(monkeypatch):
     assert seen["sha256"] == detector_selection.HOCKEYREF_WEIGHTS_SHA256
 
 
-def should_not_reach_the_network_from_a_unit_test(monkeypatch):
-    """Resolving the profile must not fetch 104 MB from a test.
+def should_resolve_a_cached_checkpoint_without_the_network(monkeypatch, tmp_path):
+    """A warm cache must not reach the network.
 
-    This replaces a test that guarded the deleted work-dirs glob. Its skip
-    fired only when `openmm/work_dirs/.../best_*.pth` existed -- on the one
-    machine that ran the fine-tune, the exact condition the release asset was
-    introduced to stop depending on. Anywhere else it did not skip, and the
-    profile now downloads instead of raising, so the test both failed and
-    pulled the asset into a target with no network tag.
+    Stubbing `download_pinned_checkpoint` -- the only thing
+    `default_checkpoint("hockeyref")` calls -- would make this tautological,
+    so the real resolver runs against a pre-seeded cache with
+    `torch.hub.download_url_to_file` replaced by a tripwire. That is what
+    keeps 104 MB out of a Bazel target with no network tag.
     """
+    monkeypatch.setattr(torch.hub, "get_dir", lambda: str(tmp_path))
 
-    def forbidden(*args, **kwargs):
-        raise AssertionError("default_checkpoint must not download during tests")
+    def tripwire(*args, **kwargs):
+        raise AssertionError("default_checkpoint reached the network on a warm cache")
 
-    monkeypatch.setattr(torch.hub, "download_url_to_file", forbidden)
-    monkeypatch.setattr(detector_selection, "_file_sha256", lambda path: "deadbeef")
+    monkeypatch.setattr(torch.hub, "download_url_to_file", tripwire)
 
-    # A cache hit resolves without touching the network at all.
+    cached = tmp_path / "checkpoints" / Path(detector_selection.HOCKEYREF_WEIGHTS_URL).name
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"weights")
     monkeypatch.setattr(
-        detector_selection, "download_pinned_checkpoint", lambda url, sha256, filename: "/cached"
+        detector_selection, "HOCKEYREF_WEIGHTS_SHA256", hashlib.sha256(b"weights").hexdigest()
     )
-    assert detector_selection.default_checkpoint("hockeyref") == "/cached"
+
+    assert detector_selection.default_checkpoint("hockeyref") == str(cached)
 
 
 def should_report_a_profile_without_an_automatic_checkpoint():
