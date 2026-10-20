@@ -48,7 +48,8 @@ aspen:
     detector:
       class: hmlib.aspen.plugins.detector_plugin.DetectorInferencePlugin
       depends: [detector_join]
-      params: {}
+      params:
+        max_referees: GLOBAL.detector.max_referees
 
     # Save detections after detector, if desired
     save_detections:

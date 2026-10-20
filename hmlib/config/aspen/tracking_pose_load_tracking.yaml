@@ -133,6 +133,8 @@ aspen:
       params:
         plot_pose: GLOBAL.plot.plot_pose
         plot_jersey_numbers: GLOBAL.plot.plot_jersey_numbers
+        plot_teams: GLOBAL.plot.plot_teams
+        plot_referees: GLOBAL.plot.plot_referees
         plot_tracking: GLOBAL.plot.plot_individual_player_tracking
         plot_all_detections: GLOBAL.plot.plot_all_detections
         plot_trajectories: GLOBAL.plot.plot_trajectories

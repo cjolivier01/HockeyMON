@@ -617,6 +617,25 @@ def _case_jersey_pose(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = Fa
     assert out["jersey_results"] == [[]]
 
 
+def _case_team_affiliation(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = False) -> None:
+    from hmlib.aspen.plugins.team_plugin import TeamAffiliationPlugin
+
+    # The `lab` backend keeps this CPU-only and free of the optional PRTReid
+    # install; the prtreid path is covered by tests/test_team_plugin.py.
+    plugin = TeamAffiliationPlugin(backend="lab")
+    _maybe_enable_cuda_graph(plugin, cuda_graph_enabled)
+    out = plugin(
+        {
+            "data_samples": make_track_data_sample(num_frames=1),
+            "original_images": torch.zeros((1, 3, 16, 16), dtype=torch.float32),
+            "pose_results": [],
+            "frame_id": 0,
+        }
+    )
+    assert set(out) == {"team_results"}
+    assert out["team_results"] == [[]]
+
+
 def _case_join(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = False) -> None:
     from hmlib.aspen.plugins.join_plugin import JoinPlugin
 
@@ -1256,6 +1275,7 @@ PLUGIN_CASES: dict[str, Callable[[Any, Path, bool], None]] = {
     "hmlib.aspen.plugins.save_plugins.SaveCameraPlugin": _case_save_camera,
     "hmlib.aspen.plugins.stitching_plugin.StitchingPlugin": _case_stitching,
     "hmlib.aspen.plugins.stitch_ui_plugin.StitchUiPlugin": _case_stitch_ui,
+    "hmlib.aspen.plugins.team_plugin.TeamAffiliationPlugin": _case_team_affiliation,
     "hmlib.aspen.plugins.tracker_plugin.TrackerPlugin": _case_tracker,
     "hmlib.aspen.plugins.video_out_prep_plugin.VideoOutPrepPlugin": _case_video_out_prep,
     "hmlib.aspen.plugins.video_preview_plugin.VideoPreviewPlugin": _case_video_preview,

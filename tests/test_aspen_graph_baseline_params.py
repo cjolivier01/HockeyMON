@@ -51,6 +51,22 @@ _BASELINE_BACKED = {
     "hmlib.aspen.plugins.play_tracker_plugin.PlayTrackerPlugin": {
         "no_wide_start": "GLOBAL.play_tracker.no_wide_start",
     },
+    # Every team parameter is baseline-backed, and several constructor
+    # literals deliberately differ from the shipped value (frame_stride is 1
+    # in code and 2 in the baseline), so a graph that omits one runs something
+    # other than what the operator configured.
+    "hmlib.aspen.plugins.team_plugin.TeamAffiliationPlugin": {
+        "backend": "GLOBAL.team.backend",
+        "warmup_samples": "GLOBAL.team.warmup_samples",
+        "refit_interval": "GLOBAL.team.refit_interval",
+        "min_margin": "GLOBAL.team.min_margin",
+        "frame_stride": "GLOBAL.team.frame_stride",
+        "min_track_height": "GLOBAL.team.min_track_height",
+        "home_is_dark": "GLOBAL.game.home_is_dark",
+        "prtreid_weights": "GLOBAL.team.prtreid.weights",
+        "prtreid_backbone_weights": "GLOBAL.team.prtreid.backbone_weights",
+        "prtreid_device": "GLOBAL.team.prtreid.device",
+    },
 }
 
 

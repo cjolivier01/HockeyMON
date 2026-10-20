@@ -693,6 +693,11 @@ class hm_opts(object):
             "--plot-jersey-numbers", action="store_true", help="Plot individual jersey numbers"
         )
         plot.add_argument(
+            "--plot-teams",
+            action="store_true",
+            help="Plot home/away (or dark/light) labels; implies --team-affiliation",
+        )
+        plot.add_argument(
             "--plot-actions", action="store_true", help="Plot action labels per tracked player"
         )
         plot.add_argument("--plot-pose", action="store_true", help="Plot individual pose skeletons")
@@ -1048,6 +1053,36 @@ class hm_opts(object):
         #
         # Tracker options
         #
+        team = parser.add_argument_group("Team Affiliation")
+        team.add_argument(
+            "--team-affiliation",
+            action="store_true",
+            help="Enable the team affiliation trunk (per-game home/away split)",
+        )
+        team.add_argument(
+            "--team-backend",
+            dest="team_backend",
+            type=str,
+            choices=["prtreid", "lab"],
+            default=None,
+            help=(
+                "Appearance backend: 'prtreid' (default, SoccerNet-pretrained, weights "
+                "download on first use) or 'lab' (mean CIELAB torso colour, no extra deps)."
+            ),
+        )
+        team.add_argument(
+            "--home-is-dark",
+            action="store_true",
+            help=(
+                "The home side wore dark sweaters in this game, so the darker cluster is "
+                "labelled HOME. Without this or --home-is-light the overlay reads DARK/LIGHT."
+            ),
+        )
+        team.add_argument(
+            "--home-is-light",
+            action="store_true",
+            help="The home side wore white/light sweaters, so the lighter cluster is HOME",
+        )
         tracker = parser.add_argument_group("Tracker")
         tracker.add_argument(
             "--tracker-backend",
@@ -1943,6 +1978,11 @@ class hm_opts(object):
             ("plot_moving_boxes", "plot.plot_moving_boxes"),
             ("plot_trajectories", "plot.plot_trajectories"),
             ("plot_jersey_numbers", "plot.plot_jersey_numbers"),
+            ("plot_teams", ["plot.plot_teams", "team.enabled"]),
+            ("team_affiliation", "team.enabled"),
+            ("team_backend", "team.backend"),
+            ("home_is_dark", "game.home_is_dark"),
+            ("home_is_light", "game.home_is_dark"),
             ("plot_actions", "plot.plot_actions"),
             ("plot_pose", "plot.plot_pose"),
             ("plot_ice_mask", "plot.plot_ice_mask"),
@@ -1991,6 +2031,10 @@ class hm_opts(object):
         "plot_moving_boxes": {True: True},
         "plot_trajectories": {True: True},
         "plot_jersey_numbers": {True: True},
+        "plot_teams": {True: True},
+        "team_affiliation": {True: True},
+        "home_is_dark": {True: True},
+        "home_is_light": {True: False},
         "plot_actions": {True: True},
         "plot_pose": {True: True},
         "plot_ice_mask": {True: True},
