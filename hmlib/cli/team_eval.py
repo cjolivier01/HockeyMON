@@ -75,6 +75,10 @@ def _load_labels(sequence: Path) -> tuple[dict[str, str], dict[str, list[dict]]]
     return images, by_image
 
 
+#: Torso band, kept in step with `hmlib.bbox.torso.bbox_upper_torso_fallback`.
+_TOP, _BOTTOM, _SIDE = 0.20, 0.45, 0.32
+
+
 def _crop(frame: np.ndarray, box: dict) -> torch.Tensor | None:
     """Upper-torso crop from a GSR ``bbox_image`` dict, as RGB HWC uint8.
 
@@ -82,10 +86,13 @@ def _crop(frame: np.ndarray, box: dict) -> torch.Tensor | None:
     measures the same pixels the trunk would see.
     """
     x, y, w, h = int(box["x"]), int(box["y"]), int(box["w"]), int(box["h"])
-    x1 = max(0, x + int(0.25 * w))
-    x2 = min(frame.shape[1], x + w - int(0.25 * w))
-    y1 = max(0, y + int(0.15 * h))
-    y2 = min(frame.shape[0], y + int(0.50 * h))
+    # The same band constants as the trunk, not approximations of them: at
+    # 0.15/0.50/0.25 this cropped 2.4x the area on a 60x160 box, so the eval
+    # was not measuring the shipped configuration.
+    x1 = max(0, x + int(_SIDE * w))
+    x2 = min(frame.shape[1], x + w - int(_SIDE * w))
+    y1 = max(0, y + int(_TOP * h))
+    y2 = min(frame.shape[0], y + int(_BOTTOM * h))
     if x2 - x1 < 4 or y2 - y1 < 4:
         return None
     patch = frame[y1:y2, x1:x2, ::-1].copy()  # BGR -> RGB
