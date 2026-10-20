@@ -6,6 +6,22 @@ load("@libtorch//:torch_backend.bzl", "TORCH_BACKEND")
 CUDA_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "cuda" else ["@platforms//:incompatible"]
 ROCM_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "rocm" else ["@platforms//:incompatible"]
 
+sh_test(
+    name = "test_hockey_pose_contract",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_hockey_pose_contract.py", "pytest"],
+    data = ["//:pyproject.toml", "//:scripts/hockey_pose_contract.py", "python_runtime.sh", "test_hockey_pose_contract.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_hockey_dataset",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_hockey_dataset.py", "h5py", "numpy", "PIL", "pytest"],
+    data = ["//:pyproject.toml", "//:scripts/hockey_data.py", "python_runtime.sh", "test_hockey_dataset.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
 py_test(
     name="simple_run",
     srcs=["simple_run.py"],
@@ -681,6 +697,17 @@ sh_test(
         "test_scoreboard_selector_web.py",
     ],
     env_inherit=["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_scoreboard_proposal",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_scoreboard_proposal.py", "cv2", "mmengine", "numpy", "PIL", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml", "//hmlib:hmlib.lib", "//hmlib:scoreboard_selector_assets",
+        "python_runtime.sh", "test_scoreboard_proposal.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
 
 sh_test(
