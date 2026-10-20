@@ -6,6 +6,14 @@ load("@libtorch//:torch_backend.bzl", "TORCH_BACKEND")
 CUDA_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "cuda" else ["@platforms//:incompatible"]
 ROCM_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "rocm" else ["@platforms//:incompatible"]
 
+sh_test(
+    name = "test_hockey_dataset",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_hockey_dataset.py", "h5py", "numpy", "PIL", "pytest"],
+    data = ["//:pyproject.toml", "//:scripts/hockey_data.py", "python_runtime.sh", "test_hockey_dataset.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
 py_test(
     name="simple_run",
     srcs=["simple_run.py"],

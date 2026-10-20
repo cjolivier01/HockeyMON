@@ -1,0 +1,195 @@
+{
+  "pose": {
+    "valid": {
+      "PCKh": 0.8977072310405644,
+      "body_PCKh": 0.9130291005291006,
+      "stick_top_PCKh": 0.7513227513227513,
+      "stick_tip_PCKh": 0.798941798941799,
+      "EPE": 7.801510334014893,
+      "checkpoint_sha256": "0fe49e4f8a99d16789ef5fcb7994e702ffaa17f07daf7cf7dd2a67e77bfe2716",
+      "split": "valid",
+      "images": 189,
+      "sequences": 63,
+      "config_sha256": "9579f43058b3e4c8d209a347655b3ac3e2435b71bdfaac25226bdf29a002b022"
+    },
+    "test": {
+      "PCKh": 0.8930041152263375,
+      "body_PCKh": 0.9097222222222222,
+      "stick_top_PCKh": 0.7354497354497355,
+      "stick_tip_PCKh": 0.783068783068783,
+      "EPE": 7.5098724365234375,
+      "checkpoint_sha256": "0fe49e4f8a99d16789ef5fcb7994e702ffaa17f07daf7cf7dd2a67e77bfe2716",
+      "split": "test",
+      "images": 189,
+      "sequences": 63,
+      "config_sha256": "9579f43058b3e4c8d209a347655b3ac3e2435b71bdfaac25226bdf29a002b022"
+    }
+  },
+  "action": {
+    "valid": {
+      "ground_truth_pose": {
+        "accuracy": 0.8571429252624512,
+        "balanced_accuracy": 0.8609902262687683,
+        "loss": 0.4283330738544464,
+        "confusion_matrix": [
+          [
+            14,
+            2,
+            0,
+            0
+          ],
+          [
+            4,
+            15,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            14,
+            0
+          ],
+          [
+            1,
+            0,
+            1,
+            11
+          ]
+        ]
+      },
+      "estimated_pose": {
+        "accuracy": 0.8412699103355408,
+        "balanced_accuracy": 0.8407177925109863,
+        "loss": 0.5752699375152588,
+        "confusion_matrix": [
+          [
+            15,
+            1,
+            0,
+            0
+          ],
+          [
+            3,
+            15,
+            1,
+            0
+          ],
+          [
+            0,
+            1,
+            13,
+            1
+          ],
+          [
+            0,
+            1,
+            2,
+            10
+          ]
+        ]
+      },
+      "split": "valid",
+      "labels": [
+        "backward skating",
+        "forward skating",
+        "passing",
+        "shooting"
+      ],
+      "checkpoint_sha256": "731ba4c784808dba8d50e3ce3117d81a39fc4a1fb8881ceab167978d7bce0f97",
+      "predictions_sha256": "aba4851b2adeb8d0a7adaa298756f336362e2df6012e3ecdad6ad23b7e0f53bb",
+      "native_gates": {
+        "total": 63,
+        "eligible": 63,
+        "accepted": 58,
+        "correct_accepted": 51,
+        "coverage": 0.9206349849700928
+      }
+    },
+    "test": {
+      "ground_truth_pose": {
+        "accuracy": 0.7301587462425232,
+        "balanced_accuracy": 0.7411764860153198,
+        "loss": 0.5579861998558044,
+        "confusion_matrix": [
+          [
+            12,
+            3,
+            1,
+            0
+          ],
+          [
+            3,
+            13,
+            4,
+            0
+          ],
+          [
+            0,
+            1,
+            8,
+            1
+          ],
+          [
+            0,
+            0,
+            4,
+            13
+          ]
+        ]
+      },
+      "estimated_pose": {
+        "accuracy": 0.7619048357009888,
+        "balanced_accuracy": 0.773713231086731,
+        "loss": 0.4856144189834595,
+        "confusion_matrix": [
+          [
+            13,
+            2,
+            1,
+            0
+          ],
+          [
+            5,
+            12,
+            3,
+            0
+          ],
+          [
+            0,
+            1,
+            8,
+            1
+          ],
+          [
+            0,
+            0,
+            2,
+            15
+          ]
+        ]
+      },
+      "split": "test",
+      "labels": [
+        "backward skating",
+        "forward skating",
+        "passing",
+        "shooting"
+      ],
+      "checkpoint_sha256": "731ba4c784808dba8d50e3ce3117d81a39fc4a1fb8881ceab167978d7bce0f97",
+      "predictions_sha256": "95ece3e1f34a547c6632e814484babfc70f8742fcbb93b56c4b711be4d849ab5",
+      "native_gates": {
+        "total": 63,
+        "eligible": 63,
+        "accepted": 59,
+        "correct_accepted": 47,
+        "coverage": 0.9365079998970032
+      }
+    }
+  },
+  "selection": {
+    "pose": "highest validation PCKh, seed 7 epoch 146",
+    "action": "highest balanced validation accuracy with selected pose, seed 42 noise 0.04 epoch 67"
+  },
+  "runtime_preprocessing": "OpenCV 4.12.0.88, IPP disabled; weights frozen before test evaluation; repeated fixed-weight evaluation to validate the native interpolation path"
+}
