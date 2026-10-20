@@ -76,8 +76,20 @@ def _band(
     top: float,
     bottom: float,
     side: float,
-) -> tuple[int, int, int, int]:
-    """Fractional sub-box of ``box``, clamped, falling back to ``box`` if empty."""
+) -> tuple[int, int, int, int] | None:
+    """Fractional sub-box of ``box`` clamped to the image, or ``None``.
+
+    ``None`` when the band does not survive clamping -- a skater far enough
+    off the edge that the torso is not in frame. The old fallback returned the
+    whole detection box, which is the one thing this must not do: the caller
+    cannot tell it got a body instead of a torso, and
+    `bbox_upper_torso_fallback`'s own docstring calls a whole-body crop
+    actively harmful here. Measured on a 1920-wide frame, a box at
+    ``(1900, 300, 1990, 500)`` came back unchanged at 77% outside the image,
+    so `roi_align` zero-filled it and a uniform-120 frame produced a crop
+    reading near-black -- it then joined the dark cluster and dragged that
+    centroid toward it.
+    """
     x1, y1, x2, y2 = [int(v) for v in box.tolist()]
     w = x2 - x1
     h = y2 - y1
@@ -86,7 +98,7 @@ def _band(
     new_y1 = max(0, y1 + int(top * h))
     new_y2 = min(img_h - 1, y1 + int(bottom * h))
     if new_x2 <= new_x1 or new_y2 <= new_y1:
-        return (x1, y1, x2, y2)
+        return None
     return (new_x1, new_y1, new_x2, new_y2)
 
 
@@ -94,13 +106,15 @@ def bbox_torso_fallback(
     box: torch.Tensor,
     img_w: int,
     img_h: int,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int] | None:
     """Jersey-number ROI from a detection box when no pose is available.
 
     Keeps the vertical band [25%, 95%] and trims 20% from each side. That band
     is deliberately tall because a number can sit anywhere from the upper back
     to the pants, so it is the right ROI for OCR and the wrong one for colour --
     see :func:`bbox_upper_torso_fallback`.
+
+    ``None`` when the band does not survive clamping to the frame.
     """
     return _band(box, img_w, img_h, top=0.25, bottom=0.95, side=0.2)
 
@@ -109,7 +123,7 @@ def bbox_upper_torso_fallback(
     box: torch.Tensor,
     img_w: int,
     img_h: int,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int] | None:
     """Sweater-only ROI from a detection box, for appearance and team colour.
 
     Keeps [20%, 45%] vertically and trims 32% per side, which on a standing
@@ -134,5 +148,7 @@ def bbox_upper_torso_fallback(
     legs, and mean torso chroma came out at |a|,|b| ~= 2-3 on a gold-versus-black
     matchup -- grey, because the three regions average out, which leaves the
     colour feature carrying almost no team signal.
+
+    ``None`` when the band does not survive clamping to the frame.
     """
     return _band(box, img_w, img_h, top=0.20, bottom=0.45, side=0.32)

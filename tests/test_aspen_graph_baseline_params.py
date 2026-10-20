@@ -60,6 +60,8 @@ _BASELINE_BACKED = {
         "warmup_samples": "GLOBAL.team.warmup_samples",
         "refit_interval": "GLOBAL.team.refit_interval",
         "min_margin": "GLOBAL.team.min_margin",
+        "min_lightness_gap": "GLOBAL.team.min_lightness_gap",
+        "min_cluster_share": "GLOBAL.team.min_cluster_share",
         "frame_stride": "GLOBAL.team.frame_stride",
         "min_track_height": "GLOBAL.team.min_track_height",
         "home_is_dark": "GLOBAL.game.home_is_dark",

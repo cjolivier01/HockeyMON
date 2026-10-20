@@ -67,3 +67,23 @@ def should_accept_channels_first_and_uint8_and_float_crops():
     c = lab_torso_feature(hwc_f)
     assert torch.allclose(a, b, atol=1e-4)
     assert torch.allclose(a, c, atol=1e-4)
+
+
+def should_refuse_a_torso_band_that_left_the_frame():
+    """A box mostly off-canvas has no torso to sample; say so, do not substitute.
+
+    The old behaviour returned the whole detection box, which `roi_align`
+    zero-fills: on a uniform frame the crop read near-black, joined the dark
+    cluster and dragged its centroid. The caller cannot tell a body from a
+    torso, so the band has to decline.
+    """
+    import torch
+
+    from hmlib.bbox.torso import bbox_upper_torso_fallback
+
+    inside = torch.tensor([100, 100, 180, 300])
+    assert bbox_upper_torso_fallback(inside, 1920, 1080) is not None
+
+    # Off the right edge, and off the left edge.
+    assert bbox_upper_torso_fallback(torch.tensor([1900, 300, 1990, 500]), 1920, 1080) is None
+    assert bbox_upper_torso_fallback(torch.tensor([-90, 300, 10, 500]), 1920, 1080) is None

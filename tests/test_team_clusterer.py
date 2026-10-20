@@ -58,8 +58,12 @@ def should_recover_the_true_split_after_warmup():
 
 
 def should_identify_the_darker_cluster():
-    clusterer = OnlineTeamClusterer(warmup_samples=100, min_margin=0.0)
+    # Two fits: the ranking is latched only once consecutive fits agree, so
+    # that one noisy window cannot name the sides for the rest of the game.
+    clusterer = OnlineTeamClusterer(warmup_samples=100, refit_interval=1, min_margin=0.0)
     features, lightness, _ = _two_populations()
+    clusterer.observe(features, lightness)
+    assert clusterer.dark_cluster is None, "a single fit must not name the sides"
     out = clusterer.observe(features, lightness)
 
     dark = clusterer.dark_cluster
@@ -103,3 +107,73 @@ def should_be_deterministic_across_runs():
     b = second.observe(features, lightness)
     assert torch.equal(a.clusters, b.clusters)
     assert first.dark_cluster == second.dark_cluster
+
+
+def _squad(rng: torch.Generator, lightness: float, chroma: tuple[float, float]) -> torch.Tensor:
+    """One Lab torso feature from a squad centred at `lightness`/`chroma`."""
+    noise = torch.randn(3, generator=rng) * torch.tensor([3.0, 2.0, 2.0])
+    return torch.tensor([lightness, chroma[0], chroma[1]]) + noise
+
+
+def should_keep_cluster_identity_across_a_refit():
+    """A refit must not rename the squads under already-settled tracks.
+
+    k-means reseeds from whatever is buffered, so nothing ties this fit's
+    index 0 to the last one's -- and `TeamTracker` keys a skater's accumulated
+    evidence on that index. An index swap silently inverts every track that
+    settled before the refit.
+    """
+    for seed in range(8):
+        rng = torch.Generator().manual_seed(seed)
+        clusterer = OnlineTeamClusterer(warmup_samples=40, refit_interval=40, min_margin=0.05)
+        dark, light = (28.0, (5.0, -30.0)), (70.0, (-4.0, 28.0))
+        for i in range(120):
+            spec = dark if i % 2 else light
+            clusterer.observe(_squad(rng, *spec).view(1, 3), torch.tensor([spec[0]]))
+        probe = torch.tensor([dark[0], dark[1][0], dark[1][1]]).view(1, 3)
+        before = int(clusterer.observe(probe, torch.tensor([dark[0]])).clusters[0])
+        assert before >= 0
+
+        # Lighting drifts and play stays balanced across several refits.
+        for i in range(400):
+            spec = dark if i % 2 else light
+            feat = _squad(rng, *spec).view(1, 3) + torch.tensor([4.0, 1.0, 1.0])
+            clusterer.observe(feat, torch.tensor([spec[0] + 4.0]))
+        after = int(clusterer.observe(probe, torch.tensor([dark[0]])).clusters[0])
+        assert after in (-1, before), f"seed {seed}: the dark squad changed cluster index"
+
+
+def should_not_name_sides_it_cannot_tell_apart():
+    """Two squads of equal lightness must stay unnamed, not flip every refit."""
+    rng = torch.Generator().manual_seed(3)
+    clusterer = OnlineTeamClusterer(warmup_samples=40, refit_interval=40, min_margin=0.05)
+    # Distinct in chroma -- red against blue -- but the same lightness.
+    red, blue = (50.0, (45.0, 25.0)), (50.0, (-20.0, -40.0))
+    ranks = []
+    for i in range(400):
+        spec = red if i % 2 else blue
+        clusterer.observe(_squad(rng, *spec).view(1, 3), torch.tensor([spec[0]]))
+        if clusterer.ready:
+            ranks.append(clusterer.dark_cluster)
+    assert ranks, "never fitted"
+    assert all(r == ranks[0] for r in ranks), "the dark/light ranking changed mid-game"
+    assert ranks[0] is None, "equal-lightness squads must not be named dark and light"
+
+
+def should_refuse_a_split_that_is_not_two_squads():
+    """Officials against everyone is lopsided; naming it is worse than silence.
+
+    The two squads here are indistinguishable, so the only real structure in
+    the feature space is the officials -- and they are plain detections to
+    this clusterer. Left unguarded the fit isolates them, which has a large
+    and entirely genuine lightness gap, so the ranking guard does not catch
+    it: every skater would be badged one side and the referees the other.
+    """
+    rng = torch.Generator().manual_seed(7)
+    clusterer = OnlineTeamClusterer(warmup_samples=40, refit_interval=40, min_margin=0.05)
+    for i in range(300):
+        official = i % 6 == 0
+        spec = (85.0, (40.0, 40.0)) if official else (45.0, (0.0, 0.0))
+        clusterer.observe(_squad(rng, *spec).view(1, 3), torch.tensor([spec[0]]))
+    assert clusterer.ready
+    assert clusterer.dark_cluster is None, "an officials-against-everyone split was named"

@@ -89,6 +89,8 @@ class TeamAffiliationPlugin(Plugin):
         warmup_samples: int = 200,
         refit_interval: int = 600,
         min_margin: float = 0.12,
+        min_lightness_gap: float = 6.0,
+        min_cluster_share: float = 0.25,
         frame_stride: int = 1,
         min_track_height: int = 60,
         home_is_dark: bool | None = None,
@@ -111,6 +113,8 @@ class TeamAffiliationPlugin(Plugin):
             warmup_samples=warmup_samples,
             refit_interval=refit_interval,
             min_margin=min_margin,
+            min_lightness_gap=min_lightness_gap,
+            min_cluster_share=min_cluster_share,
         )
         self._tracker = TeamTracker(home_is_dark=home_is_dark)
 
@@ -134,8 +138,14 @@ class TeamAffiliationPlugin(Plugin):
         pose_inst: Any | None,
         img_w: int,
         img_h: int,
-    ) -> list[tuple[int, int, int, int]]:
-        """One torso ROI per track, pose-guided where a pose matches."""
+    ) -> list[tuple[int, int, int, int] | None]:
+        """One torso ROI per track, pose-guided where a pose matches.
+
+        ``None`` for a track whose torso band does not survive clamping to the
+        frame -- a skater far enough off the edge that there is nothing to
+        sample. The caller drops those rather than cropping a mostly-black
+        region that would read near-black and drag the dark centroid.
+        """
         if pose_inst is None or not hasattr(pose_inst, "keypoints"):
             return [
                 bbox_upper_torso_fallback(boxes[i].to(dtype=torch.int64), img_w, img_h)
@@ -276,7 +286,10 @@ class TeamAffiliationPlugin(Plugin):
 
             keep_rois: list[tuple[int, int, int, int]] = []
             crop_track_index: list[int] = []
-            for ti, (x1, y1, x2, y2) in enumerate(rois):
+            for ti, roi in enumerate(rois):
+                if roi is None:
+                    continue
+                x1, y1, x2, y2 = roi
                 if (y2 - y1) < 4 or (x2 - x1) < 4:
                     continue
                 if float(boxes[ti][3] - boxes[ti][1]) < self._min_track_height:
