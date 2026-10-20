@@ -47,6 +47,12 @@
 - Do not mention AI agents or coding tools in PR titles or descriptions; PR comments may mention them when useful.
 - Assets: do not commit large datasets or model weights; use `datasets/` and `pretrained/` symlinks.
 
+### Worktrees
+
+- Create every worktree as a sibling of the repository, never inside it: `../hm-<task>`, not `.claude/worktrees/<task>` or any other subdirectory.
+- A worktree under the repository root carries its own `BUILD.bazel` files, so `//...` expands into it and the build fails on targets that belong to another checkout. `.bazelignore` excludes `.claude` for this reason; a worktree anywhere else under the root would still break `bazelisk build //...`.
+- Remove a worktree once its branch has merged, and keep the branch name task-focused on the same terms as any other branch.
+
 ### Nested repositories and submodules
 
 - Treat every nested Git repository as an independent repository with its own commit and remote.
