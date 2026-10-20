@@ -7,10 +7,18 @@ sentinel skip detection, including when explicitly reopening the selector.
 A missed detection leaves an empty editor. Model failures are reported in the
 log and editor while manual selection remains available.
 
-Inference uses CUDA when available and retries once on CPU after GPU OOM,
-releasing failed GPU objects before retrying. With no CUDA device it uses CPU
-directly. Other errors do not trigger a CPU retry. No model is retained for
-frame processing, and saved-polygon runs never load or download it.
+Inference uses PyTorch's GPU backend (CUDA or ROCm) when available and retries
+once on CPU after GPU OOM, releasing failed GPU objects before retrying. With
+no GPU device it uses CPU directly. Other errors do not trigger a CPU retry.
+No model is retained for frame processing, and saved-polygon runs never load
+or download it.
+
+To try the automatic draft, run `./hm_run.sh --game-id=<game-id> -t=5` for a
+game without a saved scoreboard polygon. The normal setup flow opens the
+selector; review the suggested corners and save. The first use downloads
+the model. To open just the editor on an existing `s.png`, run
+`PYTHONPATH=. python -m hmlib.scoreboard.selector --game-id=<game-id>`.
+This preserves a saved polygon as the initial draft instead of redetecting it.
 
 The portable TorchScript model downloads on demand into
 `~/.cache/hstream/models/scoreboard-mask2former-r50-2cd82b9e3f1d87d1.pt`, with

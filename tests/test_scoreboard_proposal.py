@@ -18,7 +18,15 @@ def should_use_cpu_when_cuda_is_unavailable(monkeypatch):
 
 @pytest.mark.parametrize(
     "error",
-    [torch.cuda.OutOfMemoryError("allocation failed"), torch.jit.Error("CUDA out of memory")],
+    [
+        torch.cuda.OutOfMemoryError("allocation failed"),
+        torch.jit.Error("CUDA out of memory"),
+        torch.jit.Error("CUDA error: out of memory"),
+        torch.jit.Error("cudaErrorMemoryAllocation"),
+        torch.jit.Error("HIP out of memory"),
+        torch.jit.Error("HIP error: out of memory"),
+        torch.jit.Error("hipErrorOutOfMemory"),
+    ],
 )
 def should_release_gpu_and_retry_once_on_cpu_after_oom(monkeypatch, error, caplog):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)

@@ -88,7 +88,9 @@ def infer(path: Path, tensor: torch.Tensor) -> tuple[np.ndarray, np.ndarray]:
     except (RuntimeError, torch.jit.Error) as error:
         # TorchScript wraps device errors, including OOM, in a generic error.
         if not isinstance(error, torch.cuda.OutOfMemoryError) and not re.search(
-            r"CUDA out of memory|CUDA error: out of memory|cudaErrorMemoryAllocation", str(error)
+            r"(?:CUDA|HIP) out of memory|(?:CUDA|HIP) error: out of memory|"
+            r"cudaErrorMemoryAllocation|hipErrorOutOfMemory",
+            str(error),
         ):
             raise
         logger.warning("Scoreboard GPU memory exhausted; retrying once on CPU")
