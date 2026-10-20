@@ -100,6 +100,17 @@ hstream_ui:
     # Initial checkbox state; capture disables seeking for the run.
     enabled: true
 
+# Native player pose cadence and display defaults. Enabling/drawing pose remains
+# an explicit choice; these preferences do not enable the model.
+pipeline:
+  player-analytics:
+    pose:
+      # Updates per second per player, or "fps" to infer on every video frame.
+      # The shared per-frame model-sample budget still applies.
+      rate-hz: 10
+      # Follow the tracked box between observations for at most 250 ms.
+      continuous-drawing: true
+
 apply_camera:
   crop_play_box: false
   crop_output_image: true
