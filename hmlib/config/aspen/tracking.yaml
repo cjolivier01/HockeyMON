@@ -136,7 +136,8 @@ aspen:
     detector:
       class: hmlib.aspen.plugins.detector_plugin.DetectorInferencePlugin
       depends: [detector_join]
-      params: {}
+      params:
+        max_referees: GLOBAL.detector.max_referees
 
     save_detections:
       class: hmlib.aspen.plugins.save_plugins.SaveDetectionsPlugin
@@ -176,9 +177,32 @@ aspen:
         #   reid_feature_dim: 256
         #   reid_weight: 0.5
 
+    # Sits between the tracker and the camera chain so `team_results` is in the
+    # context by the time `overlays` runs; a sibling branch off `tracker` would
+    # race the overlay under the threaded graph. The trunk itself only reads
+    # tracks -- it publishes labels and mutates nothing upstream.
+    #
+    # This graph has no pose trunk, so torso crops come from the bbox
+    # heuristic rather than shoulder/hip keypoints, which is the weaker path.
+    team_affiliation:
+      class: hmlib.aspen.plugins.team_plugin.TeamAffiliationPlugin
+      depends: [tracker]
+      enabled: GLOBAL.team.enabled
+      params:
+        backend: GLOBAL.team.backend
+        warmup_samples: GLOBAL.team.warmup_samples
+        refit_interval: GLOBAL.team.refit_interval
+        min_margin: GLOBAL.team.min_margin
+        frame_stride: GLOBAL.team.frame_stride
+        min_track_height: GLOBAL.team.min_track_height
+        home_is_dark: GLOBAL.game.home_is_dark
+        prtreid_weights: GLOBAL.team.prtreid.weights
+        prtreid_backbone_weights: GLOBAL.team.prtreid.backbone_weights
+        prtreid_device: GLOBAL.team.prtreid.device
+
     save_tracking:
       class: hmlib.aspen.plugins.save_plugins.SaveTrackingPlugin
-      depends: [tracker]
+      depends: [team_affiliation]
       enabled: true
       params: {}
 
@@ -193,7 +217,7 @@ aspen:
     # setting controller: transformer|gpt|drivegpt and model_path to your checkpoint.
     camera_controller:
       class: hmlib.aspen.plugins.camera_controller_plugin.CameraControllerPlugin
-      depends: [tracker]
+      depends: [team_affiliation]
       params:
         controller: GLOBAL.rink.camera.controller
         model_path: GLOBAL.rink.camera.camera_model
@@ -225,6 +249,8 @@ aspen:
       params:
         plot_pose: GLOBAL.plot.plot_pose
         plot_jersey_numbers: GLOBAL.plot.plot_jersey_numbers
+        plot_teams: GLOBAL.plot.plot_teams
+        plot_referees: GLOBAL.plot.plot_referees
         plot_tracking: GLOBAL.plot.plot_individual_player_tracking
         plot_all_detections: GLOBAL.plot.plot_all_detections
         plot_trajectories: GLOBAL.plot.plot_trajectories

@@ -464,6 +464,115 @@ py_test(
     ],
 )
 
+# Team affiliation. These are pytest_test rather than py_test so pyproject's
+# `should_*` collection rule applies; under py_test the module is merely
+# imported and every assertion goes uncollected.
+pytest_test(
+    name="test_team_features",
+    srcs=["test_team_features.py"],
+    args=[
+        "-c",
+        "$(location //:pyproject.toml)",
+    ],
+    deps=[
+        "//hmlib:hmlib.lib",
+        requirement("pytest"),
+    ],
+)
+
+pytest_test(
+    name="test_team_clusterer",
+    srcs=["test_team_clusterer.py"],
+    args=[
+        "-c",
+        "$(location //:pyproject.toml)",
+    ],
+    deps=[
+        "//hmlib:hmlib.lib",
+        requirement("pytest"),
+    ],
+)
+
+pytest_test(
+    name="test_team_tracker",
+    srcs=["test_team_tracker.py"],
+    args=[
+        "-c",
+        "$(location //:pyproject.toml)",
+    ],
+    deps=[
+        "//hmlib:hmlib.lib",
+        requirement("pytest"),
+    ],
+)
+
+pytest_test(
+    name="test_team_plugin",
+    srcs=["test_team_plugin.py"],
+    args=[
+        "-c",
+        "$(location //:pyproject.toml)",
+    ],
+    data=["aspen_plugin_harness.py"],
+    deps=[
+        "//hmlib:hmlib.lib",
+        requirement("pytest"),
+    ],
+)
+
+pytest_test(
+    name="test_referee_cap",
+    srcs=["test_referee_cap.py"],
+    args=[
+        "-c",
+        "$(location //:pyproject.toml)",
+    ],
+    deps=[
+        "//hmlib:hmlib.lib",
+        requirement("pytest"),
+    ],
+)
+
+pytest_test(
+    name="test_detector_degenerate_boxes",
+    srcs=["test_detector_degenerate_boxes.py"],
+    args=[
+        "-c",
+        "$(location //:pyproject.toml)",
+    ],
+    deps=[
+        "//hmlib:hmlib.lib",
+        requirement("pytest"),
+    ],
+)
+
+pytest_test(
+    name="test_referee_overlay",
+    srcs=["test_referee_overlay.py"],
+    args=[
+        "-c",
+        "$(location //:pyproject.toml)",
+    ],
+    data=["aspen_plugin_harness.py"],
+    deps=[
+        "//hmlib:hmlib.lib",
+        requirement("pytest"),
+    ],
+)
+
+pytest_test(
+    name="test_team_graph",
+    srcs=["test_team_graph.py"],
+    args=[
+        "-c",
+        "$(location //:pyproject.toml)",
+    ],
+    deps=[
+        "//hmlib:hmlib.lib",
+        requirement("pytest"),
+    ],
+)
+
 py_test(
     name="test_jersey_pose_plugin_rois",
     srcs=["test_jersey_pose_plugin_rois.py"],

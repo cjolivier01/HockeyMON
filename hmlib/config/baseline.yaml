@@ -34,6 +34,13 @@ plot:
   plot_trajectories: false
   plot_speed: false
   plot_jersey_numbers: false
+  # Home/away (or dark/light) labels under each tracked player. Drawn from the
+  # team feature's output in both applications; see the `team` block below.
+  plot_teams: false
+  # Badge match officials in the tracking overlay. Only has an effect with a
+  # detector whose head distinguishes them (--detector-model hockeyref); on a
+  # single-class person detector there is no referee index and this is inert.
+  plot_referees: true
   plot_actions: false
   plot_pose: false
   plot_ice_mask: false
@@ -498,6 +505,103 @@ stitching:
 play_tracker:
   no_wide_start: true
 
+#
+# Detector output constraints. NOT IMPLEMENTED IN HSTREAM YET: no native code
+# reads these keys; HockeyMON's detector trunk is the only consumer. Listed in
+# both copies of this file to keep the two synchronized.
+#
+detector:
+  # Most officials that can be on the ice at once. The detector scores every
+  # box independently and has no way to know this, so it will happily report
+  # more; the surplus are relabelled as players, lowest-scoring first.
+  #
+  # Three suits a one-referee-plus-two-linesmen system. A four-official system
+  # (two referees, two linesmen) needs 4, and a two-official youth game can use
+  # 2 to be stricter. Only applies to a detector whose head distinguishes
+  # officials (--detector-model hockeyref); otherwise inert.
+  max_referees: 3
+
+#
+# Team affiliation.
+#
+# Team identity is relative to the game being watched, so there is no model
+# that outputs "home" for an arbitrary crop. Both applications take a torso
+# crop per track, split the game's players into two appearance groups with a
+# two-means fit, and `game.home_is_dark` names those groups.
+#
+# `enabled`, `warmup_samples`, `refit_interval` and `min_margin` mean the same
+# thing to both and are read by both. The rest belong to one side: `backend`,
+# `frame_stride`, `min_track_height` and `prtreid` are HockeyMON's, `rate_hz`
+# and `model` are HStream's, and each application ignores the other's as
+# elsewhere in this file.
+#
+team:
+  # Off by default. Turning it on with backend `prtreid` requires that package
+  # to be installed; it is deliberately not a silent fallback to `lab`.
+  enabled: false
+
+  # `prtreid` is the SoccerNet Game State Reconstruction baseline. Multi-task
+  # training against team labels made its embedding team-discriminative, and
+  # that is what transfers to hockey: on a real clip a two-means split of the
+  # embedding separated the two squads 1004/1289 with 78% of crops above the
+  # assignment margin. Weights download from Zenodo on first use.
+  # `lab` is the dependency-free alternative: mean CIELAB colour of the torso.
+  # It is weaker but needs no extra install.
+  backend: prtreid
+
+  # Crops to collect before the first two-means fit. Fitting on a handful taken
+  # from one end of the rink yields two centroids that both describe the same
+  # team.
+  warmup_samples: 200
+  # Crops between fits before the centroids are recomputed, so lighting drift
+  # across a period is tracked rather than averaged against first-period crops.
+  refit_interval: 600
+  # Normalised centroid-distance gap below which a crop is left UNKNOWN rather
+  # than assigned on a coin flip. Goalies and partial crops land here.
+  min_margin: 0.12
+  # Process every Nth frame. Affiliation changes far more slowly than pose.
+  frame_stride: 2
+  # Tracks shorter than this are mostly ice once cropped to the torso. A 20px
+  # box leaves a 7x5 band to upscale; a few pixels of flat colour tell the
+  # model nothing and still occupy the fit.
+  min_track_height: 60
+
+  # HStream only. Per-track inference rate, not a frame rate: affiliation is
+  # static, so a low rate costs no accuracy. A track also leaves the schedule
+  # outright once its vote commits, which is what makes the feature cheap
+  # enough to leave on.
+  rate_hz: 2
+  # HStream only. NVIDIA TAO ReIdentificationNet. Scored 89.5% against
+  # PRTReid's 86.8% on the same hand-labelled hockey crops and ran 1.34x
+  # faster, so the native side ships the generic re-identification embedding
+  # even though HockeyMON's `backend` above defaults to the team-trained one.
+  model: reidentificationnet-deployable-v1.2
+  # HStream only. Mean CIELAB L the two groups must differ by before they are
+  # named dark and light. The chest band takes in ice, boards and other
+  # players, so per-crop lightness is noisy; under about this much true
+  # separation the ranking is a coin flip that lands differently at every
+  # refit, and every badge on screen would swap HOME for AWAY together.
+  # Unranked is reported as no badge, which is honest rather than wrong.
+  min_lightness_gap: 6.0
+  # HStream only. Smallest share of the reservoir either group may hold. Two
+  # squads split roughly evenly; a lopsided split means the fit separated
+  # something else, most often the officials from everyone else when the two
+  # sweaters are close in appearance. Refusing to name that is better than
+  # badging every skater the same and the referees the opposite.
+  min_cluster_share: 0.25
+  # HStream only. Margin-weighted evidence a group must accumulate before a
+  # track's side is called, and the factor by which a challenger must beat the
+  # incumbent to take it afterwards. Roughly two confident reads to commit, so
+  # one stray crop cannot name a skater.
+  acquisition_evidence: 1.0
+  switch_hysteresis: 1.35
+
+  prtreid:
+    # Empty means "download to the torch hub cache on first use".
+    weights: ""
+    backbone_weights: ""
+    device: cuda
+
 ice_boundaries:
   raise_bbox_center_by_height_ratio: -0.1
   lower_bbox_bottom_by_height_ratio: 0.1
@@ -680,6 +784,16 @@ game:
   rink: null
   home: null
   away: null
+
+  # Which sweater the home side wore for this game. Team affiliation is a
+  # per-game appearance split, so nothing can infer "home" from pixels: the
+  # clusterer ranks its two groups dark-vs-light and this bit names them.
+  # `true` means home wore dark, `false` means home wore white/light. Leaving
+  # it null is not a failure -- the overlay then reads DARK/LIGHT, which is
+  # correct but unnamed, instead of guessing. League conventions differ
+  # (NHL and most amateur leagues disagree), so this is per game rather
+  # than a built-in rule.
+  home_is_dark: null
 
   videos:
     left: null

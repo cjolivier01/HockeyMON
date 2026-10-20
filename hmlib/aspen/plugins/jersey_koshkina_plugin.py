@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from mmengine.structures import InstanceData
 
 from hmlib.aspen.plugins.base import Plugin
+from hmlib.bbox.torso import bbox_torso_fallback, torso_roi_from_pose
 from hmlib.jersey.number_classifier import TrackJerseyInfo
 from hmlib.log import logger
 from hmlib.tracking_utils.utils import get_track_mask
@@ -324,33 +325,8 @@ class KoshkinaJerseyNumberPlugin(Plugin):
     def _torso_roi_from_pose(
         kpts: torch.Tensor, kps: Optional[torch.Tensor], img_w: int, img_h: int
     ) -> Optional[Tuple[int, int, int, int]]:
-        # Use COCO indices: 5=LS, 6=RS, 11=LH, 12=RH
-        try:
-            px = kpts.clone().detach()
-            scores = None
-            if kps is not None and torch.is_tensor(kps) and kps.shape[0] == kpts.shape[0]:
-                scores = kps
-            idxs = [6, 5, 11, 12]
-            pts: List[Tuple[float, float, float]] = []
-            for i in idxs:
-                x = float(px[i, 0].item())
-                y = float(px[i, 1].item())
-                s = float(scores[i].item()) if scores is not None else 1.0
-                pts.append((x, y, s))
-            # Confidence gate
-            if any(p[2] < _CONFIDENCE_THRESHOLD for p in pts):
-                return None
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            x_min = int(max(0, min(xs) - _PADDING))
-            x_max = int(min(img_w - 1, max(xs) + _PADDING))
-            y_min = int(max(0, min(ys) - _PADDING))
-            y_max = int(min(img_h - 1, max(ys)))
-            if x_max <= x_min or y_max <= y_min:
-                return None
-            return (x_min, y_min, x_max, y_max)
-        except Exception:
-            return None
+        # Shared with team affiliation so the two pipelines crop identically.
+        return torso_roi_from_pose(kpts=kpts, kps=kps, img_w=img_w, img_h=img_h)
 
     def _is_side_view_pose(
         self, kpts: torch.Tensor, kps: Optional[torch.Tensor], bbox_w: float
@@ -445,17 +421,8 @@ class KoshkinaJerseyNumberPlugin(Plugin):
     def _bbox_torso_fallback(
         box: torch.Tensor, img_w: int, img_h: int
     ) -> Tuple[int, int, int, int]:
-        # Fallback: heuristic torso crop from bbox (top->bottom and slight side margin)
-        x1, y1, x2, y2 = [int(v) for v in box.tolist()]
-        w = x2 - x1
-        # Keep middle vertical band [25%, 95%] and shrink sides by 20%
-        new_x1 = max(0, x1 + int(0.2 * w))
-        new_x2 = min(img_w - 1, x2 - int(0.2 * w))
-        new_y1 = max(0, y1 + int(0.25 * (y2 - y1)))
-        new_y2 = min(img_h - 1, y1 + int(0.95 * (y2 - y1)))
-        if new_x2 <= new_x1 or new_y2 <= new_y1:
-            return (x1, y1, x2, y2)
-        return (new_x1, new_y1, new_x2, new_y2)
+        # Shared with team affiliation so the two pipelines crop identically.
+        return bbox_torso_fallback(box=box, img_w=img_w, img_h=img_h)
 
     # ----------------------- STR helpers -----------------------
     @staticmethod
@@ -593,9 +560,9 @@ class KoshkinaJerseyNumberPlugin(Plugin):
             frame_img = original_images[frame_index]  # (C,H,W)
 
             # Build ROIs per track
-            rois: List[
-                Tuple[int, Tuple[int, int, int, int], float]
-            ] = []  # (track index, (x1,y1,x2,y2), vote_scale)
+            rois: List[Tuple[int, Tuple[int, int, int, int], float]] = (
+                []
+            )  # (track index, (x1,y1,x2,y2), vote_scale)
             if pose_inst is not None and hasattr(pose_inst, "keypoints"):
                 kpts_all = pose_inst.keypoints  # (N,K,2)
                 kps_all = getattr(pose_inst, "keypoint_scores", None)

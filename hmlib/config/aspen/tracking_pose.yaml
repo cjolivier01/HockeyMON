@@ -140,7 +140,8 @@ aspen:
     detector:
       class: hmlib.aspen.plugins.detector_plugin.DetectorInferencePlugin
       depends: [detector_join]
-      params: {}
+      params:
+        max_referees: GLOBAL.detector.max_referees
 
     save_detections:
       class: hmlib.aspen.plugins.save_plugins.SaveDetectionsPlugin
@@ -262,6 +263,8 @@ aspen:
       params:
         plot_pose: GLOBAL.plot.plot_pose
         plot_jersey_numbers: GLOBAL.plot.plot_jersey_numbers
+        plot_teams: GLOBAL.plot.plot_teams
+        plot_referees: GLOBAL.plot.plot_referees
         plot_tracking: GLOBAL.plot.plot_individual_player_tracking
         plot_all_detections: GLOBAL.plot.plot_all_detections
         plot_trajectories: GLOBAL.plot.plot_trajectories

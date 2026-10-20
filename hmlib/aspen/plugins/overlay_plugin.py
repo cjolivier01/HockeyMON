@@ -8,12 +8,18 @@ import torch
 from hmlib.builder import HM
 from hmlib.jersey.jersey_tracker import JerseyTracker
 from hmlib.log import logger
+from hmlib.team.team_tracker import TeamLabelRenderer
 from hmlib.tracking_utils import visualization as vis
 from hmlib.tracking_utils.utils import get_track_mask
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor, wrap_tensor
 from hmlib.utils.image import is_channels_last, make_channels_last
+from hmlib.vis.labels import draw_label_box
 
 from .base import Plugin
+
+#: BGR badge colour for officials. Amber, so it reads as "not a skater"
+#: against both the team palette and the per-id tracking colours.
+_REFEREE_COLOR = (0, 200, 240)
 
 
 def _batch_tlbrs_to_tlwhs(tlbrs: torch.Tensor) -> torch.Tensor:
@@ -66,6 +72,9 @@ class OverlayPlugin(Plugin):
         plot_pose: bool = False,
         pose_kpt_thr: Optional[float] = None,
         plot_jersey_numbers: bool = False,
+        plot_teams: bool = False,
+        plot_referees: bool = True,
+        referee_label: int | None = None,
         plot_tracking: bool = False,
         plot_all_detections: Optional[float] = None,
         plot_trajectories: bool = False,
@@ -78,6 +87,9 @@ class OverlayPlugin(Plugin):
         self._plot_pose = bool(plot_pose)
         self._pose_kpt_thr = pose_kpt_thr
         self._plot_jersey_numbers = bool(plot_jersey_numbers)
+        self._plot_teams = bool(plot_teams)
+        self._plot_referees = bool(plot_referees)
+        self._referee_label = None if referee_label is None else int(referee_label)
         self._plot_tracking = bool(plot_tracking)
         self._plot_all_detections = plot_all_detections
         self._plot_trajectories = bool(plot_trajectories)
@@ -87,6 +99,7 @@ class OverlayPlugin(Plugin):
         self._print_every = max(0, int(print_every))
         self._printed_once = False
         self._jersey_tracker = JerseyTracker(show=bool(plot_jersey_numbers))
+        self._team_renderer = TeamLabelRenderer()
         self._traj: Dict[int, list[tuple[int, int]]] = {}
 
     def _maybe_print_available(self, context: Dict[str, Any]) -> None:
@@ -245,10 +258,14 @@ class OverlayPlugin(Plugin):
             if bboxes_tlbr.numel() == 0:
                 continue
 
+            labels = self._track_labels(track_inst, ids)
+
             track_mask = get_track_mask(track_inst)
             if isinstance(track_mask, torch.Tensor):
                 ids = ids[track_mask]
                 bboxes_tlbr = bboxes_tlbr[track_mask]
+                if labels is not None:
+                    labels = labels[track_mask.to(device=labels.device)]
             if ids.numel() == 0:
                 continue
 
@@ -277,9 +294,58 @@ class OverlayPlugin(Plugin):
                     ignored_color=(0, 0, 0),
                     draw_tracking_circles=self._draw_tracking_circles,
                 )
+                img_f = self._draw_referees(img_f, ids, bboxes_tlwh, labels)
                 self._assign_frame(img, frame_index, img_f)
 
         return img
+
+    def _track_labels(self, track_inst: Any, ids: torch.Tensor) -> torch.Tensor | None:
+        """Per-track detector class index, or None when the head is single-class.
+
+        Only the `hockeyref` detector profile produces a second class, so on
+        every other profile this is absent and referee drawing is a no-op.
+        """
+        if self._referee_label is None:
+            return None
+        labels = unwrap_tensor(getattr(track_inst, "labels", None))
+        if not isinstance(labels, torch.Tensor) or labels.numel() != ids.numel():
+            return None
+        return labels.reshape(-1)
+
+    def _draw_referees(
+        self,
+        img_f: torch.Tensor,
+        ids: torch.Tensor,
+        bboxes_tlwh: torch.Tensor,
+        labels: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Badge officials so they read as distinct from players at a glance.
+
+        `vis.plot_tracking` has already drawn a per-id coloured box for every
+        track; this overprints a REF label on the officials rather than
+        recolouring, so the track identity stays readable.
+        """
+        if labels is None or not self._plot_referees:
+            return img_f
+        is_referee = labels == int(self._referee_label)
+        if not bool(is_referee.any()):
+            return img_f
+
+        img_w = int(img_f.shape[-1] if not is_channels_last(img_f) else img_f.shape[1])
+        font_scale = max(0.6, float(img_w) / 1800.0)
+        for index in torch.nonzero(is_referee).reshape(-1).tolist():
+            x1, y1, w, _ = bboxes_tlwh[index]
+            img_f = draw_label_box(
+                image=img_f,
+                text="REF",
+                center_x=int(float(x1) + float(w) * 0.5),
+                bottom_y=int(float(y1)) - int(font_scale * 4),
+                font_scale=font_scale,
+                fg=(255, 255, 255),
+                bg=_REFEREE_COLOR,
+                bg_alpha=215,
+            )
+        return img_f
 
     def _draw_pose(
         self, img: torch.Tensor, pose_results: Any, pose_inferencer: Any
@@ -394,7 +460,61 @@ class OverlayPlugin(Plugin):
                 continue
         return img
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def _draw_teams(self, img: torch.Tensor, data: Dict[str, Any]) -> torch.Tensor:
+        """Render settled home/away labels published by the team trunk.
+
+        The labels are already aggregated upstream, so this only smooths the
+        anchor point and draws. Referee tracks are normally absent by this point
+        -- the team trunk removes them from ``track_mask`` -- so nothing here
+        needs to filter them again.
+        """
+        if not self._plot_teams:
+            return img
+        team_results = data.get("team_results")
+        if not team_results:
+            return img
+        track_samples = data.get("data_samples")
+        if track_samples is None:
+            return img
+        if isinstance(track_samples, list):
+            if not track_samples:
+                return img
+            track_samples = track_samples[0]
+
+        vds = getattr(track_samples, "video_data_samples", None)
+        if vds is None:
+            return img
+
+        frame_count = min(img.shape[0], len(vds), len(team_results))
+        for frame_index in range(frame_count):
+            vs = vds[frame_index]
+            track_inst = getattr(vs, "pred_track_instances", None)
+            if track_inst is None:
+                continue
+            ids = unwrap_tensor(track_inst.instances_id)
+            bboxes_tlbr = unwrap_tensor(track_inst.bboxes)
+            if not isinstance(ids, torch.Tensor) or not isinstance(bboxes_tlbr, torch.Tensor):
+                continue
+            if bboxes_tlbr.numel() == 0:
+                continue
+
+            track_mask = get_track_mask(track_inst)
+            if isinstance(track_mask, torch.Tensor):
+                ids = ids[track_mask.to(device=ids.device)]
+                bboxes_tlbr = bboxes_tlbr[track_mask.to(device=bboxes_tlbr.device)]
+            if ids.numel() == 0:
+                continue
+
+            self._team_renderer.update(team_results[frame_index])
+            img_frame = self._team_renderer.draw(
+                image=img[frame_index],
+                tracking_ids=ids,
+                bboxes=_batch_tlbrs_to_tlwhs(bboxes_tlbr),
+            )
+            self._assign_frame(img, frame_index, img_frame)
+        return img
+
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
@@ -410,6 +530,7 @@ class OverlayPlugin(Plugin):
         should_render = (
             self._plot_pose
             or self._plot_jersey_numbers
+            or self._plot_teams
             or self._plot_tracking
             or (self._plot_all_detections is not None)
             or self._plot_trajectories
@@ -430,14 +551,16 @@ class OverlayPlugin(Plugin):
                 img=img, pose_results=pose_results, pose_inferencer=pose_inferencer
             )
 
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "data_samples": context.get("data_samples"),
             "jersey_results": context.get("jersey_results"),
+            "team_results": context.get("team_results"),
             "frame_ids": context.get("frame_ids"),
             "frame_id": context.get("frame_id"),
         }
         img = self._draw_tracking_and_dets(img=img, data=payload)
         img = self._draw_jerseys(img=img, data=payload)
+        img = self._draw_teams(img=img, data=payload)
 
         # Preserve channels-last tensor for downstream ApplyCamera/VideoOutput.
         img = make_channels_last(img)
@@ -450,6 +573,7 @@ class OverlayPlugin(Plugin):
             "data_samples",
             "pose_results",
             "jersey_results",
+            "team_results",
             "frame_ids",
             "frame_id",
             "pose_inferencer",

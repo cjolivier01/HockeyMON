@@ -142,9 +142,29 @@ aspen:
       depends: [tracker_join]
       params: {}
 
+    # Between the tracker and the trunks that render, so `team_results` is in
+    # the context before `overlays` runs rather than racing it. The trunk only
+    # reads tracks and publishes labels.
+    # Pose is available in this graph, so torso crops are shoulder/hip guided.
+    team_affiliation:
+      class: hmlib.aspen.plugins.team_plugin.TeamAffiliationPlugin
+      depends: [tracker]
+      enabled: GLOBAL.team.enabled
+      params:
+        backend: GLOBAL.team.backend
+        warmup_samples: GLOBAL.team.warmup_samples
+        refit_interval: GLOBAL.team.refit_interval
+        min_margin: GLOBAL.team.min_margin
+        frame_stride: GLOBAL.team.frame_stride
+        min_track_height: GLOBAL.team.min_track_height
+        home_is_dark: GLOBAL.game.home_is_dark
+        prtreid_weights: GLOBAL.team.prtreid.weights
+        prtreid_backbone_weights: GLOBAL.team.prtreid.backbone_weights
+        prtreid_device: GLOBAL.team.prtreid.device
+
     jersey_numbers:
       class: hmlib.aspen.plugins.jersey_koshkina_plugin.KoshkinaJerseyNumberPlugin
-      depends: [tracker]
+      depends: [team_affiliation]
       params:
         # ROI selection: bbox (default), pose, or sam
         roi_mode: pose
@@ -210,6 +230,8 @@ aspen:
       params:
         plot_pose: GLOBAL.plot.plot_pose
         plot_jersey_numbers: GLOBAL.plot.plot_jersey_numbers
+        plot_teams: GLOBAL.plot.plot_teams
+        plot_referees: GLOBAL.plot.plot_referees
         plot_tracking: GLOBAL.plot.plot_individual_player_tracking
         plot_all_detections: GLOBAL.plot.plot_all_detections
         plot_trajectories: GLOBAL.plot.plot_trajectories

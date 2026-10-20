@@ -4,11 +4,66 @@ from __future__ import annotations
 
 import copy
 import hashlib
-from pathlib import Path
 import re
+from pathlib import Path
+
+from hmlib.log import get_logger
+
+logger = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
-PROFILES = ("deployed", "trained", "distilled")
+PROFILES = ("deployed", "trained", "distilled", "hockeyref")
+
+#: Published `hockeyref` weights, pinned by digest.
+#:
+#: Unlike the other trained profiles this one does not look in
+#: `openmm/work_dirs/`: those weights only exist on the machine that ran the
+#: fine-tune, so a profile resolved from them is unusable anywhere else. The
+#: published file is the same checkpoint with the optimizer, EMA copy and
+#: training logs removed -- 104 MB rather than 210 MB, and byte-identical in
+#: the only part inference reads. The digest is verified on download and on
+#: every reuse of the cached copy, because a truncated download is otherwise
+#: indistinguishable from a working one until the weights load as noise.
+HOCKEYREF_WEIGHTS_URL = (
+    "https://github.com/cjolivier01/HockeyMONStream/releases/download/pretrained-assets-v1/"
+    "hm_hockeyref_yolov8_m_1984_736-1431d6e713364e14.pth"
+)
+HOCKEYREF_WEIGHTS_SHA256 = "1431d6e713364e14d7f2330485ac9a4d5d607c2982a35267fd8a241a2db4e74d"
+
+#: Class index -> name for each profile's detector head. Everything except
+#: `hockeyref` is a single-class person detector; `hockeyref` splits that into
+#: player and referee, which is what lets the overlay tell them apart.
+PROFILE_CLASSES = {
+    "deployed": ("person",),
+    "trained": ("person",),
+    "distilled": ("person",),
+    "hockeyref": ("player", "referee"),
+}
+
+#: Detector class index that denotes a match official, per profile. None means
+#: the profile cannot distinguish one.
+PROFILE_REFEREE_LABEL = {
+    "deployed": None,
+    "trained": None,
+    "distilled": None,
+    "hockeyref": 1,
+}
+
+#: Input size a profile must be served at, when it is sensitive to one. None
+#: leaves the graph's own `HmResize` alone.
+#:
+#: `hockeyref` pins 1984x736 because that is what it was fine-tuned at and the
+#: player/referee split does not survive the graph's faster default. Measured
+#: on one tv-14-2-p1 frame: at 1984x736 the model finds 9 players and the 2
+#: real officials; at the graph's 1632x608 the same weights report 7 players
+#: and 4 officials, badging navy skaters as referees. Stripes are fine,
+#: high-frequency texture -- an 18% smaller input is where that signal goes.
+PROFILE_INPUT_SCALE = {
+    "deployed": None,
+    "trained": None,
+    "distilled": None,
+    "hockeyref": (1984, 736),
+}
 
 
 def add_detector_arguments(parser):
@@ -48,8 +103,48 @@ def _local_checkpoint(path: str | Path) -> str:
     return str(candidate.resolve())
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download_pinned_checkpoint(url: str, sha256: str, filename: str) -> str:
+    """Return a cached copy of `url`, downloading it once and verifying it.
+
+    A cached file whose digest does not match is removed and fetched again: a
+    download interrupted partway leaves a plausible-looking file behind, and
+    silently loading half a checkpoint produces a model that detects nothing
+    rather than an error anyone can act on.
+    """
+    import torch
+
+    target = Path(torch.hub.get_dir()) / "checkpoints" / filename
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.is_file():
+        if _file_sha256(target) == sha256:
+            return str(target)
+        logger.warning("Cached detector checkpoint %s failed its digest; downloading again", target)
+        target.unlink()
+    logger.info("Downloading detector checkpoint %s -> %s", url, target)
+    torch.hub.download_url_to_file(url, str(target), progress=True)
+    actual = _file_sha256(target)
+    if actual != sha256:
+        target.unlink(missing_ok=True)
+        raise ValueError(f"Detector checkpoint {url} has digest {actual}, expected {sha256}")
+    return str(target)
+
+
 def default_checkpoint(profile: str) -> str:
     """Pick a validated checkpoint, never silently substitute the last epoch."""
+    if profile == "hockeyref":
+        return download_pinned_checkpoint(
+            HOCKEYREF_WEIGHTS_URL,
+            HOCKEYREF_WEIGHTS_SHA256,
+            Path(HOCKEYREF_WEIGHTS_URL).name,
+        )
     if profile == "trained":
         directory = ROOT / "openmm/work_dirs/hm_crowdhuman_yolov8_m_1408_544"
         paths = list(directory.glob("best_coco_bbox_mAP_epoch_*.pth"))
@@ -93,8 +188,27 @@ def resolve_detector(profile: str, deployed_params: dict, checkpoint: str | None
             encoding="utf-8",
         ) as stream:
             model = yaml.safe_load(stream)
-        model["bbox_head"]["head_module"]["num_classes"] = 1
-        model["train_cfg"]["assigner"]["num_classes"] = 1
+        # `hockeyref` is the one profile with a wider head: player and referee.
+        head_classes = len(PROFILE_CLASSES[profile])
+        model["bbox_head"]["head_module"]["num_classes"] = head_classes
+        model["train_cfg"]["assigner"]["num_classes"] = head_classes
+        if head_classes > 1:
+            # One skater is either a player or an official, never both, so each
+            # box must take its argmax class. `multi_label` lets a single box
+            # emit a detection per class above threshold -- harmless on the
+            # 80-class COCO head where only `person` ever fired, but with two
+            # person-like classes it produces a duplicate box for the same
+            # skater under both labels, and the tracker then badges whichever
+            # duplicate it happened to keep.
+            test_cfg = model.setdefault("test_cfg", {})
+            test_cfg["multi_label"] = False
+            # Class-aware NMS still lets two *different* anchors claim the same
+            # skater under different labels, which `multi_label` alone does not
+            # catch. Suppressing across classes removes that last duplicate;
+            # the cost is that a player and an official overlapping above the
+            # 0.7 IoU threshold collapse to one box, which is rarer than the
+            # ghost tracks it prevents.
+            test_cfg.setdefault("nms", {})["class_agnostic"] = True
         checkpoint = checkpoint or default_checkpoint(profile)
         if profile == "distilled":
             model["backbone"].update(
@@ -135,6 +249,48 @@ def detector_identity(spec: dict) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def _apply_input_scale(game_config: dict, profile: str) -> None:
+    """Serve a profile at the input size it was trained for.
+
+    The graph's `HmResize` is a throughput choice, not a property of any one
+    model, so a profile that is sensitive to input size has to say so and have
+    it enforced here. Silently serving a detector below its training
+    resolution degrades it in ways that look like a bad model rather than a
+    bad config.
+    """
+    scale = PROFILE_INPUT_SCALE.get(profile)
+    if scale is None:
+        return
+    pipeline = (game_config.get("aspen") or {}).get("inference_pipeline")
+    if not isinstance(pipeline, list):
+        # A malformed graph, not a caller passing the wrong type: the message is
+        # what the operator has to act on, so ValueError is the right class.
+        raise ValueError(  # noqa: TRY004
+            f"Detector profile {profile!r} must be served at {scale[0]}x{scale[1]}, "
+            "but the graph has no aspen.inference_pipeline to pin"
+        )
+    resizes = [t for t in pipeline if isinstance(t, dict) and t.get("type") == "HmResize"]
+    if not resizes:
+        raise ValueError(
+            f"Detector profile {profile!r} must be served at {scale[0]}x{scale[1]}, "
+            "but the graph's inference_pipeline has no HmResize stage"
+        )
+    for transform in resizes:
+        transform["img_scale"] = list(scale)
+
+    # HmPad is paired with the resize and must grow with it, or padding to the
+    # old smaller canvas asserts. Its `size` is H-W ordered, the reverse of
+    # img_scale's W-H.
+    width, height = scale
+    for transform in pipeline:
+        if (
+            isinstance(transform, dict)
+            and transform.get("type") == "HmPad"
+            and transform.get("size") is not None
+        ):
+            transform["size"] = [height, width]
+
+
 def configure_detector_selection(args, game_config: dict) -> None:
     """Apply CLI selection after backend overrides, before Aspen is built."""
     if not (args.detector_model or args.detector or args.compare_detectors):
@@ -163,6 +319,29 @@ def configure_detector_selection(args, game_config: dict) -> None:
     params.pop("checkpoint", None)
     params.pop("checkpoint_prefix", None)
     params.update(spec)
+
+    # Tell the overlay which detector class index means "official". Only the
+    # hockeyref profile has one, and the index is a property of the trained
+    # head, so it travels with the selection rather than being configured
+    # independently and drifting out of step with it.
+    #
+    # Written straight onto the trunk params, not into `plot.*`: hmtrack
+    # resolves GLOBAL.* references in main() before _main() calls this, so a
+    # `GLOBAL.plot.referee_label` in the graph would already have resolved to
+    # null and the badge would silently never draw.
+    referee_label = PROFILE_REFEREE_LABEL.get(selected)
+    for plugin in plugins.values():
+        if not isinstance(plugin, dict):
+            continue
+        cls = str(plugin.get("class", ""))
+        # The overlay badges officials; the detector trunk caps how many of
+        # them a frame may contain. Both need the index, and neither can read
+        # it from `plot.*` because GLOBAL.* is resolved before this runs.
+        if "OverlayPlugin" in cls or "DetectorInferencePlugin" in cls:
+            plugin.setdefault("params", {})["referee_label"] = referee_label
+
+    _apply_input_scale(game_config, selected)
+
     identity = detector_identity(spec)
     for backend, field, extension in (("trt", "engine", "engine"), ("onnx", "path", "onnx")):
         options = params.setdefault(backend, {})
@@ -170,10 +349,14 @@ def configure_detector_selection(args, game_config: dict) -> None:
         options[field] = str(path.with_name(f"{path.stem}-{identity}{path.suffix}"))
     if not args.compare_detectors:
         return
+    # `distilled` and `hockeyref` are opt-in: both need a locally trained
+    # checkpoint, so sweeping them into every comparison would fail on a
+    # checkout that has not trained them.
+    opt_in = {"distilled": args.compare_distilled, "hockeyref": False}
     models = {
         name: spec if name == selected else resolve_detector(name, deployed, overrides.get(name))
         for name in PROFILES
-        if name != "distilled" or args.compare_distilled or selected == name
+        if name not in opt_in or opt_in[name] or selected == name
     }
     # All models use the same PyTorch head NMS and precision for this comparison.
     params["trt"]["enable"] = False
@@ -183,15 +366,15 @@ def configure_detector_selection(args, game_config: dict) -> None:
     plugins["detector"][
         "class"
     ] = "hmlib.aspen.plugins.detector_compare_plugin.DetectorComparePlugin"
-    plugins["detector"]["params"] = dict(
-        models=models,
-        selected=selected,
-        output_dir=args.compare_detectors,
-        annotations=args.detector_annotations,
-        sample_every=args.detector_sample_every,
-        preview_frames=args.detector_preview_frames,
-        threshold=args.detector_review_threshold,
-    )
+    plugins["detector"]["params"] = {
+        "models": models,
+        "selected": selected,
+        "output_dir": args.compare_detectors,
+        "annotations": args.detector_annotations,
+        "sample_every": args.detector_sample_every,
+        "preview_frames": args.detector_preview_frames,
+        "threshold": args.detector_review_threshold,
+    }
     game_config["aspen"].setdefault("pipeline", {}).update(
         threaded=False, graph=False, cuda_graph=False
     )
