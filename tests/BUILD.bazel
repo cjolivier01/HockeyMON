@@ -561,6 +561,19 @@ pytest_test(
 )
 
 pytest_test(
+    name="test_jersey_channel_order",
+    srcs=["test_jersey_channel_order.py", "aspen_plugin_harness.py"],
+    args=[
+        "-c",
+        "$(location //:pyproject.toml)",
+    ],
+    deps=[
+        "//hmlib:hmlib.lib",
+        requirement("pytest"),
+    ],
+)
+
+pytest_test(
     name="test_team_graph",
     srcs=["test_team_graph.py"],
     args=[

@@ -52,6 +52,32 @@ class _IdentityLegibility(nn.Module):
         return torch.ones((x.size(0),), dtype=torch.float32, device=x.device)
 
 
+def _bgr_to_rgb(frame: torch.Tensor) -> torch.Tensor:
+    """Reverse the channel axis of a ``(C, H, W)`` frame.
+
+    `original_images` is BGR: `hmlib/video/video_stream.py` decodes `bgr24`
+    and the stitcher tags its output `channel_order = "bgr"`, which is why
+    every detector and pose config carries `bgr_to_rgb=True`. Both consumers
+    in this trunk want RGB -- PARSeq through
+    `Image.fromarray(..., mode="RGB")`, and the legibility model through
+    ImageNet RGB statistics -- and neither converted, so both read the red and
+    blue channels swapped.
+
+    Converted once per frame rather than per crop, which is both cheaper and
+    harder to get wrong: the two crop sites cannot drift apart, and measured
+    on a 4090 a whole-frame flip costs 19 us at 3840x1080 and 46 us at
+    7680x1440 against 135-160 us for 24 crops, because the per-crop path is
+    launch-bound rather than bandwidth-bound. It does allocate a copy of the
+    frame, 12 MB and 33 MB respectively, which the caching allocator reuses.
+
+    The sibling `jersey_pose_plugin.py` deliberately does **not** do this. It
+    feeds `MMOCRInferencer`, whose configs carry `bgr_to_rgb=True` and so
+    expect BGR ndarray input; converting there would introduce the very bug
+    this fixes here.
+    """
+    return frame.flip(0)
+
+
 class KoshkinaJerseyNumberPlugin(Plugin):
     """
     Jersey number recognition trunk using the jersey-number-pipeline approach:
@@ -557,7 +583,7 @@ class KoshkinaJerseyNumberPlugin(Plugin):
             if self._roi_mode == "pose" and pose_results and frame_index < len(pose_results):
                 pose_inst = self._extract_pose_instances(pose_results[frame_index])
 
-            frame_img = original_images[frame_index]  # (C,H,W)
+            frame_img = _bgr_to_rgb(original_images[frame_index])  # (C,H,W), RGB
 
             # Build ROIs per track
             rois: List[Tuple[int, Tuple[int, int, int, int], float]] = (
