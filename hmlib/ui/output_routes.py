@@ -19,6 +19,7 @@ from hmlib.ui.headless_preview import (
     resolve_youtube_stream_url,
     validate_youtube_stream_url,
 )
+from hmlib.ui.output_cadence import OutputCadence, recording_fps
 from hmlib.ui.output_control import ARCHIVE_KEYS, NETWORK_KEYS, public_config, validate_changes
 from hmlib.ui.workspace.files import read_json, write_json
 from hmlib.utils.gpu import unwrap_tensor
@@ -118,7 +119,9 @@ class OutputRoutes:
         if fps <= 0:
             raise ValueError("Output routes require a positive frame rate")
         self.config = dict(config)
-        self.fps = fps
+        self.source_fps = fps
+        self.fps = recording_fps({"video_out": config}, fps)
+        self.cadence = OutputCadence(self.source_fps, self.fps)
         self.profiler = profiler
         self.audio = dict(audio or {})
         self.frames_written = 0
@@ -253,7 +256,7 @@ class OutputRoutes:
                     audio = {
                         **self.audio,
                         "offset_seconds": float(self.audio.get("offset_seconds", 0))
-                        - self.frames_written / self.fps,
+                        - self.frames_written / self.source_fps,
                     }
                     try:
                         self._configure(updated, audio)
@@ -275,6 +278,11 @@ class OutputRoutes:
         self._poll_actions(context)
         if self.server is not None:
             self.server.check()
+        program = unwrap_tensor(context.get("img"))
+        if program is None:
+            return
+        count = int(program.shape[0]) if program.ndim == 4 else 1
+        indices = self.cadence.select(count)
         for source, publisher in self.publishers:
             key = "img" if source == "program" else "original_images"
             if context.get(key) is None:
@@ -282,11 +290,11 @@ class OutputRoutes:
             frames = make_channels_last(unwrap_tensor(context[key]))
             if frames.ndim == 3:
                 frames = frames[None]
-            for frame in frames:
-                publisher.write_frame(frame)
-        program = context.get("img")
-        if program is not None:
-            self.frames_written += int(program.shape[0]) if program.ndim == 4 else 1
+            if len(frames) != count:
+                raise ValueError("Output route frame batches must share the source timeline")
+            for index in indices:
+                publisher.write_frame(frames[index])
+        self.frames_written += count
 
     def close(self) -> None:
         errors = []

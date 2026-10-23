@@ -1,6 +1,7 @@
 """Freeze real telemetry and media as an isolated camera replay candidate."""
 
 import hashlib
+import json
 import shutil
 import sqlite3
 import subprocess
@@ -161,7 +162,10 @@ def should_freeze_selected_run_interval_config_and_mask_without_modifying_inputs
     assert "initial_args" not in config
     assert "output_video_path" not in config["video_out"]
     assert "output_video_path" not in config["aspen"]["video_out"]
-    assert "output_video_path" not in config["aspen"]["plugins"]["video_out"]["params"]
+    assert (
+        config["aspen"]["plugins"]["video_out"]["params"]["output_video_path"]
+        == "GLOBAL.video_out.output_video_path"
+    )
     mask = cv2.imread(str(candidate / "rink_mask_0.png"), cv2.IMREAD_GRAYSCALE)
     assert np.count_nonzero(mask) == 32 * 52
     assert config["rink"]["ice_contours_combined_bbox"] == [6, 8, 58, 40]
@@ -216,6 +220,49 @@ def should_rebase_resumed_stitched_archive_frames_to_its_segment_origin(replay_w
 
 
 @pytest.mark.parametrize(
+    "name", ["sample-stitched_output-2.mp4", "sample-tracking_output-1.mp4", "unrecorded.mp4"]
+)
+def should_reject_replay_media_unrelated_to_the_selected_recording(replay_workspace, name):
+    workspace = replay_workspace
+    game = workspace.game()
+    source = game / name
+    shutil.copy2(game / "source.mp4", source)
+    # Even an imported original with identical dimensions/FPS must be one of
+    # the selected run's recorded sources; today's configuration cannot vouch for it.
+    config = read_config(game)
+    config["game"]["videos"]["source"].append(name)
+    write_config(game, config)
+    with pytest.raises(ValueError, match="paired with the selected telemetry"):
+        workspace.create_experiment(replay_args(workspace, source_path=str(source)))
+
+
+def should_accept_explicit_recorded_original_for_replay(replay_workspace):
+    workspace = replay_workspace
+    path = workspace.game() / "source.mp4"
+    result = workspace.create_experiment(replay_args(workspace, source_path=str(path)))
+    assert read_config(Path(result["game_directory"]))["game"]["videos"]["source"] == [str(path)]
+
+
+def should_reject_raw_camera_replay_even_when_dimensions_match_stitched_geometry(replay_workspace):
+    workspace = replay_workspace
+    game = workspace.game()
+    for name in ("left.mp4", "right.mp4"):
+        shutil.copy2(game / "source.mp4", game / name)
+    with sqlite3.connect(game / "sample_telemetry-1.db") as connection:
+        raw = connection.execute(
+            "SELECT effective_config FROM runs WHERE run_id='selected'"
+        ).fetchone()[0]
+        config = yaml.safe_load(raw)
+        config["source_video_paths"] = [str(game / name) for name in ("left.mp4", "right.mp4")]
+        config["game_config"]["stitching"] = {"enabled": True}
+        connection.execute(
+            "UPDATE runs SET effective_config=? WHERE run_id='selected'", (json.dumps(config),)
+        )
+    with pytest.raises(ValueError, match="paired with the selected telemetry"):
+        workspace.create_experiment(replay_args(workspace, source_path=str(game / "right.mp4")))
+
+
+@pytest.mark.parametrize(
     ("changes", "message"),
     [
         ({"run_id": "missing"}, "does not belong"),
@@ -255,3 +302,61 @@ def should_refuse_replay_range_override_and_changed_source_before_launch(replay_
     with pytest.raises(RuntimeError, match="source changed"):
         workspace.run_experiment({"experiment_id": experiment["id"]})
     assert not workspace.jobs.records
+
+
+def should_replay_analytics_recording_without_retaining_live_model_branches(replay_workspace):
+    from hmlib.cli.hmtrack import _enable_load_tracking_plugin
+    from hmlib.config import load_yaml_files_ordered
+    from hmlib.ui.analytics_graph import graph_paths
+    from hmlib.ui.runtime_setup import (
+        apply_engine_preferences,
+        launch_arguments,
+        launch_configuration,
+    )
+
+    workspace = replay_workspace
+    database = workspace.game() / "sample_telemetry-1.db"
+    with sqlite3.connect(database) as connection:
+        original = yaml.safe_load(
+            connection.execute(
+                "SELECT effective_config FROM runs WHERE run_id='selected'"
+            ).fetchone()[0]
+        )
+        original["game_config"] = load_yaml_files_ordered(
+            [str(path) for path in graph_paths("pose-jersey-actions")],
+            base=original["game_config"],
+        )
+        original["game_config"]["hm_ui"] = {"run": {"analytics": "pose-jersey-actions"}}
+        connection.execute(
+            "UPDATE runs SET effective_config=? WHERE run_id='selected'",
+            (yaml.safe_dump(original),),
+        )
+    experiment = workspace.create_experiment(replay_args(workspace))
+    candidate = Path(experiment["game_directory"])
+    config = launch_configuration(candidate, [])
+    arguments = launch_arguments(candidate, "track", config=config)
+    paths = [arguments[i + 1] for i, arg in enumerate(arguments) if arg == "--config"]
+    config = load_yaml_files_ordered(paths, base=config)
+    apply_engine_preferences(config)
+    _enable_load_tracking_plugin(config, prefer_detector=False, disable_detector=True)
+    nodes = config["aspen"]["plugins"]
+    assert all(
+        name not in nodes or not nodes[name].get("enabled", True)
+        for name in (
+            "pose_factory",
+            "pose",
+            "jersey_numbers",
+            "actions",
+            "detector_factory",
+            "detector",
+        )
+    )
+    assert nodes["load_tracking"]["params"]["load_jerseys"] is True
+    assert nodes["load_tracking"]["params"]["load_actions"] is True
+    assert nodes["overlays"].get("enabled", True)
+    assert nodes["camera_controller"].get("enabled", True)
+    with read_database(experiment["replay"]["input_tracking_data"]) as connection:
+        archived = yaml.safe_load(
+            connection.execute("SELECT effective_config FROM runs").fetchone()[0]
+        )
+    assert "actions" in archived["game_config"]["aspen"]["plugins"]

@@ -1,5 +1,7 @@
 import copy
 import json
+import shutil
+import subprocess
 import sys
 
 import pytest
@@ -95,6 +97,19 @@ def should_reject_invalid_run_settings_without_mutation(desktop, change):
     with pytest.raises(ValueError):
         desktop.dispatch("calibration.update", {"changes": change})
     assert path.read_bytes() == before
+
+
+def should_validate_jersey_rate_at_the_runtime_boundary(desktop):
+    from hmlib.aspen.plugins.native_analytics_plugin import ParseqJerseyPlugin
+
+    editor = OperatorWorkspace(desktop.game())
+    editor.update_settings({"pipeline.player-analytics.jersey.rate-hz": 120})
+    interval, _ = ParseqJerseyPlugin()._settings(
+        {"shared": {"game_config": editor._effective()}}, 2, 0.8
+    )
+    assert interval == round(1e9 / 120)
+    with pytest.raises(ValueError):
+        editor.update_settings({"pipeline.player-analytics.jersey.rate-hz": 121})
 
 
 def should_clear_old_engines_without_constructing_missing_graph_nodes():
@@ -283,10 +298,105 @@ def should_keep_manual_video_synchronization_for_audio(monkeypatch):
         pytest.fail("Manual/IMU synchronization must not perform audio matching")
 
     monkeypatch.setattr(sync, "synchronize_by_audio", unexpected_audio_matching)
+    monkeypatch.setattr(
+        "hmlib.ui.output_audio.prepare_chapter_audio",
+        lambda paths, work_dir, **kwargs: (str(paths[0]), None),
+    )
     assert _resolve_mux_audio_source(
         {"left": ["left.mp4"], "right": ["right.mp4"]}, frame_offsets=(23, 0)
-    ) == ("right.mp4", None)
+    ) == ("right.mp4", None, 0.0)
     assert _resolve_mux_audio_source(["left.mp4", "right.mp4"], frame_offsets=(0, 17)) == (
         "left.mp4",
         None,
+        0.0,
     )
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg required")
+@pytest.mark.parametrize("offsets", [(0, 20), (30, 60), (60, 30)])
+def should_seek_concatenated_audio_using_selected_original_video_rate(tmp_path, offsets):
+    import av
+
+    from hmlib.cli.hmtrack import _resolve_mux_audio_source
+
+    chapters = []
+    for index in range(2):
+        path = tmp_path / f"chapter-{index}.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x48:rate=60:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency={440 + index * 440}:duration=1",
+                "-c:v",
+                "mpeg4",
+                "-c:a",
+                "aac",
+                "-shortest",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        chapters.append(str(path))
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    tmp_path.chmod(0o555)
+    try:
+        source, handle, offset = _resolve_mux_audio_source(
+            {"left": chapters, "right": chapters}, frame_offsets=offsets, start_frame=15
+        )
+        try:
+            with av.open(source) as container:
+                assert len(container.streams.audio) == 1
+                assert len(container.streams.video) == 0
+            assert offset == pytest.approx(-(min(offsets) + 15) / 60)
+            assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+        finally:
+            handle.cleanup()
+    finally:
+        tmp_path.chmod(0o755)
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg required")
+@pytest.mark.parametrize("partial_audio", [False, True])
+def should_handle_silent_chapters_and_reject_inconsistent_audio(tmp_path, partial_audio):
+    from hmlib.cli.hmtrack import _resolve_mux_audio_source
+
+    chapters = []
+    for index in range(2):
+        path = tmp_path / f"chapter-{index}.mp4"
+        command = [
+            "ffmpeg",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x48:rate=30:duration=1",
+        ]
+        if partial_audio and index == 1:
+            command += ["-f", "lavfi", "-i", "sine=duration=1", "-c:a", "aac"]
+        subprocess.run(
+            [*command, "-c:v", "mpeg4", str(path)], check=True, capture_output=True, timeout=30
+        )
+        chapters.append(str(path))
+    inputs = {"left": chapters, "right": chapters}
+    if partial_audio:
+        with pytest.raises(ValueError, match="disagree"):
+            _resolve_mux_audio_source(inputs, frame_offsets=(0, 10), start_frame=15)
+    else:
+        assert _resolve_mux_audio_source(inputs, frame_offsets=(0, 10), start_frame=15) == (
+            None,
+            None,
+            -0.5,
+        )

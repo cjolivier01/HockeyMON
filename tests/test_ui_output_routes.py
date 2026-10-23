@@ -7,6 +7,8 @@ import shutil
 import socket
 import subprocess
 import time
+import wave
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +28,288 @@ def stop(process):
     if process.poll() is None:
         process.kill()
         process.wait(timeout=5)
+
+
+def probe_output_cadence(path, expected_frames, expected_fps, expected_duration):
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_frames",
+            "-show_streams",
+            "-show_format",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(result.stdout)
+    video = next(stream for stream in data["streams"] if stream["codec_type"] == "video")
+    assert int(video["nb_read_frames"]) == expected_frames
+    assert float(Fraction(video["avg_frame_rate"])) == pytest.approx(expected_fps)
+    assert float(data["format"]["duration"]) == pytest.approx(expected_duration, abs=0.09)
+    assert any(stream["codec_type"] == "audio" for stream in data["streams"])
+    decoded = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:a:0", "-f", "s16le", "-"],
+        check=True,
+        capture_output=True,
+    )
+    assert np.abs(np.frombuffer(decoded.stdout, dtype=np.int16).astype(float)).mean() > 100
+    return video
+
+
+@pytest.mark.parametrize(("source_fps", "output_fps"), [(60, 30), (30, 60)])
+@pytest.mark.parametrize(("archive_width", "archive_height"), [(160, 96), (161, 97)])
+def should_resample_recordings_without_changing_source_timing_or_audio(
+    tmp_path, source_fps, output_fps, archive_width, archive_height
+):
+    import torch
+
+    from hmlib.aspen.plugins.video_out_plugin import VideoOutPlugin
+
+    audio = tmp_path / "source.wav"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=3",
+            str(audio),
+        ],
+        check=True,
+    )
+    plugin = VideoOutPlugin(
+        output_video_path=str(tmp_path / "program.mkv"),
+        preview_via_sink=False,
+        video_out_device="cpu",
+    )
+    shared = {
+        "game_config": {"video_out": {"output_fps": output_fps, "archive_stitched": True}},
+        "fps": source_fps,
+        "mux_audio_file": str(audio),
+    }
+    try:
+        # Non-divisible batch sizes exercise phase continuity across batches.
+        for start in range(0, source_fps * 2, 7):
+            count = min(7, source_fps * 2 - start)
+            frame_ids = torch.arange(start + 1, start + count + 1)
+            context = {
+                "shared": shared,
+                "fps": source_fps,
+                "img": torch.full((count, 96, 160, 3), 80, dtype=torch.uint8),
+                "original_images": torch.full(
+                    (count, 3, archive_height, archive_width), 120, dtype=torch.uint8
+                ),
+                "frame_ids": frame_ids,
+                "video_frame_cfg": {
+                    "output_frame_width": 160,
+                    "output_frame_height": 96,
+                    "output_aspect_ratio": 160 / 96,
+                },
+            }
+            plugin.forward(context)
+            assert context["fps"] == source_fps and shared["fps"] == source_fps
+            assert torch.equal(context["frame_ids"], frame_ids)
+    finally:
+        plugin.finalize()
+    assert plugin._frames_written == source_fps * 2
+    for path in plugin.output_paths():
+        video = probe_output_cadence(path, output_fps * 2, output_fps, 2)
+        expected_size = (archive_width, archive_height) if "stitched" in path.name else (160, 96)
+        assert (video["width"], video["height"]) == expected_size
+        if expected_size == (161, 97):
+            from hmlib.video.video_stream import VideoStreamReader
+
+            assert video["pix_fmt"] == "yuv444p"
+            # Odd-raster preflight must choose CPU decoding before entering a
+            # native decoder that rejects this raster, including on CUDA hosts.
+            reader = VideoStreamReader(str(path), type="pynvcodec", device=torch.device("cuda"))
+            try:
+                decoded = list(reader)
+                assert len(decoded) == output_fps * 2
+                assert all(frame.shape == (1, 3, 97, 161) for frame in decoded)
+            finally:
+                reader.close()
+    assert len(plugin.output_paths()) == 2
+
+
+def should_resample_live_rtmp_at_recording_fps_and_keep_source_audio_timing(tmp_path):
+    audio = tmp_path / "audio.wav"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=4",
+            str(audio),
+        ],
+        check=True,
+    )
+    url = f"rtmp://127.0.0.1:{free_port()}/live/test"
+    received = tmp_path / "received.flv"
+    receiver = subprocess.Popen(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-v",
+            "error",
+            "-listen",
+            "1",
+            "-i",
+            url,
+            "-c",
+            "copy",
+            str(received),
+        ],
+        stderr=subprocess.PIPE,
+    )
+    routes = OutputRoutes(
+        {"output_fps": 30}, fps=60, audio={"file": str(audio)}, session_dir=tmp_path / "live"
+    )
+    frames = np.full((5, 96, 160, 3), [20, 180, 20], dtype=np.uint8)
+    try:
+        time.sleep(0.5)
+        # Activate after one second of source processing. The audio offset must
+        # use 60 source frames, not the 30 frames selected for output.
+        for _ in range(12):
+            routes.write({"img": frames})
+        write_json(
+            tmp_path / "live/output-actions/start.json",
+            {"changes": {"show_youtube": True, "youtube_stream_url": url}},
+        )
+        for _ in range(24):
+            routes.write({"img": frames})
+        routes.close()
+        _, error = receiver.communicate(timeout=15)
+        assert receiver.returncode == 0, error.decode()
+        probe_output_cadence(received, 60, 30, 2)
+        assert routes.frames_written == 180
+    finally:
+        routes.close()
+        stop(receiver)
+
+
+def should_keep_live_resampled_segments_on_source_time_across_recording_toggles(tmp_path):
+    import torch
+
+    from hmlib.aspen.plugins.video_out_plugin import VideoOutPlugin
+
+    audio = tmp_path / "source.wav"
+    timeline = np.arange(3 * 48000) / 48000
+    frequencies = np.where(timeline < 1, 440, np.where(timeline < 2, 880, 1320))
+    samples = (12000 * np.sin(2 * np.pi * frequencies * timeline)).astype(np.int16)
+    with wave.open(str(audio), "wb") as stream:
+        stream.setparams((1, 2, 48000, len(samples), "NONE", "not compressed"))
+        stream.writeframes(samples.tobytes())
+    flags = {"archive_program": True, "archive_stitched": True}
+    shared = {
+        "game_config": {"video_out": {**flags, "output_fps": 30}},
+        "fps": 60,
+        "mux_audio_file": str(audio),
+    }
+    plugin = VideoOutPlugin(
+        output_video_path=str(tmp_path / "program.mkv"),
+        preview_via_sink=False,
+        video_out_device="cpu",
+    )
+    frame = torch.full((1, 96, 160, 3), 80, dtype=torch.uint8)
+    try:
+        for index in range(180):
+            # Wide binary stripes survive lossy encoding and reveal which
+            # source frame became the first frame of each resumed segment.
+            for bit in range(8):
+                frame[0, :, bit * 20 : (bit + 1) * 20] = 255 if index & (1 << bit) else 0
+            if index in (32, 65, 97, 130):
+                shared["game_config"]["video_out"].update(
+                    {key: index in (65, 130) for key in flags}
+                )
+            plugin.forward(
+                {
+                    "shared": shared,
+                    "fps": 60,
+                    "img": frame,
+                    "original_images": frame,
+                    "frame_ids": torch.tensor([index + 1]),
+                    "video_frame_cfg": {
+                        "output_frame_width": 160,
+                        "output_frame_height": 96,
+                        "output_aspect_ratio": 160 / 96,
+                    },
+                }
+            )
+    finally:
+        plugin.finalize()
+    manifest = read_json(
+        next(path for path in plugin.supplementary_paths() if path.suffix == ".json")
+    )
+    assert manifest["fps"] == 60
+    assert manifest["output_fps"] == 30
+    assert len(manifest["segments"]) == 6
+    for segment in manifest["segments"]:
+        start, end = segment["start_frame"], segment["end_frame"]
+        assert (start, end) in {(0, 32), (65, 97), (130, 180)}
+        assert segment["timeline_offset_seconds"] == pytest.approx(start / 60)
+        assert segment["duration_seconds"] == pytest.approx((end - start) / 60)
+        count = 25 if start == 130 else 16
+        path = next(path for path in plugin.output_paths() if path.name == segment["filename"])
+        probe_output_cadence(path, count, 30, (end - start) / 60)
+        pixels = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-pix_fmt",
+                "rgb24",
+                "-f",
+                "rawvideo",
+                "-",
+            ],
+            capture_output=True,
+            check=True,
+        ).stdout
+        stripes = np.frombuffer(pixels, dtype=np.uint8).reshape(96, 8, 20, 3).mean(axis=(0, 2, 3))
+        first_source_frame = sum((stripes[bit] > 128) * (1 << bit) for bit in range(8))
+        assert 0 <= (first_source_frame - start) / 60 < 1 / 30
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-map",
+                "0:a:0",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-f",
+                "s16le",
+                "-",
+            ],
+            capture_output=True,
+            check=True,
+        )
+        decoded = np.frombuffer(result.stdout, dtype=np.int16).astype(float)[2400:12000]
+        peak = np.argmax(np.abs(np.fft.rfft(decoded))) * 48000 / len(decoded)
+        expected = {0: 440, 65: 880, 130: 1320}[start]
+        assert peak == pytest.approx(expected, abs=5)
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg required")

@@ -585,6 +585,7 @@ def stitch_videos(
     args: argparse.Namespace | None = None,
     deploy_dir: str | None = None,
     audio_options: dict | None = None,
+    output_fps: float | None = None,
 ):
     from hmlib.config import (
         get_clip_box,
@@ -651,6 +652,12 @@ def stitch_videos(
         )
         aspen_cfg_all: dict[str, Any] = load_yaml_files_ordered(
             ["config/aspen/stitching.yaml"], base=base_cfg
+        )
+        from hmlib.ui.runtime_setup import apply_pipeline_preferences, saved_pipeline_preferences
+
+        apply_pipeline_preferences(
+            aspen_cfg_all,
+            saved_pipeline_preferences(game_id, ignore_private_config=ignore_private_config),
         )
         normalize_runtime_config(aspen_cfg_all)
         override_parser = hm_opts.parser(parser=make_parser())
@@ -1081,6 +1088,12 @@ def stitch_videos(
             aspen_shared["game_dir"] = dir_name
             aspen_shared["output_label"] = output_label
             aspen_shared["camera_ui"] = int(camera_ui)
+        if output_fps is not None:
+            cadence_config = aspen_shared.get("game_config")
+            if cadence_config is None:
+                cadence_config = {}
+                aspen_shared["game_config"] = cadence_config
+            cadence_config.setdefault("video_out", {})["output_fps"] = output_fps
         aspen_name = game_id or "stitch"
         aspen_net = AspenNet(aspen_name, aspen_graph_cfg, shared=aspen_shared)
         aspen_net = aspen_net.to(encoder_device)
@@ -1348,6 +1361,7 @@ def _main(args) -> None:
             camera_ui=int(args.camera_ui or 0),
             args=args,
             deploy_dir=args.deploy_dir,
+            output_fps=args.output_fps,
             audio_options=(
                 None
                 if args.no_audio

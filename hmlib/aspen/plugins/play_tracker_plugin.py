@@ -8,6 +8,7 @@ from hmlib.bbox.box_functions import center, height, make_box_at_center, width
 from hmlib.builder import HM
 from hmlib.camera.camera import HockeyMON
 from hmlib.camera.camera_controller_modes import normalize_play_tracker_camera_controller
+from hmlib.camera.operator_controls import overlay_owner_values
 from hmlib.camera.play_tracker import PlayTracker as _PlayTracker
 from hmlib.config import get_nested_value
 from hmlib.log import logger
@@ -254,6 +255,12 @@ class PlayTrackerPlugin(Plugin):
             or bool(shared.get("save_cluster_centroids", False)),
         )
         self._play_tracker.eval()
+        # Late overlays own these pixels. In particular debug mode must not
+        # re-enable the older renderer and draw a second set before the crop.
+        for key in overlay_owner_values(game_cfg):
+            setattr(self._play_tracker, "_" + key, False)
+        if self._play_tracker._operator_controls is not None:
+            shared["overlay_controls"] = self._play_tracker._operator_controls.overlay_values
         self._update_hm_ui_preview_status(context)
 
     def finalize(self) -> None:

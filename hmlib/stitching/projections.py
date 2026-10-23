@@ -141,12 +141,18 @@ def _cap_panorama(
         canvas_scale = width / geometry.width
         intermediate_height = int(geometry.height * canvas_scale + 0.5)
         vertical_shift = math.trunc((height - intermediate_height) / 2)
+        full_canvas = geometry.crop == (0, geometry.width, 0, geometry.height)
         for index, edge in enumerate(scaled.crop):
             scaled_extent = width if index < 2 else height
             expected = int(geometry.crop[index] * canvas_scale + 0.5)
             if index >= 2:
                 expected += vertical_shift
             expected = min(max(expected, 0), scaled_extent)
+            # Hugin preserves the semantic full-canvas crop, including the
+            # extra row caused by even canvas rounding. It does not turn a
+            # full-height crop into an accidental one-pixel bottom trim.
+            if full_canvas:
+                expected = 0 if index % 2 == 0 else scaled_extent
             if edge != expected:
                 raise ValueError("pano_modify changed framing while capping canvas")
         temporary.replace(project)

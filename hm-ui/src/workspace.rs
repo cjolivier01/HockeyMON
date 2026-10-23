@@ -120,9 +120,15 @@ struct GeometryDraft {
     left: Vec<[f64; 2]>,
     right: Vec<[f64; 2]>,
     rink_image: Vec<[f64; 2]>,
+    rink_observations: Vec<Value>,
+    rink_history: Vec<Vec<Value>>,
+    rink_selected: usize,
+    rink_camera: usize,
+    rink_feature: String,
+    rink_layout: Value,
+    rink_fit: Value,
+    rink_use_level: bool,
     rink_world: Vec<[f64; 2]>,
-    rink_active: usize,
-    rink_mode: usize,
     goals: Vec<Vec<[f64; 2]>>,
     crop: [f64; 4],
     rotation: [f64; 3],
@@ -500,6 +506,30 @@ impl WorkspaceUi {
                     self.media_needs_frame = true;
                 }
             }
+            "calibration.rink-assist" => {
+                if args["observations"] != json!(self.geometry.rink_observations) {
+                    self.error = Some("Rink marks changed while suggestions were prepared. Request assistance again to preserve your edits.".into());
+                } else {
+                    self.geometry
+                        .rink_history
+                        .push(self.geometry.rink_observations.clone());
+                    self.geometry.rink_observations = collection(&result["observations"]);
+                    self.geometry.rink_selected =
+                        self.geometry.rink_observations.len().saturating_sub(1);
+                    self.feedback = text(&result["message"]);
+                    self.geometry.dirty = true;
+                }
+            }
+            "calibration.rink-map" => {
+                let use_level = self.geometry.rink_use_level;
+                self.geometry.rink_use_level = false;
+                self.calibration = result;
+                self.load_calibration_draft();
+                if use_level {
+                    self.geometry.tab = 4;
+                    self.command("leveling.open", json!({"from_rink_map":true}));
+                }
+            }
             "leveling.open" => {
                 self.leveling = result.clone();
                 self.leveling_auto_crop = result["auto_crop"].as_bool().unwrap_or(true);
@@ -544,7 +574,8 @@ impl WorkspaceUi {
             | "calibration.leveling"
             | "calibration.scoreboard"
             | "calibration.control-points"
-            | "calibration.rink-map" => {
+            | "calibration.lens"
+            | "calibration.reset_sync" => {
                 if result.get("settings").is_some() {
                     self.calibration = result;
                     self.load_calibration_draft();
@@ -972,7 +1003,7 @@ impl WorkspaceUi {
             ui.horizontal_wrapped(|ui| {
                 ui.label(object_label(&archive));
                 if ui.small_button("Edit highlights").clicked() {
-                    self.highlight_source = object_id(&archive);
+                    self.select_highlight_archive(object_id(&archive));
                     self.page = Page::Highlights;
                 }
             });
@@ -1243,6 +1274,11 @@ impl WorkspaceUi {
                 ]);
             }
         }
+        self.geometry.rink_observations = collection(&self.calibration["rink_map"]["observations"]);
+        self.geometry.rink_history.clear();
+        self.geometry.rink_selected = 0;
+        self.geometry.rink_layout = self.calibration["rink_map"]["layout"].clone();
+        self.geometry.rink_fit = self.calibration["rink_map"]["fit"].clone();
         let landmarks = collection(&self.calibration["rink_map"]["landmarks"]);
         self.geometry.rink_image = landmarks
             .iter()
@@ -1463,6 +1499,8 @@ impl WorkspaceUi {
             .as_f64()
             .filter(|height| *height > 0.0)
             .unwrap_or(image.size()[1] as f64);
+        let overlays = collection(&descriptor["overlays"]);
+        ui.data_mut(|data| data.insert_temp(ui.id().with((id, "overlays")), overlays));
         point_canvas(ui, image, [width, height], points, maximum, id)
     }
 
@@ -1592,129 +1630,7 @@ impl WorkspaceUi {
                     );
                 });
             }
-            2 => {
-                ui.label("Pair landmarks on the stitched image with points on the rink diagram. Coordinates use metres from the top-left corner.");
-                ui.horizontal_wrapped(|ui| {
-                    ui.selectable_value(&mut self.geometry.rink_mode, 0, "Landmarks");
-                    for index in 0..self.geometry.goals.len() {
-                        ui.selectable_value(
-                            &mut self.geometry.rink_mode,
-                            index + 1,
-                            format!("Goal {}", index + 1),
-                        );
-                    }
-                });
-                let descriptor = self.calibration["rink_map"].clone();
-                if self.geometry.rink_mode > 0
-                    && self.geometry.rink_mode <= self.geometry.goals.len()
-                {
-                    let index = self.geometry.rink_mode - 1;
-                    let mut goal = std::mem::take(&mut self.geometry.goals[index]);
-                    ui.label("Place four corners around the selected goal in the image.");
-                    self.geometry_image(
-                        ui,
-                        &descriptor,
-                        &mut goal,
-                        Some(4),
-                        &format!("rink-goal-{index}"),
-                    );
-                    self.geometry.goals[index] = goal;
-                } else {
-                    self.geometry.rink_mode = 0;
-                    let previous_len = self.geometry.rink_image.len();
-                    let mut draft = std::mem::take(&mut self.geometry.rink_image);
-                    self.geometry_image(ui, &descriptor, &mut draft, None, "rink-landmarks");
-                    self.geometry.rink_image = draft;
-                    if previous_len != self.geometry.rink_image.len() {
-                        self.geometry.rink_active =
-                            self.geometry.rink_image.len().saturating_sub(1);
-                    }
-                    self.geometry
-                        .rink_world
-                        .resize(self.geometry.rink_image.len(), [0.0, 0.0]);
-                    let size = self.calibration["rink_map"]["rink_size"].clone();
-                    let size = [
-                        size[0].as_f64().unwrap_or(60.96),
-                        size[1].as_f64().unwrap_or(25.908),
-                    ];
-                    if !self.geometry.rink_world.is_empty() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label("Assign rink position to landmark:");
-                            for index in 0..self.geometry.rink_world.len() {
-                                ui.selectable_value(
-                                    &mut self.geometry.rink_active,
-                                    index,
-                                    (index + 1).to_string(),
-                                );
-                            }
-                        });
-                        rink_canvas(
-                            ui,
-                            size,
-                            &mut self.geometry.rink_world,
-                            self.geometry.rink_active,
-                        );
-                    }
-                }
-                ui.columns(2, |columns| {
-                    columns[0].strong("Image coordinates (pixels)");
-                    point_table(
-                        &mut columns[0],
-                        "rink-image-table",
-                        &mut self.geometry.rink_image,
-                    );
-                    columns[1].strong("Rink coordinates (metres, corner origin)");
-                    point_table(
-                        &mut columns[1],
-                        "rink-world-table",
-                        &mut self.geometry.rink_world,
-                    );
-                });
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Remove last landmark").clicked() {
-                        self.geometry.rink_image.pop();
-                        self.geometry.rink_world.pop();
-                    }
-                    if ui
-                        .add_enabled(
-                            self.geometry.rink_image.len() >= 4,
-                            egui::Button::new("Save rink registration"),
-                        )
-                        .clicked()
-                    {
-                        let landmarks: Vec<Value> = self
-                            .geometry
-                            .rink_image
-                            .iter()
-                            .zip(&self.geometry.rink_world)
-                            .map(|(image, rink)| json!({"image": image, "rink": rink}))
-                            .collect();
-                        self.command(
-                            "calibration.rink-map",
-                            json!({"landmarks": landmarks, "goals": self.geometry.goals, "rink_size": self.calibration["rink_map"]["rink_size"]}),
-                        );
-                    }
-                });
-                ui.collapsing("Goal regions", |ui| {
-                    for (index, goal) in self.geometry.goals.iter_mut().enumerate() {
-                        ui.strong(format!("Goal {}", index + 1));
-                        point_table(ui, &format!("goal-{index}"), goal);
-                    }
-                    if ui
-                        .add_enabled(
-                            self.geometry.goals.len() < 2,
-                            egui::Button::new("Add goal region"),
-                        )
-                        .clicked()
-                    {
-                        self.geometry.goals.push(Vec::new());
-                        self.geometry.rink_mode = self.geometry.goals.len();
-                    }
-                    if ui.button("Remove last goal").clicked() {
-                        self.geometry.goals.pop();
-                    }
-                });
-            }
+            2 => self.draw_rink_map(ui),
             3 => {
                 ui.heading("Panorama framing");
                 ui.label(
@@ -1762,6 +1678,243 @@ impl WorkspaceUi {
             }
             _ => self.draw_leveling(ui),
         }
+    }
+
+    fn draw_rink_map(&mut self, ui: &mut egui::Ui) {
+        ui.label("Identify painted lines and board intersections at ice level in the calibrated source cameras. Near boards are closest to the camera. Lines need two or more samples; their endpoints are not assumed to touch boards.");
+        ui.collapsing("Rink dimensions (metres)", |ui| {
+            for (key, label) in [
+                ("length", "Length"),
+                ("width", "Width"),
+                ("blue_line_distance", "Centre to blue line"),
+                ("goal_inset", "Goal inset"),
+                ("corner_radius", "Corner radius"),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    let mut value = self.geometry.rink_layout[key].as_f64().unwrap_or(0.0);
+                    if ui
+                        .add(egui::DragValue::new(&mut value).speed(0.01))
+                        .changed()
+                    {
+                        self.geometry.rink_layout[key] = json!(value);
+                        self.geometry.dirty = true;
+                    }
+                });
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Find landmarks").clicked() {
+                self.command(
+                    "calibration.rink-assist",
+                    json!({"observations": self.geometry.rink_observations, "detect":true}),
+                );
+            }
+            if ui.button("Use rink mask").clicked() {
+                self.command(
+                    "calibration.rink-assist",
+                    json!({"observations": self.geometry.rink_observations, "use_mask":true}),
+                );
+            }
+            if ui
+                .add_enabled(
+                    !self.geometry.rink_history.is_empty(),
+                    egui::Button::new("Undo"),
+                )
+                .clicked()
+            {
+                self.geometry.rink_observations =
+                    self.geometry.rink_history.pop().unwrap_or_default();
+                self.geometry.rink_selected =
+                    self.geometry.rink_observations.len().saturating_sub(1);
+                self.geometry.dirty = true;
+            }
+        });
+        let features = collection(&self.calibration["rink_map"]["features"]);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("New mark source:");
+            ui.selectable_value(&mut self.geometry.rink_camera, 0, "Camera 1");
+            ui.selectable_value(&mut self.geometry.rink_camera, 1, "Camera 2");
+            egui::ComboBox::from_id_salt("new-rink-feature")
+                .selected_text(if self.geometry.rink_feature.is_empty() { "Choose landmark".into() } else { human_label(&self.geometry.rink_feature) })
+                .show_ui(ui, |ui| {
+                    for feature in &features {
+                        let id = text(&feature["id"]);
+                        ui.selectable_value(&mut self.geometry.rink_feature, id.clone(), human_label(&id));
+                    }
+                });
+            if ui.add_enabled(!self.geometry.rink_feature.is_empty(), egui::Button::new("Add mark")).clicked() {
+                self.geometry.rink_history.push(self.geometry.rink_observations.clone());
+                let line = features.iter().find(|f| f["id"] == self.geometry.rink_feature).is_some_and(|f| f["line"] == true);
+                self.geometry.rink_observations.push(json!({"feature":self.geometry.rink_feature,"camera":self.geometry.rink_camera,"line":line,"enabled":true,"pixels":[]}));
+                self.geometry.rink_selected = self.geometry.rink_observations.len() - 1;
+                self.geometry.dirty = true;
+            }
+        });
+        let previous = self.geometry.rink_observations.clone();
+        egui::ScrollArea::vertical()
+            .max_height(220.0)
+            .id_salt("rink-observation-list")
+            .show(ui, |ui| {
+                for (index, mark) in self.geometry.rink_observations.iter_mut().enumerate() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.selectable_value(
+                            &mut self.geometry.rink_selected,
+                            index,
+                            format!(
+                                "{}: Camera {}",
+                                index + 1,
+                                mark["camera"].as_u64().unwrap_or(0) + 1
+                            ),
+                        );
+                        let mut enabled = mark["enabled"].as_bool().unwrap_or(true);
+                        if ui.checkbox(&mut enabled, "Use").changed() {
+                            mark["enabled"] = json!(enabled);
+                        }
+                        let mut identity = text(&mark["feature"]);
+                        egui::ComboBox::from_id_salt(("rink-identity", index))
+                            .selected_text(if identity.is_empty() {
+                                "Unassigned".into()
+                            } else {
+                                human_label(&identity)
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut identity, String::new(), "Unassigned");
+                                for feature in &features {
+                                    if feature["line"].as_bool().unwrap_or(false)
+                                        == mark["line"].as_bool().unwrap_or(false)
+                                    {
+                                        let id = text(&feature["id"]);
+                                        ui.selectable_value(
+                                            &mut identity,
+                                            id.clone(),
+                                            human_label(&id),
+                                        );
+                                    }
+                                }
+                            });
+                        mark["feature"] = json!(identity);
+                        ui.weak(text(&mark["label"]));
+                    });
+                }
+            });
+        if previous != self.geometry.rink_observations {
+            self.geometry.rink_history.push(previous);
+            self.geometry.dirty = true;
+        }
+        if let Some(mark) = self
+            .geometry
+            .rink_observations
+            .get(self.geometry.rink_selected)
+            .cloned()
+        {
+            let camera = mark["camera"].as_u64().unwrap_or(0) as usize;
+            ui.label(format!("Editing Camera {} landmark", camera + 1));
+            let mut descriptor = self.calibration["rink_map"]["sources"][camera].clone();
+            let mut overlays =
+                collection(&self.calibration["rink_map"]["mapping"]["source_overlays"][camera]);
+            overlays.extend(
+                self.geometry
+                    .rink_observations
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, mark)| {
+                        *index != self.geometry.rink_selected
+                            && mark["camera"].as_u64() == Some(camera as u64)
+                    })
+                    .map(|(_, mark)| mark.clone()),
+            );
+            descriptor["overlays"] = json!(overlays);
+            let mut pixels = points(&mark["pixels"]);
+            let maximum = if mark["arc"] == true {
+                Some(3)
+            } else if mark["line"] == true {
+                Some(64)
+            } else {
+                Some(1)
+            };
+            if mark["arc"] == true {
+                ui.label("Drag the three handles along the near-board ice edge. The midpoint controls the smooth arc. Enable Use after review.");
+            }
+            if self.geometry_image(ui, &descriptor, &mut pixels, maximum, "rink-source-marks") {
+                self.geometry
+                    .rink_history
+                    .push(self.geometry.rink_observations.clone());
+                self.geometry.rink_observations[self.geometry.rink_selected]["pixels"] =
+                    json!(pixels);
+                self.geometry.dirty = true;
+            }
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Remove last point").clicked() {
+                    self.geometry
+                        .rink_history
+                        .push(self.geometry.rink_observations.clone());
+                    pixels.pop();
+                    self.geometry.rink_observations[self.geometry.rink_selected]["pixels"] =
+                        json!(pixels);
+                    self.geometry.dirty = true;
+                }
+                if ui.button("Delete mark").clicked() {
+                    self.geometry
+                        .rink_history
+                        .push(self.geometry.rink_observations.clone());
+                    self.geometry
+                        .rink_observations
+                        .remove(self.geometry.rink_selected);
+                    self.geometry.rink_selected = self.geometry.rink_selected.saturating_sub(1);
+                    self.geometry.dirty = true;
+                }
+            });
+            let identity = text(&mark["feature"]);
+            if mark["line"] == true
+                && ["goal-left-line", "goal-right-line"].contains(&identity.as_str())
+                && pixels.len() >= 2
+            {
+                ui.label("Use goal-line ends at boards only if both numbered endpoints meet the boards at ice level. Choose which end is nearest the camera:");
+                ui.horizontal_wrapped(|ui| {
+                    for (near,label) in [(0,"First endpoint is near"),(1,"Last endpoint is near")] {
+                        if ui.button(label).clicked() {
+                            self.geometry.rink_history.push(self.geometry.rink_observations.clone());
+                            let prefix = identity.trim_end_matches("-line");
+                            let ends = [pixels[0], pixels[pixels.len()-1]];
+                            for (side, endpoint) in [("near",near),("far",1-near)] {
+                                self.geometry.rink_observations.push(json!({"feature":format!("{prefix}-{side}"),"camera":mark["camera"],"line":false,"enabled":mark["enabled"],"pixels":[ends[endpoint]]}));
+                            }
+                            self.geometry.rink_selected = self.geometry.rink_observations.len()-2;
+                            self.geometry.dirty = true;
+                        }
+                    }
+                });
+            }
+        } else {
+            ui.label("Choose an identified landmark and Add mark, or request suggestions.");
+        }
+        let dimensions = [
+            self.geometry.rink_layout["length"]
+                .as_f64()
+                .unwrap_or(60.96),
+            self.geometry.rink_layout["width"]
+                .as_f64()
+                .unwrap_or(25.908),
+        ];
+        ui.collapsing("Rink layout (near boards below)", |ui| {
+            let mut reference = vec![[dimensions[0] / 2.0, dimensions[1] / 2.0]];
+            rink_canvas(ui, dimensions, &mut reference, 0);
+        });
+        ui.label(format!(
+            "Saved fit: {} — {}",
+            text(&self.geometry.rink_fit["state"]),
+            text(&self.geometry.rink_fit["message"])
+        ));
+        ui.horizontal_wrapped(|ui| {
+            for (label, use_level) in [("Save partial / fitted map",false),("Save and use for leveling",true)] {
+                if ui.button(label).clicked() {
+                    self.geometry.rink_use_level = use_level;
+                    self.command("calibration.rink-map",json!({"observations":self.geometry.rink_observations,"layout":self.geometry.rink_layout,"landmarks":[],"goals":self.geometry.goals,"allow_partial":true}));
+                }
+            }
+        });
+        ui.weak("Partial maps preserve evidence without enabling camera guidance. Saving a complete map enables its use by rink camera controls. Undo restores goal-line conversions in one step.");
     }
 
     fn leveling_state(&self) -> Value {
@@ -2383,6 +2536,14 @@ impl WorkspaceUi {
         }
     }
 
+    fn select_highlight_archive(&mut self, path: String) {
+        self.highlight_source = path;
+        self.highlight_document["archive_path"] = json!(self.highlight_source);
+        self.track_choices = Value::Null;
+        self.track_run.clear();
+        self.highlight_dirty = true;
+    }
+
     fn draw_highlights(&mut self, ui: &mut egui::Ui) {
         ui.heading("Highlights");
         ui.horizontal_wrapped(|ui| {
@@ -2427,10 +2588,7 @@ impl WorkspaceUi {
                         )
                         .changed()
                     {
-                        self.highlight_document["archive_path"] = json!(self.highlight_source);
-                        self.track_choices = Value::Null;
-                        self.track_run.clear();
-                        self.highlight_dirty = true;
+                        self.select_highlight_archive(self.highlight_source.clone());
                     }
                 }
             });
@@ -2440,10 +2598,7 @@ impl WorkspaceUi {
             &mut self.highlight_source,
             "/path/to/game-1.mp4",
         ) {
-            self.highlight_document["archive_path"] = json!(self.highlight_source);
-            self.track_choices = Value::Null;
-            self.track_run.clear();
-            self.highlight_dirty = true;
+            self.select_highlight_archive(self.highlight_source.clone());
         }
         let mut base_name = self.highlight_document["base_name"]
             .as_str()
@@ -3005,6 +3160,43 @@ fn annotations_editor(ui: &mut egui::Ui, interval: &mut Value) -> bool {
     changed
 }
 
+fn points_from_value(value: &Value) -> Vec<[f64; 2]> {
+    points(value)
+}
+
+fn draw_rink_polyline(
+    painter: &egui::Painter,
+    points: &[[f64; 2]],
+    arc: bool,
+    to_screen: &impl Fn([f64; 2]) -> egui::Pos2,
+    color: egui::Color32,
+) {
+    let line: Vec<[f64; 2]> = if arc && points.len() == 3 {
+        let control = [
+            2.0 * points[1][0] - (points[0][0] + points[2][0]) / 2.0,
+            2.0 * points[1][1] - (points[0][1] + points[2][1]) / 2.0,
+        ];
+        (0..=64)
+            .map(|i| {
+                let t = i as f64 / 64.0;
+                [0, 1].map(|axis| {
+                    (1.0 - t).powi(2) * points[0][axis]
+                        + 2.0 * t * (1.0 - t) * control[axis]
+                        + t * t * points[2][axis]
+                })
+            })
+            .collect()
+    } else {
+        points.to_vec()
+    };
+    for segment in line.windows(2) {
+        painter.line_segment(
+            [to_screen(segment[0]), to_screen(segment[1])],
+            egui::Stroke::new(2.0_f32, color),
+        );
+    }
+}
+
 fn point_canvas(
     ui: &mut egui::Ui,
     image: &egui::TextureHandle,
@@ -3066,8 +3258,10 @@ fn point_canvas(
     let mut changed = false;
     if response.dragged() && selected.is_some() {
         if let (Some(index), Some(position)) = (selected, pointer) {
-            points[index] = from_screen(position);
-            changed = true;
+            if let Some(point) = points.get_mut(index) {
+                *point = from_screen(position);
+                changed = true;
+            }
         }
     } else {
         crate::interact_preview(ui, &response, &mut transform);
@@ -3093,6 +3287,40 @@ fn point_canvas(
         egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
         egui::Color32::WHITE,
     );
+    let overlays = ui
+        .data_mut(|data| data.get_temp::<Vec<Value>>(ui.id().with((id, "overlays"))))
+        .unwrap_or_default();
+    for mark in &overlays {
+        let vertices = points_from_value(&mark["pixels"]);
+        let color = if mark["enabled"] == false {
+            egui::Color32::LIGHT_RED
+        } else {
+            egui::Color32::LIGHT_GREEN
+        };
+        if let Some(first) = vertices.first() {
+            let position = to_screen(*first);
+            if vertices.len() == 1 {
+                painter.circle_filled(position, 4.0, color);
+            }
+            painter.text(
+                position,
+                egui::Align2::LEFT_BOTTOM,
+                human_label(&text(&mark["feature"])),
+                egui::FontId::proportional(12.0),
+                color,
+            );
+        }
+        draw_rink_polyline(&painter, &vertices, mark["arc"] == true, &to_screen, color);
+    }
+    if id == "rink-source-marks" && maximum != Some(1) {
+        draw_rink_polyline(
+            &painter,
+            points,
+            maximum == Some(3),
+            &to_screen,
+            egui::Color32::YELLOW,
+        );
+    }
     for (index, point) in points.iter().enumerate() {
         let position = to_screen(*point);
         painter.circle_filled(position, 5.0, egui::Color32::YELLOW);
@@ -3174,6 +3402,14 @@ fn rink_canvas(ui: &mut egui::Ui, dimensions: [f64; 2], points: &mut [[f64; 2]],
     }
 }
 
+fn annotation_box_rect(rect: egui::Rect, center: egui::Pos2, annotation: &Value) -> egui::Rect {
+    let size = egui::vec2(
+        annotation["dx"].as_f64().unwrap_or(0.0).abs().max(0.02) as f32 * rect.width(),
+        annotation["dy"].as_f64().unwrap_or(0.12).abs().max(0.02) as f32 * rect.height(),
+    );
+    egui::Rect::from_center_size(center, size)
+}
+
 fn paint_annotation(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -3227,11 +3463,7 @@ fn paint_annotation(
     match annotation["kind"].as_str().unwrap_or("text") {
         "arrow" => painter.arrow(origin, delta, stroke),
         "box" => {
-            painter.rect_stroke(
-                egui::Rect::from_two_pos(origin, origin + delta),
-                0.0,
-                stroke,
-            );
+            painter.rect_stroke(annotation_box_rect(rect, origin, annotation), 0.0, stroke);
         }
         _ => {
             painter.text(
@@ -3371,6 +3603,58 @@ mod tests {
     impl Drop for Fixture {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn runs_archive_selection_updates_the_render_document() {
+        let mut fixture = Fixture::new();
+        fixture.workspace.page = Page::Run;
+        fixture.workspace.highlight_document["archive_path"] = json!("/old.mp4");
+        fixture.workspace.track_run = "old-run".into();
+        fixture.workspace.track_choices = json!({"choices":[1]});
+        fixture.workspace.snapshot["archives"] = json!([{"path":"/games/game-a/archive-2.mp4"}]);
+        let context = egui::Context::default();
+        run_frame(&context, vec![], |ctx| fixture.workspace.draw_content(ctx));
+        let output = run_frame(&context, vec![], |ctx| fixture.workspace.draw_content(ctx));
+        run_frame(
+            &context,
+            click_events(text_positions(&output, "Edit highlights")[0]),
+            |ctx| fixture.workspace.draw_content(ctx),
+        );
+        assert_eq!(
+            fixture.workspace.highlight_source,
+            "/games/game-a/archive-2.mp4"
+        );
+        assert_eq!(
+            fixture.workspace.highlight_document["archive_path"],
+            "/games/game-a/archive-2.mp4"
+        );
+        assert!(fixture.workspace.track_run.is_empty());
+        assert!(fixture.workspace.track_choices.is_null());
+        assert!(fixture.workspace.highlight_dirty);
+    }
+
+    #[test]
+    fn boxes_use_centered_absolute_dimensions_and_minimum_size() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(1000.0, 500.0));
+        let center = egui::pos2(300.0, 200.0);
+        let rectangle = annotation_box_rect(canvas, center, &json!({"dx":-0.2,"dy":0.4}));
+        assert_eq!(rectangle.min, egui::pos2(200.0, 100.0));
+        assert_eq!(rectangle.max, egui::pos2(400.0, 300.0));
+        let minimum = annotation_box_rect(canvas, center, &json!({"dx":0,"dy":0}));
+        assert_eq!(minimum.size(), egui::vec2(20.0, 10.0));
+    }
+
+    #[test]
+    fn lens_and_sync_mutations_refresh_revision_for_the_next_edit() {
+        for operation in ["calibration.lens", "calibration.reset_sync"] {
+            let mut fixture = Fixture::new();
+            fixture.workspace.calibration = json!({"revision":"old", "settings":{}});
+            fixture.workspace.accept_result(operation, &json!({}), json!({"revision":"new", "settings":{"stitching.horizontal_fov":120}, "catalog":[]}));
+            assert_eq!(fixture.workspace.calibration["revision"], "new");
+            assert_eq!(fixture.workspace.settings["stitching.horizontal_fov"], 120);
+            assert!(fixture.workspace.pending.is_empty());
         }
     }
 

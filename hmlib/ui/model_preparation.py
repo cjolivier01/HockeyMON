@@ -100,11 +100,19 @@ def _identity(config: dict, target: str) -> str:
 def cache_directory(game: Path, target: str, config: dict | None = None) -> Path:
     if target not in {"detector", "pose", "reid"}:
         raise ValueError("Model target must be detector, pose, or reid")
-    return game / ".hm-ui" / "models" / target / _identity(config or _effective(game), target)
+    return (
+        game
+        / ".hm-ui"
+        / "models"
+        / target
+        / _identity(config if config is not None else _effective(game), target)
+    )
 
 
-def model_status(game: Path, target: str, *, verify_digest: bool = False) -> dict:
-    directory = cache_directory(game, target)
+def model_status(
+    game: Path, target: str, *, verify_digest: bool = False, config: dict | None = None
+) -> dict:
+    directory = cache_directory(game, target, config)
     manifest = directory / "ready.json"
     status = {
         "target": target,
@@ -138,8 +146,8 @@ def readiness(game: Path) -> dict:
     return {"models": [model_status(game, target) for target in ("detector", "pose", "reid")]}
 
 
-def prepared_onnx_arguments(game: Path, target: str) -> list[str]:
-    status = model_status(game, target, verify_digest=True)
+def prepared_onnx_arguments(game: Path, target: str, *, config: dict | None = None) -> list[str]:
+    status = model_status(game, target, verify_digest=True, config=config)
     if status["state"] != "ready":
         raise ValueError(f"{target.capitalize()} INT8 preparation is required: {status['message']}")
     return [f"--{target}-onnx-enable", f"--{target}-onnx", status["path"]]

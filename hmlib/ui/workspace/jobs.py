@@ -37,7 +37,7 @@ class Jobs:
         self,
         command: list[str],
         *,
-        game: Path,
+        game: Path | None,
         kind: str,
         cwd: Path,
         environment: dict[str, str],
@@ -51,7 +51,7 @@ class Jobs:
         record = {
             "id": job_id,
             "kind": kind,
-            "game": str(game),
+            "game": str(game) if game is not None else None,
             "command": command,
             "cwd": str(cwd),
             "status": "starting",

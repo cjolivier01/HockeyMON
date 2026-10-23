@@ -154,15 +154,22 @@ def prepare_replay(
             for key, value in json.loads(event["value"]).get("camera", {}).items():
                 set_path(config, "rink.camera." + key, value)
         original = snapshot.get("source_video_paths", [])
-        permitted = {
-            Path(item["path"]).resolve() for item in (*catalog["videos"], *catalog["archives"])
+        # Raw camera inputs cannot stand in for the stitched raster, even if a
+        # camera coincidentally has identical dimensions/FPS to the panorama.
+        originals = {Path(original[0]).expanduser().resolve()} if len(original) == 1 else set()
+        matching_archives = {
+            Path(item["path"]).resolve()
+            for item in catalog["archives"]
+            if item["kind"] == "stitched" and str(database) in item["recordings"]
         }
-        permitted.update(Path(value).expanduser().resolve() for value in original)
+        permitted = originals | matching_archives
         requested = args.get("source_path")
         if requested:
             source_path = Path(requested).expanduser().resolve(strict=True)
             if source_path not in permitted:
-                raise ValueError("Replay source must be a recorded input or game archive")
+                raise ValueError(
+                    "Replay source must be a recorded input or a Stitched archive paired with the selected telemetry"
+                )
         elif len(original) == 1 and Path(original[0]).is_file():
             source_path = Path(original[0]).resolve()
         else:
@@ -225,6 +232,15 @@ def prepare_replay(
             target.close()
         set_path(config, "game.videos", {"source": [str(source_path)]})
         set_path(config, "stitching.enabled", False)
+        from hmlib.config import load_yaml_files_ordered
+        from hmlib.ui.analytics_graph import graph_paths
+
+        # The archived graph can contain pose/jersey/action inference branches.
+        # A deep merge with tracking.yaml retains those nodes, so replace the
+        # node mapping for this inference-free camera experiment. The original
+        # effective graph remains preserved in the frozen telemetry database.
+        replay_graph = load_yaml_files_ordered([str(path) for path in graph_paths("tracking")])
+        set_path(config, "aspen.plugins", replay_graph["aspen"]["plugins"])
         for key, value in {
             "detector": "saved",
             "precision": "saved",

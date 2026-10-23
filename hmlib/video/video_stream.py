@@ -893,6 +893,14 @@ class VideoStreamReader:
     def open(self):
         assert self._video_in is None
         self._video_info = BasicVideoInfo(self._filename)
+        if (self._video_info.width % 2 or self._video_info.height % 2) and self._type != "cv2":
+            logger.warning(
+                "Decoding exact odd-sized canvas %sx%s with CPU OpenCV; hardware YUV420 decoders cannot preserve this raster: %s",
+                self._video_info.width,
+                self._video_info.height,
+                self._filename,
+            )
+            self._type = "cv2"
         if self._codec is None and self._type not in ("ffmpeg", "pynvcodec", "pyamdcodec"):
             self._codec = _FOURCC_TO_CODEC.get(self._video_info.codec.upper(), None)
             if self._codec is None and self._type != "cv2":
@@ -1318,6 +1326,32 @@ def create_output_video_stream(
     # Normalize fps to a plain float so downstream writers and backends
     # never see Fraction instances.
     fps_val = float(fps)
+    if width % 2 or height % 2:
+        from hmlib.video.exact_raster_writer import ExactRasterWriter
+
+        logger.warning(
+            "Encoding exact odd-sized canvas %sx%s with software H.264 4:4:4; YUV420 would crop or pad tracking coordinates: %s",
+            width,
+            height,
+            filename,
+        )
+        return ExactRasterWriter(
+            filename=filename,
+            fps=fps_val,
+            width=int(width),
+            height=int(height),
+            bit_rate=int(bit_rate),
+            audio=(
+                {
+                    "source": mux_audio_file,
+                    "stream": mux_audio_stream,
+                    "offset_seconds": mux_audio_offset_seconds,
+                    "bitrate": mux_audio_aac_bitrate,
+                }
+                if mux_audio_file
+                else None
+            ),
+        )
     codec_lower = (codec or "").lower()
     # use_pynvcodec_env = os.environ.get("HM_VIDEO_ENCODER", "").lower() == "pynvcodec"
     use_pynvcodec_env = True

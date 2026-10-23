@@ -116,16 +116,6 @@ def apply_analytics_preferences(config: dict) -> None:
         if mode not in {"bbox", "pose"}:
             raise ValueError("Jersey crop mode must be bbox or pose")
         jerseys.setdefault("params", {})["roi_mode"] = mode
-        if "save_tracking" in plugins:
-            plugins["jersey_save_join"] = {
-                "class": "hmlib.aspen.plugins.join_plugin.JoinPlugin",
-                "depends": ["tracker", "jersey_numbers"],
-                "params": {
-                    "required_plugins": ["tracker", "jersey_numbers"],
-                    "output_key": "jersey_tracking_joined",
-                },
-            }
-            plugins["save_tracking"]["depends"] = ["jersey_save_join"]
         if "play_tracker" in plugins:
             plugins["play_tracker"].setdefault("params", {})["plot_jersey_numbers"] = False
     for target, node_name, class_name in (
@@ -143,3 +133,21 @@ def apply_analytics_preferences(config: dict) -> None:
             raise ValueError(f"Custom {target} requires a compatible ONNX model path")
         node["class"] = f"hmlib.aspen.plugins.native_analytics_plugin.{class_name}"
         node.setdefault("params", {})["model_path"] = path
+
+    # Telemetry snapshots tracks at SaveTrackingPlugin, so it must wait for
+    # every enabled label producer even in a threaded graph.
+    labels = [
+        name
+        for name in ("jersey_numbers", "actions")
+        if name in plugins and plugins[name].get("enabled", True)
+    ]
+    if labels and "save_tracking" in plugins:
+        plugins["analytics_save_join"] = {
+            "class": "hmlib.aspen.plugins.join_plugin.JoinPlugin",
+            "depends": ["tracker", *labels],
+            "params": {
+                "required_plugins": ["tracker", *labels],
+                "output_key": "analytics_tracking_joined",
+            },
+        }
+        plugins["save_tracking"]["depends"] = ["analytics_save_join"]

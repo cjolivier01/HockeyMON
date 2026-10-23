@@ -83,7 +83,7 @@ RUN_FIELDS = [
         "number",
         2,
         min=0.1,
-        max=240,
+        max=120,
     ),
     _field(
         "pipeline.player-analytics.jersey.confidence-threshold",
@@ -447,10 +447,53 @@ class OperatorWorkspace(CalibrationWorkspace):
         return staged
 
 
-def launch_arguments(game: Path, kind: str) -> list[str]:
+def launch_configuration(game: Path, explicit_arguments: list[str] | None = None) -> dict:
+    """Resolve launch inputs before translating saved choices into CLI arguments."""
+    import argparse
+
+    from hmlib.config import (
+        ROOT_DIR,
+        get_config,
+        load_config_file,
+        normalize_runtime_config,
+        recursive_update,
+        resolve_global_refs,
+    )
+    from hmlib.ui.workspace.files import read_config
+
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--root-dir", default=ROOT_DIR)
+    parser.add_argument("--ignore-private-config", "--ignore_private_config", type=int, default=0)
+    options, _ = parser.parse_known_args(explicit_arguments or [])
+    game_config = load_config_file(
+        root_dir=options.root_dir, config_type="games", config_name=game.name
+    )
+    if not options.ignore_private_config:
+        game_config = recursive_update(game_config, read_config(game))
+    camera = game_config.get("camera")
+    if isinstance(camera, dict):
+        camera = camera.get("name")
+    config = get_config(
+        root_dir=options.root_dir,
+        camera=camera,
+        rink=_get(game_config, "game.rink"),
+        resolve_globals=False,
+    )
+    return resolve_global_refs(normalize_runtime_config(recursive_update(config, game_config)))
+
+
+def launch_arguments(
+    game: Path,
+    kind: str,
+    *,
+    explicit_arguments: list[str] | None = None,
+    config: dict | None = None,
+) -> list[str]:
     """Translate saved run choices; explicit invocation arguments follow these."""
-    config = OperatorWorkspace(game)._effective()
+    if config is None:
+        config = launch_configuration(game, explicit_arguments)
     run = _get(config, "hm_ui.run", {})
+    explicit_options = {value.split("=", 1)[0] for value in (explicit_arguments or [])}
     arguments = []
     if run.get("stitch_precision", "saved") != "saved":
         if run["stitch_precision"] not in {"uint8", "float16", "float32"}:
@@ -460,7 +503,7 @@ def launch_arguments(game: Path, kind: str) -> list[str]:
         arguments += ["--cache-size", "0", "--fp16-stitch", "--max-output-dimension", "1920"]
     if run.get("save_video") is False:
         arguments.append("--no-save-video")
-    if run.get("output_fps"):
+    if "output_fps" in run and run["output_fps"] is not None:
         arguments += ["--output-fps", str(run["output_fps"])]
     if kind != "track":
         return arguments
@@ -475,6 +518,19 @@ def launch_arguments(game: Path, kind: str) -> list[str]:
         if "jersey" in analysis:
             arguments.append("--detect-jersey-numbers")
     for target, setting in (("detector", "precision"), ("pose", "pose_precision")):
+        if explicit_options.intersection(
+            {
+                f"--{target}-onnx",
+                f"--{target}-onnx-enable",
+                f"--{target}-onnx-quantize-int8",
+                f"--{target}-trt-enable",
+                f"--{target}-trt-engine",
+            }
+        ):
+            # An explicit backend replaces the whole saved engine choice. Do
+            # this before validating a prepared INT8 cache, since that cache
+            # is irrelevant when the caller supplies a different engine.
+            continue
         precision = run.get(setting, "saved")
         if precision == "saved":
             continue
@@ -497,12 +553,87 @@ def launch_arguments(game: Path, kind: str) -> list[str]:
             if precision == "onnx-int8":
                 from hmlib.ui.model_preparation import prepared_onnx_arguments
 
-                arguments += prepared_onnx_arguments(game, target)
+                arguments += prepared_onnx_arguments(game, target, config=config)
                 if target == "detector" and run.get("detector", "saved") == "saved":
                     arguments += ["--detector-model", "deployed"]
             else:
                 arguments.append(f"--{target}-onnx-enable")
     return arguments
+
+
+def prefer_explicit_launch_arguments(
+    generated: list[str], explicit: list[str], kind: str
+) -> list[str]:
+    """Remove generated switches overridden by the invocation, including aliases.
+
+    Merely appending the caller's flags fails for argparse mutually exclusive
+    pairs such as --detector-trt-fp16/--no-detector-trt-fp16. Use their shared destinations so
+    the original command retains the same meaning as a direct CLI invocation.
+    """
+    if not generated or not explicit:
+        return generated
+    if kind == "track":
+        from hmlib.cli.hmtrack import make_parser
+
+        parser = make_parser()
+    elif kind == "stitch":
+        from hmlib.cli.stitch import make_parser
+        from hmlib.hm_opts import hm_opts
+
+        parser = hm_opts.parser(parser=make_parser())
+    else:
+        raise ValueError("Pipeline kind must be track or stitch")
+    options = parser._option_string_actions
+    overridden = {
+        options[token.split("=", 1)[0]].dest
+        for token in explicit
+        if token.split("=", 1)[0] in options
+    }
+    # These entries target distinct configuration keys, not one scalar option.
+    # Keep all entries in order: unrelated keys coexist and later duplicate keys
+    # retain the CLI override semantics of hm_opts.apply_config_overrides.
+    overridden.discard("config_overrides")
+    result, index = [], 0
+    while index < len(generated):
+        token = generated[index]
+        action = options[token.split("=", 1)[0]]
+        # Generated choices use only scalar values and ordinary boolean flags.
+        if action.nargs not in (None, 0):
+            raise ValueError(f"Unsupported generated launch argument: {token}")
+        count = 1 if "=" in token or action.nargs == 0 else 2
+        if action.dest not in overridden:
+            result.extend(generated[index : index + count])
+        index += count
+    return result
+
+
+PIPELINE_PREFERENCES = ("threaded", "queue_size", "max_concurrent")
+
+
+def saved_pipeline_preferences(
+    game_id: str | None,
+    *,
+    root_dir: str | Path | None = None,
+    ignore_private_config: bool = False,
+) -> dict:
+    """Read explicit game preferences without mistaking baseline defaults for choices."""
+    from hmlib.config import get_game_config_private, load_config_file, recursive_update
+
+    if game_id is None:
+        return {}
+    config = load_config_file(root_dir=root_dir, config_type="games", config_name=game_id)
+    if not ignore_private_config:
+        config = recursive_update(config or {}, get_game_config_private(game_id=game_id) or {})
+    pipeline = _get(config or {}, "aspen.pipeline", {})
+    return {key: pipeline[key] for key in PIPELINE_PREFERENCES if key in pipeline}
+
+
+def apply_pipeline_preferences(config: dict, preferences: dict) -> None:
+    """Restore operator choices after loading a graph, before applying CLI overrides."""
+    pipeline = config.setdefault("aspen", {}).setdefault("pipeline", {})
+    for key in PIPELINE_PREFERENCES:
+        if key in preferences:
+            pipeline[key] = preferences[key]
 
 
 def apply_engine_preferences(config: dict) -> None:
@@ -530,7 +661,16 @@ def inspect_pipeline(game: Path) -> dict:
 
     run = _get(config, "hm_ui.run", {})
     graphs = [str(path) for path in graph_paths(selected_analysis(config))]
-    config = resolve_global_refs(recursive_update(config, load_yaml_files_ordered(graphs)))
+    from hmlib.config import ROOT_DIR, load_config_file
+    from hmlib.ui.workspace.files import read_config
+
+    saved = recursive_update(
+        load_config_file(root_dir=ROOT_DIR, config_type="games", config_name=game.name) or {},
+        read_config(game),
+    )
+    config = recursive_update(config, load_yaml_files_ordered(graphs))
+    apply_pipeline_preferences(config, _get(saved, "aspen.pipeline", {}))
+    config = resolve_global_refs(config)
     apply_engine_preferences(config)
     from hmlib.aspen.plugins.reid_plugin import configure_reid
 

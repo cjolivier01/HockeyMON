@@ -443,3 +443,152 @@ def should_capture_real_instance_metadata_and_mask(tmp_path):
             1,
         )
         assert db.execute("SELECT tracking_id FROM tracks").fetchone()[0] == "99"
+
+
+@pytest.mark.parametrize("number", ["37", "0", "00"])
+def should_replay_settled_labels_verbatim_and_expire_after_database_round_trip(
+    tmp_path, monkeypatch, number
+):
+    from mmdet.structures import DetDataSample, TrackDataSample
+
+    from hmlib.actions.action_tracker import ActionTracker
+    from hmlib.aspen.player_semantics import JerseyLabel, SettledActions, SettledJerseys
+    from hmlib.aspen.plugins.load_plugins import LoadTrackingPlugin
+    from hmlib.aspen.plugins.overlay_plugin import OverlayPlugin
+    from hmlib.camera.play_tracker import PlayTracker
+
+    recorder = TelemetryRecorder(tmp_path, "labels", {}, {"tracks"})
+    ctx = context(tuple(range(121)))
+    for sample in ctx["data_samples"][0]:
+        sample.pred_track_instances.instances_id = torch.tensor([77, 0])
+    ctx["jersey_results"] = [
+        SettledJerseys([JerseyLabel(77, number, 1.0)] if frame <= 90 else [])
+        for frame in range(121)
+    ]
+    action = {"tracking_id": 77, "label": "skating", "label_index": 2, "score": 0.95}
+    ctx["action_results"] = [
+        SettledActions([action] if frame <= 90 else []) for frame in range(121)
+    ]
+    capture(recorder, ctx, stages=("tracks",))
+    recorder.close()
+    complete_recording(recorder.path)
+
+    replay = {
+        "shared": {"tracking_data_path": recorder.path},
+        "frame_id": 90,
+        "frame_ids": torch.tensor([90, 120]),
+        "data_samples": TrackDataSample(video_data_samples=[DetDataSample(), DetDataSample()]),
+    }
+    replay.update(LoadTrackingPlugin().forward(replay))
+    drawn_jerseys, drawn_actions = [], []
+
+    def draw_jersey(image, text, *args, **kwargs):
+        drawn_jerseys.append(text)
+        return image
+
+    def draw_action(image, text, *args, **kwargs):
+        drawn_actions.append(text)
+        return image
+
+    monkeypatch.setattr("hmlib.vis.player_labels.draw_label_box", draw_jersey)
+    monkeypatch.setattr("hmlib.jersey.jersey_tracker.draw_label_box", draw_jersey)
+    monkeypatch.setattr("hmlib.actions.action_tracker.vis.my_put_text", draw_action)
+    images = torch.zeros((2, 40, 80, 3), dtype=torch.uint8)
+    OverlayPlugin(plot_jersey_numbers=True)._draw_jerseys(images, replay)
+    tracker = SimpleNamespace(_action_tracker=ActionTracker(show=True))
+    for index, frame in enumerate((90, 120)):
+        PlayTracker.process_actions_info(tracker, index, frame, replay)
+        tracker._action_tracker.draw(
+            images[index], torch.tensor([77]), torch.tensor([[1.0, 2.0, 7.0, 10.0]])
+        )
+    assert drawn_jerseys == [number]
+    assert drawn_actions == ["skating"]
+    assert tracker._action_tracker._actions == {}
+
+
+@pytest.mark.parametrize("threaded", [False, True])
+@pytest.mark.parametrize("with_jerseys", [False, True])
+def should_capture_action_labels_after_analytics_branches_join(
+    tmp_path, monkeypatch, threaded, with_jerseys
+):
+    from hmlib.aspen import AspenNet
+    from hmlib.aspen.player_semantics import JerseyLabel, SettledActions, SettledJerseys
+    from hmlib.ui.analytics_graph import apply_analytics_preferences
+
+    if threaded and not torch.cuda.is_available():
+        pytest.skip("Aspen threaded graph mode uses CUDA streams")
+    monkeypatch.chdir(tmp_path)
+    action = {"tracking_id": 77, "label": "skating", "label_index": 2, "score": 0.95}
+    outputs = {"tracker": {}, "actions": {"action_results": [SettledActions([action])]}}
+    if with_jerseys:
+        outputs["jersey_numbers"] = {"jersey_results": [SettledJerseys([JerseyLabel(77, "00", 1)])]}
+    plugins = {name: {"class": "placeholder", "depends": []} for name in outputs}
+    plugins["save_tracking"] = {
+        "class": "hmlib.aspen.plugins.save_plugins.SaveTrackingPlugin",
+        "depends": ["tracker"],
+    }
+    config = {"aspen": {"plugins": plugins}, "hm_ui": {"run": {"analytics": "pose-actions"}}}
+    apply_analytics_preferences(config)
+    # Replace model inference only; retain the configured joins, save stage,
+    # source samples and real threaded Aspen/SQLite recording path.
+    for name, values in outputs.items():
+        plugins[name] = {
+            "class": "hmlib.aspen.plugins.test_threaded_graph_plugin.KeyPlugin",
+            "depends": [],
+            "params": {"outputs": values},
+        }
+    config["aspen"]["pipeline"] = {"threaded": threaded, "graph": True, "queue_size": 1}
+    recorder = TelemetryRecorder(tmp_path, "labels", {}, {"tracks"})
+    ctx = context((90,))
+    ctx["data_samples"][0][0].pred_track_instances.instances_id = torch.tensor([77, 0])
+    ctx["telemetry_batch"] = recorder.new_batch()
+    if threaded:
+        ctx["device"] = "cuda"
+    net = AspenNet("analytics_recording", config["aspen"])
+    try:
+        net(ctx)
+    finally:
+        net.finalize()
+    recorder.close()
+    complete_recording(recorder.path)
+    replay = DatabaseTrackingDataFrame(input_file=recorder.path, input_batch_size=1)
+    recorded = replay.get_data_dict_by_frame(90)
+    assert isinstance(recorded["action_results"], SettledActions)
+    assert recorded["action_results"] == [action]
+    if with_jerseys:
+        assert isinstance(recorded["jersey_results"], SettledJerseys)
+        assert recorded["jersey_results"][0].number == "00"
+
+
+def should_save_fresh_replay_actions_without_appending_to_input_tracks(tmp_path):
+    from mmdet.structures import DetDataSample, TrackDataSample
+
+    from hmlib.aspen.player_semantics import SettledActions
+    from hmlib.aspen.plugins.load_plugins import LoadTrackingPlugin
+    from hmlib.aspen.plugins.save_plugins import SaveActionsPlugin
+    from hmlib.tracking_utils.action_dataframe import ActionDataFrame
+
+    recorder = TelemetryRecorder(tmp_path, "replay", {}, {"tracks"})
+    ctx = context((0,))
+    ctx["data_samples"][0][0].pred_track_instances.instances_id = torch.tensor([77, 0])
+    capture(recorder, ctx, stages=("tracks",))
+    recorder.close()
+    complete_recording(recorder.path)
+    before = recorder.path.read_bytes()
+    replay = {
+        "shared": {"tracking_data_path": recorder.path},
+        "work_dir": str(tmp_path / "fresh"),
+        "frame_id": 0,
+        "frame_ids": torch.tensor([0]),
+        "data_samples": TrackDataSample(video_data_samples=[DetDataSample()]),
+    }
+    replay.update(LoadTrackingPlugin(load_actions=False).forward(replay))
+    assert "action_results" not in replay
+    replay["action_results"] = [SettledActions()]
+    saver = SaveActionsPlugin()
+    saver.forward(replay)
+    saver.finalize()
+    saved = ActionDataFrame(input_file=tmp_path / "fresh/actions.csv")
+    assert saved.get_data_dict_by_frame(0) == {"actions": []}
+    assert replay["tracking_dataframe"]._dataframe_list == []
+    assert recorder.path.read_bytes() == before

@@ -236,8 +236,15 @@ def should_replace_manual_matches_and_trigger_existing_edited_pto_path(game):
     assert consumed["m_kpts0"].tolist() == [pair[:2] for pair in pairs]
 
 
-def should_fit_and_roundtrip_physical_rink_map_and_goals(game):
+def _rink_generation(game):
     _generation(game)
+    for name in ("hm_project.pto", "autooptimiser_out.pto"):
+        path = game / name
+        path.write_text(path.read_text().replace("p f2 w800 h200 v180", "p f0 w400 h200 v90"))
+
+
+def should_fit_and_roundtrip_physical_rink_map_and_goals(game):
+    _rink_generation(game)
     workspace = CalibrationWorkspace(game)
     goal = [[0, 70], [20, 70], [20, 130], [0, 130]]
     workspace.save_rink_map(_landmarks(), [goal])
@@ -246,7 +253,7 @@ def should_fit_and_roundtrip_physical_rink_map_and_goals(game):
     assert mapping["reprojection_error"] < 1e-6
     assert np.allclose(project_rink_points([[199.5, 99.5]], mapping), [[30.48, 12.954]])
     assert np.allclose(
-        project_rink_points([[99.75, 49.75]], mapping, image_size=[200, 100]), [[30.48, 12.954]]
+        project_rink_points([[99.5, 49.5]], mapping, image_size=[200, 100]), [[30.48, 12.954]]
     )
     assert np.allclose(unproject_rink_points([[30.48, 12.954]], mapping), [[199.5, 99.5]])
     assert len(project_goal_polygons(mapping)[0]) == 4
@@ -258,7 +265,7 @@ def should_fit_and_roundtrip_physical_rink_map_and_goals(game):
 
 
 def should_reject_degenerate_map_and_enable_only_reviewed_maps(game):
-    _generation(game)
+    _rink_generation(game)
     workspace = CalibrationWorkspace(game)
     before = (game / "config.yaml").read_bytes()
     with pytest.raises(ValueError, match="projection"):
@@ -584,3 +591,52 @@ def should_edit_single_source_scoreboard_and_fence_recording_replacement(game, m
     source.touch()
     with pytest.raises(ValueError, match="changed"):
         editor.set_scoreboard(points, expected_revision=saved_revision)
+
+
+def should_save_partial_source_marks_without_enabling_rink_guidance(game):
+    _rink_generation(game)
+    workspace = CalibrationWorkspace(game)
+    marks = [
+        {
+            "feature": "goal-left-line",
+            "camera": 0,
+            "line": True,
+            "enabled": True,
+            "pixels": [[30, 100], [300, 100]],
+        }
+    ]
+    snapshot = workspace.save_rink_map(observations=marks, allow_partial=True)
+    saved = snapshot["rink_map"]["mapping"]
+    assert saved["version"] == 2
+    assert saved["fit"]["state"] == "partial"
+    assert len(saved["observations"][0]["rays"]) == 2
+    assert prepare_rink_map(game) is None
+    with pytest.raises(ValueError, match="reviewed map"):
+        workspace.update_settings({"rink.camera.rink_framing.enabled": True})
+    with pytest.raises(ValueError, match="Arbitrary"):
+        workspace.rink_map_leveling()
+    before = (game / "config.yaml").read_bytes()
+    with pytest.raises(ValueError, match="outside|inside"):
+        workspace.save_rink_map(
+            observations=[{**marks[0], "pixels": [[0, 0], [999, 100]]}], allow_partial=True
+        )
+    assert (game / "config.yaml").read_bytes() == before
+
+
+def should_reuse_custom_panorama_evidence_for_saved_map_leveling(game):
+    _rink_generation(game)
+    workspace = CalibrationWorkspace(game)
+    workspace.save_rink_map(_landmarks())
+    estimate = workspace.rink_map_leveling(yaw=17)
+    assert estimate["rotation_degrees"][0] == 17
+    assert np.isfinite(estimate["rotation_degrees"]).all()
+
+
+def should_refuse_metric_maps_without_calibrated_source_rays(game):
+    config = _private(game)
+    config["stitching"] = {"mapping_backend": "opencv-magsac", "projection": "rectilinear"}
+    (game / "config.yaml").write_text(yaml.safe_dump(config))
+    _rink_generation(game)
+    workspace = CalibrationWorkspace(game)
+    with pytest.raises(ValueError, match="calibrated NONA camera rays"):
+        workspace.save_rink_map(_landmarks())

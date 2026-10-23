@@ -38,6 +38,26 @@ options override saved launch preferences. Save writes only managed settings;
 stale editor revisions fail visibly instead of replacing newer changes.
 Geometric edits invalidate dependent calibration products and rink maps.
 
+Rink map uses identified point and line marks in Camera 1 and Camera 2. **Find
+landmarks** runs the pinned Mask2Former model on calibration stills; assign blue
+and goal lines to their rink end before using them. **Use rink mask** proposes
+an unchecked far-board line and a near-board arc with three draggable handles.
+Move the handles to the ice edge and enable **Use** after reviewing them.
+Goal-line endpoints can become identified board intersections after choosing
+the near endpoint; **Undo** restores that conversion in one action.
+
+**Save partial / fitted map** retains incomplete evidence without enabling
+camera guidance. A complete map fits a metric plane to calibrated source rays;
+parallel lines alone remain partial. **Save and use for leveling** reuses a
+complete plane or four identified near/far intersections and opens the normal
+preview/save workflow. Saved marks appear over its source images and panorama
+preview. Metric mapping requires the NONA backend, whose registered optics and poses
+provide source rays; OpenCV affine/MAGSAC calibrations must be rebuilt with NONA.
+Hugin tools supply lens and output projection transforms; playback
+uses a checked, cached ray lookup, including cylindrical/Panini geometry, crop,
+resize and output rotation. Older version-1 pixel maps must be reviewed and
+saved again before enabling rink camera guidance.
+
 Camera experiments can replay a selected telemetry recording against its original
 source or matching full Stitched archive without rerunning detection. Select one
 continuous source/geometry interval; its tracks, source identity and time range

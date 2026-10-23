@@ -4,12 +4,28 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image
 
 SAMPLE_NS = 100_000_000
 MAX_GAP_NS = 150_000_000
+
+
+@dataclass(frozen=True)
+class JerseyLabel:
+    tracking_id: int
+    number: str
+    score: float
+
+
+class SettledJerseys(list[JerseyLabel]):
+    """Complete visible labels for this frame, including an authoritative empty list."""
+
+
+class SettledActions(list[dict]):
+    """Complete visible actions for this frame; renderers must not retain expired labels."""
 
 
 class ActionHistory:

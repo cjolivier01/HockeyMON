@@ -5,8 +5,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import torch
+
 from hmlib.builder import HM
 from hmlib.config import get_nested_value, normalize_runtime_config
+from hmlib.ui.output_cadence import OutputCadence, recording_fps
 from hmlib.utils.gpu import unwrap_tensor
 from hmlib.utils.image import make_channels_last
 from hmlib.utils.path import add_prefix_to_filename
@@ -122,6 +125,9 @@ class VideoOutPlugin(Plugin):
         self._path_audio: dict[Path, dict] = {}
         self._recording_capabilities: list[str] = []
         self._segments_manifest: Path | None = None
+        self._cadence: OutputCadence | None = None
+        self._source_fps = 0.0
+        self._last_source_frame = None
 
     def set_cuda_graph_enabled(self, enabled: bool) -> bool:
         self._cuda_graph_enabled = bool(enabled)
@@ -179,7 +185,9 @@ class VideoOutPlugin(Plugin):
         # If the sink is used without the prep plugin, it still needs enough
         # layout information to prepare frames correctly on its own.
         vo_dev = self._vo_dev if self._vo_dev is not None else device
-        fps = self._resolve_fps(context)
+        self._source_fps = self._resolve_fps(context)
+        fps = recording_fps(cfg, self._source_fps)
+        self._cadence = OutputCadence(self._source_fps, fps)
 
         bit_rate = self._bit_rate
         progress_bar = shared.get("progress_bar") if isinstance(shared, dict) else None
@@ -374,7 +382,7 @@ class VideoOutPlugin(Plugin):
             self._path_audio[path] = {
                 **self._archive_audio,
                 "offset_seconds": self._archive_audio["offset_seconds"]
-                - self._frames_written / self._archive_options["fps"],
+                - self._frames_written / self._source_fps,
             }
 
     def _segment_path(self, role: str, basename: str) -> Path:
@@ -529,12 +537,13 @@ class VideoOutPlugin(Plugin):
                     tempfile.mkdtemp(prefix=".archives-", dir=Path(self._out_path).parent)
                 )
             self._segments_manifest = self._archive_dir / "recording_segments.json"
-            fps = self._archive_options["fps"]
+            fps = self._source_fps
             write_json(
                 self._segments_manifest,
                 {
                     "schema": 1,
                     "fps": fps,
+                    "output_fps": self._archive_options["fps"],
                     "segments": [
                         {
                             **{key: value for key, value in item.items() if key != "path"},
@@ -576,6 +585,19 @@ class VideoOutPlugin(Plugin):
     def output_keys(self):
         return set()
 
+    @staticmethod
+    def _write_frames(writer: VideoOutput, prepared: dict) -> None:
+        # Cadence conversion can expand or shrink any source batch. Writers are
+        # opened for single frames (including the CPU OpenCV writer), so send
+        # the selected output frames individually to every backend.
+        for index in range(len(prepared["frame_ids"])):
+            frame = dict(prepared)
+            frame["frame_ids"] = prepared["frame_ids"][index : index + 1]
+            for key in ("img", "end_zone_img"):
+                if prepared.get(key) is not None:
+                    frame[key] = prepared[key][index : index + 1]
+            writer.write_prepared_results(frame)
+
     def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
@@ -583,23 +605,50 @@ class VideoOutPlugin(Plugin):
             self._ensure_initialized(context)
             self._sync_recordings(context)
         assert self._vo is not None
+        frames = unwrap_tensor(context["img"])
+        count = int(frames.shape[0]) if frames.ndim == 4 else 1
+        source_ids = unwrap_tensor(context["frame_ids"])
+        if self._last_source_frame is not None and torch.any(source_ids <= self._last_source_frame):
+            raise ValueError("Video output received non-monotonic source frame IDs")
+        self._last_source_frame = source_ids.max()
+        indices = self._cadence.select(count)
+        self._frames_written += count
+        if not indices:
+            return {}
         prepared = dict(context)
         if not prepared.get("video_out_prepared", False):
             # Preserve backward compatibility for configs that instantiate only
             # the sink plugin: it can still perform prep internally.
             with self.profile_scope("video_out.prepare_fallback"):
                 prepared = self._vo.prepare_results(prepared)
+        output_ids = (
+            source_ids
+            if self._cadence.source_fps == self._cadence.output_fps
+            else torch.arange(
+                self._cadence.output_count - len(indices) + 1,
+                self._cadence.output_count + 1,
+                device=source_ids.device,
+            )
+        )
+        for key in ("img", "end_zone_img"):
+            if prepared.get(key) is not None:
+                images = make_channels_last(unwrap_tensor(prepared[key]))
+                if images.ndim == 3:
+                    images = images.unsqueeze(0)
+                prepared[key] = images[indices].contiguous()
+        prepared["frame_ids"] = output_ids
         with self.profile_scope("video_out.write"):
-            self._vo.write_prepared_results(prepared)
+            self._write_frames(self._vo, prepared)
         for source, writer in self._archives.items():
             frames = make_channels_last(unwrap_tensor(context[source]))
             if frames.ndim == 3:
                 frames = frames.unsqueeze(0)
-            frames = frames.contiguous()
+            frames = frames[indices].contiguous()
             height, width = frames.shape[-3:-1]
             archive = dict(context)
             archive.update(
                 img=frames,
+                frame_ids=output_ids,
                 video_out_prepared=False,
                 video_frame_cfg={
                     **context["video_frame_cfg"],
@@ -609,9 +658,7 @@ class VideoOutPlugin(Plugin):
                 },
             )
             archive.pop("end_zone_img", None)
-            writer.write_prepared_results(writer.prepare_results(archive))
-        frames = unwrap_tensor(context["img"])
-        self._frames_written += int(frames.shape[0]) if frames.ndim == 4 else 1
+            self._write_frames(writer, writer.prepare_results(archive))
         return {}
 
 

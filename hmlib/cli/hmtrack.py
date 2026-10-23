@@ -778,7 +778,11 @@ def _enable_load_tracking_plugin(
         depends = ["image_prep"]
     if depends:
         load_tracking["depends"] = depends
-    load_tracking.setdefault("params", {})
+    load_params = load_tracking.setdefault("params", {})
+    for setting, producer in (("load_jerseys", "jersey_numbers"), ("load_actions", "actions")):
+        load_params[setting] = not (
+            isinstance(plugins.get(producer), dict) and plugins[producer].get("enabled", True)
+        )
     plugins["load_tracking"] = load_tracking
 
     tracker = plugins.get("tracker")
@@ -789,7 +793,10 @@ def _enable_load_tracking_plugin(
     save_tracking = plugins.get("save_tracking")
     if isinstance(save_tracking, dict):
         save_tracking["enabled"] = True
-        save_tracking["depends"] = ["load_tracking"]
+        save_tracking["depends"] = [
+            "load_tracking" if name == "tracker" else name
+            for name in save_tracking.get("depends", ["tracker"])
+        ]
         plugins["save_tracking"] = save_tracking
 
     save_detections = plugins.get("save_detections")
@@ -819,6 +826,15 @@ def _enable_load_tracking_plugin(
                         for dependency in plugin.get("depends", [])
                     )
                 )
+                if str(plugin.get("class", "")).endswith(".JoinPlugin"):
+                    params = plugin.get("params") or {}
+                    if "required_plugins" in params:
+                        params["required_plugins"] = list(
+                            dict.fromkeys(
+                                "load_tracking" if name == "tracker" else name
+                                for name in params["required_plugins"]
+                            )
+                        )
         set_nested_value(game_config, "pipeline.tracker.reid-enable", False)
 
     camera_controller = plugins.get("camera_controller")
@@ -978,17 +994,23 @@ def _resolve_mux_audio_source(
     input_av_files: Any,
     *,
     frame_offsets: tuple[int, int] | None = None,
-) -> tuple[str, Any | None]:
+    start_frame: int = 0,
+    work_dir: Path | None = None,
+    stream: int = 0,
+) -> tuple[str | None, Any | None, float]:
     """Select an audio source file suitable for ffmpeg muxing.
 
-    Returns (audio_source_path, temp_audio_file_handle). The temp handle must
-    be kept alive until muxing completes if present.
+    Returns (audio_source_path, temporary_directory, timeline_offset_seconds).
+    The directory must be kept alive until muxing completes if present. The
+    offset uses the selected original video's rate, even when concatenation
+    produces an audio-only file or the recording uses a different output rate.
     """
-    from hmlib.audio import concatenate_audio
-    from hmlib.stitching.synchronize import synchronize_by_audio
+    import tempfile
 
-    temp_audio_file = None
-    audio_source = None
+    from hmlib.stitching.synchronize import synchronize_by_audio
+    from hmlib.ui.output_audio import prepare_chapter_audio
+
+    source_frame_offset = 0
     if isinstance(input_av_files, dict) or (
         isinstance(input_av_files, list) and len(input_av_files) == 2
     ):
@@ -1010,33 +1032,34 @@ def _resolve_mux_audio_source(
             if frame_offsets is not None
             else synchronize_by_audio(left_sync, right_sync)
         )
-        if lfo == 0:
-            chosen = left_files
-        elif rfo == 0:
-            chosen = right_files
-        else:
-            raise RuntimeError(f"Expected one frame offset to be zero; got {lfo=} {rfo=}.")
-
-        if len(chosen) > 1:
-            temp_audio_file = concatenate_audio(chosen)
-            if temp_audio_file is None:
-                raise RuntimeError("Failed to concatenate audio for muxing.")
-            audio_source = temp_audio_file.name
-        else:
-            audio_source = chosen[0]
+        if lfo < 0 or rfo < 0:
+            raise ValueError(f"Audio synchronization offsets must be nonnegative: {lfo=}, {rfo=}.")
+        chosen, source_frame_offset = (left_files, lfo) if lfo <= rfo else (right_files, rfo)
     else:
         if isinstance(input_av_files, list):
             if len(input_av_files) != 1:
                 raise ValueError(
                     f"Expected a single input AV file when not stitching; got {len(input_av_files)}."
                 )
-            audio_source = str(input_av_files[0])
+            chosen = [str(input_av_files[0])]
         else:
-            audio_source = str(input_av_files)
+            chosen = [str(input_av_files)]
 
-    if not audio_source:
+    if not chosen[0]:
         raise RuntimeError("Could not resolve an audio source for muxing.")
-    return str(audio_source), temp_audio_file
+    original_video = chosen[0]
+    offset_seconds = 0.0
+    if source_frame_offset or start_frame:
+        from hmlib.video.ffmpeg import BasicVideoInfo
+
+        source_fps = float(BasicVideoInfo(original_video).fps)
+        if not math.isfinite(source_fps) or source_fps <= 0:
+            raise ValueError(f"Cannot align audio: invalid source frame rate {source_fps}")
+        offset_seconds = -(source_frame_offset + start_frame) / source_fps
+    audio_source, temporary = prepare_chapter_audio(
+        [Path(path) for path in chosen], work_dir or Path(tempfile.gettempdir()), stream=stream
+    )
+    return audio_source, temporary, offset_seconds
 
 
 def _ensure_three_channel(frame: torch.Tensor) -> torch.Tensor:
@@ -1563,6 +1586,8 @@ def _main(args, num_gpu):
 
         if args.output_fps is None:
             args.output_fps = get_nested_value(game_config, "camera.output-fps")
+        if args.output_fps is not None:
+            set_nested_value(game_config, "video_out.output_fps", args.output_fps)
 
         if args.lfo is None and args.rfo is None:
             offsets = get_nested_value(game_config, "stitching.offsets")
@@ -1624,7 +1649,9 @@ def _main(args, num_gpu):
         # Clear the previous run's snapshot before any pipeline work starts.
         Path(results_folder, "rink_mask_0.png").unlink(missing_ok=True)
         try:
-            args.game_dir = get_game_dir(args.game_id, assert_exists=False)
+            args.game_dir = (
+                get_game_dir(args.game_id, assert_exists=False) if args.game_id else None
+            )
         except (OSError, ValueError) as error:
             logger.warning("Cannot resolve game directory: %s", error)
             args.game_dir = None
@@ -2376,18 +2403,23 @@ def _main(args, num_gpu):
         mux_audio_file = args.mux_audio_file
         if (not args.audio_only) and (not args.no_audio) and output_video_path:
             if not mux_audio_file:
-                mux_audio_file, mux_audio_temp_file = _resolve_mux_audio_source(
-                    input_video_files, frame_offsets=synchronized_audio_offsets
+                (
+                    mux_audio_file,
+                    mux_audio_temp_file,
+                    source_audio_offset,
+                ) = _resolve_mux_audio_source(
+                    input_video_files,
+                    frame_offsets=synchronized_audio_offsets,
+                    start_frame=args.start_frame or 0,
+                    work_dir=Path(results_folder),
+                    stream=args.mux_audio_stream,
                 )
-                import av
-
-                with av.open(mux_audio_file) as audio_source:
-                    if not audio_source.streams.audio:
-                        logger.info("The source has no audio stream; recording video only.")
-                        mux_audio_file = None
-                    elif args.start_frame:
-                        video_rate = float(audio_source.streams.video[0].average_rate)
-                        args.mux_audio_offset_seconds -= args.start_frame / video_rate
+                if mux_audio_file is None:
+                    logger.info("The selected source has no audio stream; recording video only.")
+                else:
+                    args.mux_audio_offset_seconds += source_audio_offset
+                    if mux_audio_temp_file is not None:
+                        args.mux_audio_stream = 0
             if mux_audio_file:
                 output_video_path = _with_audio_output_path(output_video_path)
 
@@ -2468,7 +2500,7 @@ def _main(args, num_gpu):
         if dataloader is not None:
             actions.append(("tracking dataloader", dataloader.close))
         if mux_audio_temp_file is not None:
-            actions.append(("temporary mux audio", mux_audio_temp_file.close))
+            actions.append(("temporary mux audio", mux_audio_temp_file.cleanup))
         finalize_resources(actions, primary_error=sys.exc_info()[1])
     if telemetry_path is not None:
         from hmlib.telemetry.recorder import complete_recording
@@ -2643,6 +2675,18 @@ def main():
         root_dir=args.root_dir,
         ignore_private_config=bool(args.ignore_private_config),
     )
+    from hmlib.ui.runtime_setup import (
+        PIPELINE_PREFERENCES,
+        apply_engine_preferences,
+        apply_pipeline_preferences,
+        saved_pipeline_preferences,
+    )
+
+    saved_pipeline = saved_pipeline_preferences(
+        args.game_id,
+        root_dir=args.root_dir,
+        ignore_private_config=bool(args.ignore_private_config),
+    )
 
     # Merge user-provided YAML configs in order (--config can be repeated).
     # Later files override earlier values.
@@ -2664,14 +2708,30 @@ def main():
         default_aspen = os.path.join(ROOT_DIR, "config", "aspen", "tracking.yaml")
         if os.path.exists(default_aspen):
             additional_cfg_paths.append(default_aspen)
-    if additional_cfg_paths:
-        merged_extra = load_yaml_files_ordered(additional_cfg_paths)
+    built_in_graph_directory = (Path(ROOT_DIR) / "config" / "aspen").resolve()
+    for config_path in additional_cfg_paths:
+        resolved_path = Path(config_path)
+        if not resolved_path.is_absolute() and (Path(ROOT_DIR) / resolved_path).exists():
+            resolved_path = Path(ROOT_DIR) / resolved_path
+        merged_extra = load_yaml_files_ordered([config_path])
         if merged_extra:
             game_config = recursive_update(game_config, merged_extra)
+        if resolved_path.resolve().parent == built_in_graph_directory:
+            # Shipped graphs supply execution defaults. Saved operator choices
+            # and preceding custom overlays take precedence over those defaults.
+            apply_pipeline_preferences(game_config, saved_pipeline)
+        else:
+            # User YAML is an explicit override in the declared file order; do
+            # not restore the older private choices over this configuration.
+            explicit_pipeline = merged_extra.get("aspen", {}).get("pipeline", {})
+            saved_pipeline.update(
+                {
+                    key: explicit_pipeline[key]
+                    for key in PIPELINE_PREFERENCES
+                    if key in explicit_pipeline
+                }
+            )
     normalize_runtime_config(game_config)
-
-    from hmlib.ui.runtime_setup import apply_engine_preferences
-
     apply_engine_preferences(game_config)
 
     # Apply CLI-driven config overrides before resolving GLOBAL.* references so

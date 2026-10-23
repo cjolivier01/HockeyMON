@@ -204,8 +204,77 @@ def should_support_bbox_jerseys_without_pose_and_return_native_consensus():
     assert plugin.forward(_context(0, fresh=False))["jersey_results"] == [[]]
     assert plugin.forward(_context(1, fresh=False))["jersey_results"] == [[]]
     result = plugin.forward(_context(5, fresh=False))["jersey_results"][0][0]
-    assert result.number == 37 and result.tracking_id == 2**42
+    assert result.number == "37" and result.tracking_id == 2**42
     assert calls == [(1, 3, 32, 128), (1, 3, 32, 128)]
+
+
+@pytest.mark.parametrize("tokens,number", [([4, 8, 0], "37"), ([1, 0, 0], "0"), ([1, 1, 0], "00")])
+def should_render_current_native_jerseys_verbatim_and_remove_expired_badges(
+    monkeypatch, tokens, number
+):
+    from hmlib.aspen.plugins.overlay_plugin import OverlayPlugin
+    from hmlib.camera.play_tracker import PlayTracker
+
+    native = ParseqJerseyPlugin()
+    native.model = lambda images: np.stack([_jersey_logits(tokens) for _ in images])
+    overlay = OverlayPlugin(plot_jersey_numbers=True)
+    drawn = []
+
+    def draw(**kwargs):
+        drawn.append(kwargs["text"])
+        return kwargs["image"]
+
+    monkeypatch.setattr("hmlib.vis.player_labels.draw_label_box", draw)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Settled labels must not pass through legacy evidence aggregation")
+
+    monkeypatch.setattr(overlay._jersey_tracker, "observe_tracking_id_number_info", unexpected)
+    context = _context(0, fresh=False)
+    context.update(native.forward(context), img=context["original_images"])
+    overlay.forward(context)
+    assert drawn == [number]
+    tracker = SimpleNamespace()
+    PlayTracker.process_jerseys_info(tracker, 0, 0, context)
+    assert tracker._current_jersey_labels[0].number == number
+
+    native.model = lambda images: np.zeros((len(images), 3, 95), dtype=np.float32)
+    expired = _context(40, fresh=False)
+    expired.update(native.forward(expired), img=expired["original_images"])
+    overlay.forward(expired)
+    PlayTracker.process_jerseys_info(tracker, 0, 40, expired)
+    assert tracker._current_jersey_labels == []
+    assert drawn == [number]
+
+
+def should_remove_rendered_native_action_after_a_pose_history_gap(monkeypatch):
+    from hmlib.actions.action_tracker import ActionTracker
+    from hmlib.camera.play_tracker import PlayTracker
+
+    native = TemporalActionPlugin()
+    native.model = FakeAction()
+    for index in range(100):
+        context = _context(index)
+        context.update(native.forward(context))
+    tracker = SimpleNamespace(_action_tracker=ActionTracker(show=True))
+    drawn = []
+
+    def draw(image, text, *args, **kwargs):
+        drawn.append(text)
+        return image
+
+    monkeypatch.setattr("hmlib.actions.action_tracker.vis.my_put_text", draw)
+    PlayTracker.process_actions_info(tracker, 0, 99, context)
+    image = torch.zeros((100, 100, 3), dtype=torch.uint8)
+    ids, boxes = torch.tensor([2**42]), torch.tensor([[10, 30, 50, 50]])
+    tracker._action_tracker.draw(image, ids, boxes)
+    assert drawn == [native.labels[42]]
+    expired = _context(103)
+    expired.update(native.forward(expired))
+    PlayTracker.process_actions_info(tracker, 0, 103, expired)
+    tracker._action_tracker.draw(image, ids, boxes)
+    assert drawn == [native.labels[42]]
+    assert tracker._action_tracker._actions == {}
 
 
 def should_reject_wrong_pose_topology_and_preserve_one_to_one_association():

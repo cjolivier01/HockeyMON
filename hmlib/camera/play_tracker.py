@@ -385,6 +385,7 @@ class PlayTracker(torch.nn.Module):
 
         self._jersey_tracker = JerseyTracker(show=bool(plot_jersey_numbers))
         self._action_tracker = ActionTracker(show=bool(plot_actions))
+        self._current_jersey_labels = None
         # Cache for rink_profile (combined_mask, centroid, etc.) pulled from data samples meta
         self._rink_profile_cache = None
 
@@ -1043,10 +1044,16 @@ class PlayTracker(torch.nn.Module):
         return boxes_map, torch.stack(boxes_list)
 
     def process_jerseys_info(self, frame_index: int, frame_id: int, data: dict[str, Any]) -> None:
+        from hmlib.aspen.player_semantics import SettledJerseys
+
+        self._current_jersey_labels = None
         jersey_results = data.get("jersey_results")
         if not jersey_results:
             return
         jersey_results = jersey_results[frame_index]
+        if isinstance(jersey_results, SettledJerseys):
+            self._current_jersey_labels = jersey_results
+            return
         if not jersey_results:
             return
         for current_info in jersey_results:
@@ -1055,10 +1062,17 @@ class PlayTracker(torch.nn.Module):
             )
 
     def process_actions_info(self, frame_index: int, frame_id: int, data: dict[str, Any]) -> None:
+        from hmlib.aspen.player_semantics import SettledActions
+
         action_results = data.get("action_results")
         if not action_results:
             return
         action_results = action_results[frame_index]
+        if isinstance(action_results, SettledActions):
+            # Native inference owns consensus and source-time expiry. Replace
+            # the complete drawing state, including on a gap/reset/empty frame.
+            self._action_tracker.replace(frame_id=frame_id, infos=action_results)
+            return
         if not action_results:
             return
         # action_results is a list of dicts per frame
@@ -1522,9 +1536,17 @@ class PlayTracker(torch.nn.Module):
                 frame_id=frame_id.item() if torch.is_tensor(frame_id) else int(frame_id),
                 data=results,
             )
-            online_im = self._jersey_tracker.draw(
-                image=online_im, tracking_ids=online_ids, bboxes=online_tlwhs
-            )
+            if self._current_jersey_labels is not None:
+                if self._jersey_tracker._show:
+                    from hmlib.vis.player_labels import draw_current_jerseys
+
+                    online_im = draw_current_jerseys(
+                        online_im, online_ids, online_tlwhs, self._current_jersey_labels
+                    )
+            else:
+                online_im = self._jersey_tracker.draw(
+                    image=online_im, tracking_ids=online_ids, bboxes=online_tlwhs
+                )
             online_im = self._action_tracker.draw(
                 image=online_im, tracking_ids=online_ids, bboxes_tlwh=online_tlwhs
             )
@@ -1647,16 +1669,19 @@ class PlayTracker(torch.nn.Module):
                 points = np.column_stack(((boxes[:, 0] + boxes[:, 2]) / 2, boxes[:, 3]))
                 size = (image_width(online_im), image_height(online_im))
                 rink_map_points.append(
-                    project_rink_points(points.tolist(), self._rink_map, image_size=size)
+                    project_rink_points(
+                        points.tolist(), self._rink_map, image_size=size, allow_missing=True
+                    )
                 )
                 if self._rink_guide is not None:
                     if self._rink_guide.image_size != size:
                         self._rink_guide.image_size = size
+                        goal_inset = self._rink_map.get("layout", {}).get("goal_inset", 3.3528)
                         self._rink_guide.goals = unproject_rink_points(
                             [
-                                [3.3528, self._rink_map["rink_size"][1] / 2],
+                                [goal_inset, self._rink_map["rink_size"][1] / 2],
                                 [
-                                    self._rink_map["rink_size"][0] - 3.3528,
+                                    self._rink_map["rink_size"][0] - goal_inset,
                                     self._rink_map["rink_size"][1] / 2,
                                 ],
                             ],

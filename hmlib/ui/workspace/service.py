@@ -43,6 +43,36 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".mts", ".m2ts"}
 PIPELINE_KINDS = {"track", "stitch"}
 
 
+def _invalidate_source_preferences(
+    config: dict, role: str, before: list[str], after: list[str]
+) -> list[str]:
+    """Forget derived values whose recording identity changed; keep manual modes."""
+    if before == after:
+        return []
+    videos = config.get("game", {}).get("videos", {})
+    # Explicit left/right playlists take precedence over folder discovery. An
+    # auxiliary camera (or a separate single-video input) is not part of that
+    # pair. Before orientation is configured, camN imports participate in its
+    # discovery and can change the selected pair.
+    uses_discovery = videos.get("left") is None and videos.get("right") is None
+    if role not in {"left", "right"} and not (role.startswith("cam") and uses_discovery):
+        return []
+    stitching = config.get("stitching", {})
+    invalidated = []
+    # Timing is relative to the first chapter. Appending/removing later chapters
+    # does not change that origin. Manual offsets also need new operator input
+    # when the origin changes; retaining sync_method=manual makes this explicit.
+    if before[:1] != after[:1] and "frame_offsets" in stitching:
+        del stitching["frame_offsets"]
+        invalidated.append("stitching.frame_offsets")
+    # Automatic optics are resolved across every selected chapter. Preserve the
+    # FOV/lens components themselves: either may be an independent manual choice.
+    if "auto_input_lens_frozen" in stitching:
+        del stitching["auto_input_lens_frozen"]
+        invalidated.append("stitching.auto_input_lens_frozen")
+    return invalidated
+
+
 def _calibration_revision(game: Path) -> str:
     records = []
     for path in sorted(game.iterdir()):
@@ -164,8 +194,15 @@ class Workspace:
             if len(remaining) == len(paths):
                 raise ValueError("The selected source is not configured for this role")
             videos[role] = remaining
+            invalidated = _invalidate_source_preferences(config, role, paths, remaining)
             write_config(game, config)
-        return {"role": role, "paths": remaining, "removed": str(selected), "media_preserved": True}
+        return {
+            "role": role,
+            "paths": remaining,
+            "removed": str(selected),
+            "media_preserved": True,
+            "invalidated": invalidated,
+        }
 
     def clean_stitching(self, args: dict) -> dict:
         from .clean import clean_stitching
@@ -253,12 +290,13 @@ class Workspace:
                     if relative not in values:
                         values.append(relative)
                 videos[role] = values
+                invalidated = _invalidate_source_preferences(config, role, existing, values)
                 write_config(game, config)
             except BaseException:
                 for path in created:
                     path.unlink(missing_ok=True)
                 raise
-        return {"game": str(game), "role": role, "paths": values}
+        return {"game": str(game), "role": role, "paths": values, "invalidated": invalidated}
 
     def concatenate_videos(self, args: dict) -> dict:
         game = self.game(args.get("game_id"))
@@ -297,9 +335,9 @@ class Workspace:
             extra={"receipt": str(work / "result.json")},
         )
 
-    def _environment(self, game: Path) -> dict[str, str]:
+    def _environment(self, game: Path | None) -> dict[str, str]:
         environment = dict(os.environ)
-        environment["HM_GAME_DIR"] = str(game.parent)
+        environment["HM_GAME_DIR"] = str(game.parent if game is not None else self.root_dir)
         environment["HM_UI_SESSION_DIR"] = str(self.session_dir / "live")
         environment["HM_UI_PIPELINE_CHILD"] = "1"
         # Subprocess cwd is isolated, while a source checkout remains importable.
@@ -310,7 +348,14 @@ class Workspace:
         environment["PYTHONUNBUFFERED"] = "1"
         return environment
 
-    def pipeline_command(self, game: Path, kind: str, arguments: list[str]) -> list[str]:
+    def pipeline_command(
+        self,
+        game: Path | None,
+        kind: str,
+        arguments: list[str],
+        *,
+        initial_launch: bool = False,
+    ) -> list[str]:
         if kind not in PIPELINE_KINDS:
             raise ValueError("Pipeline kind must be track or stitch")
         if not isinstance(arguments, list) or not all(
@@ -321,13 +366,25 @@ class Workspace:
         # or camera-ui option would make the visible selection inaccurate.
         for value in arguments:
             option = value.split("=", 1)[0]
-            if option in {"--game-id", "--camera-ui", "--deploy-dir"}:
+            if not initial_launch and option in {"--game-id", "--camera-ui", "--deploy-dir"}:
                 raise ValueError(f"{option} is managed by the desktop")
         module = "hmlib.cli.hmtrack" if kind == "track" else "hmlib.cli.stitch"
-        from hmlib.ui.runtime_setup import launch_arguments
+        from hmlib.ui.runtime_setup import (
+            launch_arguments,
+            launch_configuration,
+            prefer_explicit_launch_arguments,
+        )
 
-        setup_arguments = launch_arguments(game, kind)
-        videos = read_config(game).get("game", {}).get("videos", {})
+        if game is None and not initial_launch:
+            raise ValueError("Select a game before starting playback")
+        config = launch_configuration(game, arguments) if game is not None else {}
+        setup_arguments = (
+            launch_arguments(game, kind, explicit_arguments=arguments, config=config)
+            if game is not None
+            else []
+        )
+        setup_arguments = prefer_explicit_launch_arguments(setup_arguments, arguments, kind)
+        videos = config.get("game", {}).get("videos", {})
         has_input = any(value.split("=", 1)[0] == "--input-video" for value in arguments)
         if (
             not has_input
@@ -345,15 +402,17 @@ class Workspace:
                     "Select one source video, or concatenate its chapters before playback"
                 )
             setup_arguments += ["--input-video", str((game / sources[0]).resolve(strict=True))]
+        identity = ["--game-id", game.name] if game is not None else []
+        # The original CLI owns publication and may deliberately omit --deploy-dir
+        # for a short preview. Runs started inside the workspace publish to the game.
+        deployment = ["--deploy-dir", str(game)] if not initial_launch else []
         return [
             sys.executable,
             "-m",
             module,
-            "--game-id",
-            game.name,
+            *identity,
             "--camera-ui=1",
-            "--deploy-dir",
-            str(game),
+            *deployment,
             *setup_arguments,
             *arguments,
         ]
@@ -372,8 +431,8 @@ class Workspace:
             shutil.rmtree(live)
         live.mkdir()
 
-    def start_command(self, command: list[str], game_id: str, kind: str = "track") -> dict:
-        game = self.game(game_id)
+    def start_command(self, command: list[str], game_id: str | None, kind: str = "track") -> dict:
+        game = self.game(game_id) if game_id is not None else None
         self.current_game = game
         # The initial CLI may contain relative input/model paths. Preserve its
         # invocation directory instead of interpreting those paths in a run cache.
@@ -382,7 +441,7 @@ class Workspace:
     def _start_pipeline(
         self,
         command: list[str],
-        game: Path,
+        game: Path | None,
         kind: str,
         *,
         extra: dict | None = None,
@@ -492,7 +551,7 @@ class Workspace:
     ) -> dict:
         job = self._start_pipeline(
             command,
-            Path(record["game"]),
+            Path(record["game"]) if record["game"] is not None else None,
             record["kind"],
             cwd=cwd,
             extra={
@@ -515,7 +574,7 @@ class Workspace:
             if not record.get("pipeline"):
                 raise ValueError("Job scripts export tracking or stitching pipelines")
             command = list(record["command"])
-            game = Path(record["game"])
+            game = Path(record["game"]) if record["game"] is not None else None
         else:
             game = self.game(args.get("game_id"))
             command = self.pipeline_command(
@@ -541,7 +600,7 @@ class Workspace:
         contents = (
             "#!/usr/bin/env bash\nset -euo pipefail\n"
             "unset HM_UI_SESSION_DIR HM_UI_PIPELINE_CHILD\n"
-            f"export HM_GAME_DIR={shlex.quote(str(game.parent))}\n"
+            f"export HM_GAME_DIR={shlex.quote(str(game.parent if game is not None else self.root_dir))}\n"
             f"export PYTHONPATH={shlex.quote(str(Path(__file__).resolve().parents[3]))}"
             "${PYTHONPATH:+:${PYTHONPATH}}\n"
             + (

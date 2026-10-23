@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import itertools
+from typing import Any
 
 import numpy as np
 import torch
@@ -30,19 +31,16 @@ def _batch_tlbrs_to_tlwhs(tlbrs: torch.Tensor) -> torch.Tensor:
 
 
 def _summarize_value(v: Any) -> str:
-    try:
-        if isinstance(v, StreamTensorBase):
-            return f"StreamTensor({tuple(v.shape)})"
-        if isinstance(v, torch.Tensor):
-            return f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype}, device={v.device})"
-        if isinstance(v, np.ndarray):
-            return f"ndarray(shape={v.shape}, dtype={v.dtype})"
-        if isinstance(v, dict):
-            return f"dict(keys={len(v)})"
-        if isinstance(v, (list, tuple)):
-            return f"{type(v).__name__}(len={len(v)})"
-    except Exception:
-        pass
+    if isinstance(v, StreamTensorBase):
+        return f"StreamTensor({tuple(v.shape)})"
+    if isinstance(v, torch.Tensor):
+        return f"Tensor(shape={tuple(v.shape)}, dtype={v.dtype}, device={v.device})"
+    if isinstance(v, np.ndarray):
+        return f"ndarray(shape={v.shape}, dtype={v.dtype})"
+    if isinstance(v, dict):
+        return f"dict(keys={len(v)})"
+    if isinstance(v, (list, tuple)):
+        return f"{type(v).__name__}(len={len(v)})"
     return type(v).__name__
 
 
@@ -70,13 +68,13 @@ class OverlayPlugin(Plugin):
         enabled: bool = True,
         *,
         plot_pose: bool = False,
-        pose_kpt_thr: Optional[float] = None,
+        pose_kpt_thr: float | None = None,
         plot_jersey_numbers: bool = False,
         plot_teams: bool = False,
         plot_referees: bool = True,
         referee_label: int | None = None,
         plot_tracking: bool = False,
-        plot_all_detections: Optional[float] = None,
+        plot_all_detections: float | None = None,
         plot_trajectories: bool = False,
         draw_tracking_circles: bool = True,
         trajectory_history: int = 75,
@@ -100,9 +98,9 @@ class OverlayPlugin(Plugin):
         self._printed_once = False
         self._jersey_tracker = JerseyTracker(show=bool(plot_jersey_numbers))
         self._team_renderer = TeamLabelRenderer()
-        self._traj: Dict[int, list[tuple[int, int]]] = {}
+        self._traj: dict[int, list[tuple[int, int]]] = {}
 
-    def _maybe_print_available(self, context: Dict[str, Any]) -> None:
+    def _maybe_print_available(self, context: dict[str, Any]) -> None:
         if not self._print_available:
             return
         if self._print_every <= 0:
@@ -124,7 +122,7 @@ class OverlayPlugin(Plugin):
         self._printed_once = True
 
     @staticmethod
-    def _to_batched_image(img_any: Any) -> Optional[torch.Tensor]:
+    def _to_batched_image(img_any: Any) -> torch.Tensor | None:
         if img_any is None:
             return None
         if isinstance(img_any, StreamTensorBase):
@@ -150,7 +148,7 @@ class OverlayPlugin(Plugin):
         return None
 
     @staticmethod
-    def _get_track_data_sample(data: Dict[str, Any]) -> Any:
+    def _get_track_data_sample(data: dict[str, Any]) -> Any:
         tds = data.get("data_samples")
         if isinstance(tds, list):
             if not tds:
@@ -198,11 +196,11 @@ class OverlayPlugin(Plugin):
             if len(pts) < 2:
                 continue
             color = vis.get_color(abs(int(tid_i)))
-            for (x0, y0), (x1p, y1p) in zip(pts[:-1], pts[1:]):
+            for (x0, y0), (x1p, y1p) in itertools.pairwise(pts):
                 img = vis.plot_line(img, (x0, y0), (x1p, y1p), color=color, thickness=2)
         return img
 
-    def _draw_tracking_and_dets(self, img: torch.Tensor, data: Dict[str, Any]) -> torch.Tensor:
+    def _draw_tracking_and_dets(self, img: torch.Tensor, data: dict[str, Any]) -> torch.Tensor:
         if (
             (not self._plot_tracking)
             and (self._plot_all_detections is None)
@@ -220,39 +218,33 @@ class OverlayPlugin(Plugin):
             vs = vds[frame_index]
 
             if self._plot_all_detections is not None:
-                try:
-                    det_inst = getattr(vs, "pred_instances", None)
-                    dets = getattr(det_inst, "bboxes", None) if det_inst is not None else None
-                    scores = getattr(det_inst, "scores", None) if det_inst is not None else None
-                    if isinstance(dets, torch.Tensor) and isinstance(scores, torch.Tensor):
-                        img_f = img[frame_index]
-                        for det, score in zip(dets, scores):
-                            if float(score) >= float(self._plot_all_detections):
-                                img_f = vis.plot_rectangle(
-                                    img=img_f, box=det, color=(64, 64, 64), thickness=1
+                det_inst = getattr(vs, "pred_instances", None)
+                dets = getattr(det_inst, "bboxes", None) if det_inst is not None else None
+                scores = getattr(det_inst, "scores", None) if det_inst is not None else None
+                if isinstance(dets, torch.Tensor) and isinstance(scores, torch.Tensor):
+                    img_f = img[frame_index]
+                    for det, score in zip(dets, scores):
+                        if float(score) >= float(self._plot_all_detections):
+                            img_f = vis.plot_rectangle(
+                                img=img_f, box=det, color=(64, 64, 64), thickness=1
+                            )
+                            if float(score) < 0.7:
+                                img_f = vis.plot_text(
+                                    img_f,
+                                    format(float(score), ".2f"),
+                                    (int(det[0]), int(det[1])),
+                                    1,
+                                    1.0,
+                                    (255, 255, 255),
+                                    thickness=1,
                                 )
-                                if float(score) < 0.7:
-                                    img_f = vis.plot_text(
-                                        img_f,
-                                        format(float(score), ".2f"),
-                                        (int(det[0]), int(det[1])),
-                                        1,
-                                        1.0,
-                                        (255, 255, 255),
-                                        thickness=1,
-                                    )
-                        self._assign_frame(img, frame_index, img_f)
-                except Exception:
-                    pass
+                    self._assign_frame(img, frame_index, img_f)
 
             track_inst = getattr(vs, "pred_track_instances", None)
             if track_inst is None:
                 continue
-            try:
-                ids = unwrap_tensor(track_inst.instances_id)
-                bboxes_tlbr = unwrap_tensor(track_inst.bboxes)
-            except Exception:
-                continue
+            ids = unwrap_tensor(track_inst.instances_id)
+            bboxes_tlbr = unwrap_tensor(track_inst.bboxes)
             if (not isinstance(ids, torch.Tensor)) or (not isinstance(bboxes_tlbr, torch.Tensor)):
                 continue
             if bboxes_tlbr.numel() == 0:
@@ -277,10 +269,7 @@ class OverlayPlugin(Plugin):
                 self._assign_frame(img, frame_index, img_f)
 
             if self._plot_tracking:
-                try:
-                    frame_id_val = int(getattr(vs, "frame_id", frame_index))
-                except Exception:
-                    frame_id_val = frame_index
+                frame_id_val = int(getattr(vs, "frame_id", frame_index))
                 img_f = img[frame_index]
                 img_f = vis.plot_tracking(
                     img_f,
@@ -374,23 +363,20 @@ class OverlayPlugin(Plugin):
             preds = frame_res.get("predictions")
             if not preds:
                 continue
-            try:
-                out_img = vis.add_datasample(
-                    name="pose results",
-                    image=img[i],
-                    data_sample=preds[0],
-                    clone_image=False,
-                    draw_gt=False,
-                    draw_bbox=False,
-                    show_kpt_idx=False,
-                    kpt_thr=float(kpt_thr),
-                )
-                self._assign_frame(img, i, out_img)
-            except Exception:
-                continue
+            out_img = vis.add_datasample(
+                name="pose results",
+                image=img[i],
+                data_sample=preds[0],
+                clone_image=False,
+                draw_gt=False,
+                draw_bbox=False,
+                show_kpt_idx=False,
+                kpt_thr=float(kpt_thr),
+            )
+            self._assign_frame(img, i, out_img)
         return img
 
-    def _draw_jerseys(self, img: torch.Tensor, data: Dict[str, Any]) -> torch.Tensor:
+    def _draw_jerseys(self, img: torch.Tensor, data: dict[str, Any]) -> torch.Tensor:
         if not self._plot_jersey_numbers:
             return img
         jersey_results = data.get("jersey_results")
@@ -418,11 +404,8 @@ class OverlayPlugin(Plugin):
             track_inst = getattr(vs, "pred_track_instances", None)
             if track_inst is None:
                 continue
-            try:
-                ids = unwrap_tensor(track_inst.instances_id)
-                bboxes_tlbr = unwrap_tensor(track_inst.bboxes)
-            except Exception:
-                continue
+            ids = unwrap_tensor(track_inst.instances_id)
+            bboxes_tlbr = unwrap_tensor(track_inst.bboxes)
 
             if not isinstance(ids, torch.Tensor) or not isinstance(bboxes_tlbr, torch.Tensor):
                 continue
@@ -437,30 +420,31 @@ class OverlayPlugin(Plugin):
             tlwh = _batch_tlbrs_to_tlwhs(bboxes_tlbr)
 
             frame_id_val = frame_index
-            try:
-                frame_id_val = int(getattr(vs, "frame_id", frame_index))
-            except Exception:
-                frame_id_val = frame_index
+            frame_id_val = int(getattr(vs, "frame_id", frame_index))
 
             per_frame = jersey_results[frame_index]
+            from hmlib.aspen.player_semantics import SettledJerseys
+            from hmlib.vis.player_labels import draw_current_jerseys
+
+            if isinstance(per_frame, SettledJerseys):
+                self._assign_frame(
+                    img,
+                    frame_index,
+                    draw_current_jerseys(img[frame_index], ids, tlwh, per_frame),
+                )
+                continue
             if per_frame:
                 for info in per_frame:
-                    try:
-                        self._jersey_tracker.observe_tracking_id_number_info(
-                            frame_id=frame_id_val, info=info
-                        )
-                    except Exception:
-                        continue
-            try:
-                img_frame = self._jersey_tracker.draw(
-                    image=img[frame_index], tracking_ids=ids, bboxes=tlwh
-                )
-                self._assign_frame(img, frame_index, img_frame)
-            except Exception:
-                continue
+                    self._jersey_tracker.observe_tracking_id_number_info(
+                        frame_id=frame_id_val, info=info
+                    )
+            img_frame = self._jersey_tracker.draw(
+                image=img[frame_index], tracking_ids=ids, bboxes=tlwh
+            )
+            self._assign_frame(img, frame_index, img_frame)
         return img
 
-    def _draw_teams(self, img: torch.Tensor, data: Dict[str, Any]) -> torch.Tensor:
+    def _draw_teams(self, img: torch.Tensor, data: dict[str, Any]) -> torch.Tensor:
         """Render settled home/away labels published by the team trunk.
 
         The labels are already aggregated upstream, so this only smooths the
@@ -518,6 +502,15 @@ class OverlayPlugin(Plugin):
     def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
+
+        controls = context.get("shared", {}).get("overlay_controls", {})
+        for key, attribute in (
+            ("plot_individual_player_tracking", "_plot_tracking"),
+            ("plot_tracking_circles", "_draw_tracking_circles"),
+            ("plot_trajectories", "_plot_trajectories"),
+        ):
+            if key in controls:
+                setattr(self, attribute, controls[key])
 
         self._maybe_print_available(context)
 

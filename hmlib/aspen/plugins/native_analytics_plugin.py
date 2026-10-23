@@ -10,6 +10,9 @@ import torch
 from hmlib.aspen.player_semantics import (
     ActionHistory,
     JerseyConsensus,
+    JerseyLabel,
+    SettledActions,
+    SettledJerseys,
     decode_parseq,
     jersey_roi,
     parseq_input,
@@ -299,7 +302,7 @@ class TemporalActionPlugin(_NativeAnalytics):
                             "window_start_ns": state["history"].samples[0][0],
                             "observed_at_ns": timestamp,
                         }
-            frame_results = []
+            frame_results = SettledActions()
             for track_id in tracks:
                 state = self.states.get(track_id)
                 label = state["label"] if state else None
@@ -335,8 +338,6 @@ class ParseqJerseyPlugin(_NativeAnalytics):
         if not self.enabled:
             self._reset()
             return {}
-        from hmlib.jersey.number_classifier import TrackJerseyInfo
-
         interval, minimum = self._settings(context, 2, self.min_confidence)
         outputs = []
         for timestamp, image, width, height, tracks, result in _frames(context):
@@ -370,14 +371,14 @@ class ParseqJerseyPlugin(_NativeAnalytics):
                     if observation is not None and observation[1] >= minimum:
                         state = self.states.setdefault(track_id, JerseyConsensus())
                         state.observe(timestamp, *observation)
-            frame_results = []
+            frame_results = SettledJerseys()
             for track_id in tracks:
                 state = self.states.get(track_id)
                 observed = state.result(timestamp) if state else None
                 if observed is not None:
                     text, score = observed
                     frame_results.append(
-                        TrackJerseyInfo(tracking_id=track_id, number=int(text), score=score)
+                        JerseyLabel(tracking_id=track_id, number=text, score=score)
                     )
             outputs.append(frame_results)
         return {"jersey_results": outputs}

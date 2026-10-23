@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -44,8 +45,8 @@ if torch is not None:
         FakeDetectorModel,
         FakeEndZones,
         FakePlayTrackerRuntime,
-        FakeProgressBar,
         FakePoseInferencer,
+        FakeProgressBar,
         FakeShower,
         FakeVideoOutput,
         FakeVideoOutputPreparer,
@@ -790,6 +791,7 @@ def _case_play_tracker(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = F
             "frame_ids": torch.tensor([1], dtype=torch.long),
         }
     )
+    monkeypatch.setattr(plugin._play_tracker, "hm_ui_process", lambda: None, raising=False)
     out = plugin(
         {
             "data_samples": make_track_data_sample(num_frames=1),
@@ -1137,6 +1139,7 @@ def _case_video_out(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = Fals
     out = plugin(
         {
             "img": torch.zeros((1, 3, 8, 8), dtype=torch.float32),
+            "frame_ids": torch.tensor([1]),
             "work_dir": str(tmp_path),
             "shared": {"device": torch.device("cpu"), "game_config": {}},
         }

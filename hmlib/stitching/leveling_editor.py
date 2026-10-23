@@ -238,6 +238,87 @@ class LevelingSession:
             ],
         }
 
+    def _rink_marks(self):
+        mapping = self.config.get("rink", {}).get("workspace_map") or {}
+        return mapping.get("observations", []) if mapping.get("version") == 2 else []
+
+    @staticmethod
+    def _draw_marks(image, marks):
+        from PIL import ImageDraw
+
+        draw = ImageDraw.Draw(image)
+        for label, pixels, arc, enabled in marks:
+            color = "#7cfa7c" if enabled else "#ffaa55"
+            if arc and len(pixels) == 3:
+                import numpy as np
+
+                first, middle, last = np.asarray(pixels, dtype=float)
+                control = 2 * middle - (first + last) / 2
+                pixels = [
+                    tuple((1 - t) ** 2 * first + 2 * t * (1 - t) * control + t**2 * last)
+                    for t in np.linspace(0, 1, 65)
+                ]
+            if len(pixels) > 1:
+                draw.line(pixels, fill=color, width=max(2, image.width // 700))
+            for x, y in pixels if not arc else (pixels[0], pixels[len(pixels) // 2], pixels[-1]):
+                draw.ellipse((x - 4, y - 4, x + 4, y + 4), outline=color, width=2)
+            if pixels:
+                draw.text(pixels[0], label, fill=color)
+
+    def annotate_sources(self, info):
+        """Expose saved evidence in the normal leveling editor, without editing sources."""
+        marks = self._rink_marks()
+        if not marks:
+            return
+        for camera, (source, path) in enumerate(zip(info["sources"], self.sources)):
+            with Image.open(path) as original:
+                image = original.convert("RGB")
+                image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+                sx, sy = image.width / original.width, image.height / original.height
+            selected = [
+                (
+                    mark.get("feature") or mark.get("label", "Landmark"),
+                    [(x * sx, y * sy) for x, y in mark["pixels"]],
+                    mark.get("arc", False),
+                    mark.get("enabled", True),
+                )
+                for mark in marks
+                if mark["camera"] == camera
+            ]
+            self._draw_marks(image, selected)
+            output = self.directory / f"rink-source-{camera}.png"
+            image.save(output)
+            source["path"] = str(output)
+
+    def _annotate_preview(self, output, project):
+        from hmlib.stitching.rink_projection import transform_points
+
+        marks = self._rink_marks()
+        if not marks:
+            return
+        points = [[mark["camera"], *point] for mark in marks for point in mark["pixels"]]
+        projected = transform_points(project.read_text(), points, run=self.run)
+        selected, offset = [], 0
+        for mark in marks:
+            pixels = projected[offset : offset + len(mark["pixels"])]
+            offset += len(mark["pixels"])
+            import numpy as np
+
+            if not np.isfinite(pixels).all():
+                continue  # Source marks outside this preview projection are not drawable.
+            selected.append(
+                (
+                    mark.get("feature") or mark.get("label", "Landmark"),
+                    [tuple(p) for p in pixels],
+                    mark.get("arc", False),
+                    mark.get("enabled", True),
+                )
+            )
+        with Image.open(output) as source:
+            image = source.convert("RGB")
+        self._draw_marks(image, selected)
+        image.save(output)
+
     def estimate(self, posts: list[dict], yaw: float) -> dict:
         points = format_points(posts, self.leveling_project.image_sizes)
         with self._lock():
@@ -325,6 +406,7 @@ class LevelingSession:
                         "Rendered preview dimensions differ from the full panorama canvas"
                     )
                 image.verify()
+            self._annotate_preview(output, project)
             image_bytes = output.read_bytes()
             self._check_fresh()
             self.preview_token = secrets.token_urlsafe(24)

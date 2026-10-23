@@ -76,7 +76,7 @@ from hmlib.stitching.pto_sources import rewrite_pto_sources as _rewrite_pto_sour
 from hmlib.stitching.seam import normalize_canvas_seam_mask
 from hmlib.stitching.settings import MAPPING_BACKENDS as MAPPING_BACKENDS  # noqa: PLC0414
 from hmlib.stitching.settings import (
-    OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS,  # noqa: PLC0414
+    OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS,  # noqa: PLC0414 - public re-export
 )
 from hmlib.stitching.settings import (
     StitchingSettings,
@@ -85,7 +85,7 @@ from hmlib.stitching.settings import (
     validate_output_scale,
 )
 from hmlib.stitching.settings import (
-    normalize_mapping_backend as normalize_mapping_backend,  # noqa: PLC0414
+    normalize_mapping_backend as normalize_mapping_backend,  # noqa: PLC0414 - public re-export
 )
 from hmlib.video.ffmpeg import BasicVideoInfo
 from hmlib.video.video_stream import extract_frame_image

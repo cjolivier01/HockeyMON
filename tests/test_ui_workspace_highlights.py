@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from hmlib.ui.workspace.highlights import normalize_plan, probe_media, render_plan
@@ -73,6 +74,54 @@ def plan_for(archive: Path) -> dict:
             },
         ],
     }
+
+
+def should_export_box_at_its_selected_center_with_absolute_dimensions(archive, tmp_path):
+    plan = plan_for(archive)
+    plan["intervals"] = [
+        {
+            "start_ms": 0,
+            "end_ms": 500,
+            "annotations": [
+                {
+                    "kind": "box",
+                    "x": 0.5,
+                    "y": 0.5,
+                    "dx": -0.2,
+                    "dy": 0.4,
+                    "color": "#ffff00",
+                    "thickness": 0.025,
+                    "blink": False,
+                }
+            ],
+        }
+    ]
+    output = tmp_path / "box.mp4"
+    render_plan(plan, tmp_path, output, preview=True)
+    raw = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-i",
+            str(output),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "pipe:1",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    ).stdout
+    pixels = np.frombuffer(raw, dtype=np.uint8).reshape(180, 320, 3)
+    y, x = np.nonzero((pixels[:, :, 0] > 180) & (pixels[:, :, 1] > 150) & (pixels[:, :, 2] < 100))
+    assert len(x) > 100
+    assert [x.min(), x.max(), y.min(), y.max()] == pytest.approx([128, 192, 54, 126], abs=2)
 
 
 def should_render_cards_clips_moving_annotations_and_audio(archive, tmp_path):

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -47,9 +46,19 @@ class WorkspaceEditors:
                 args["pairs"], expected_revision=args.get("expected_revision")
             ),
             "rink-map": lambda editor, args: editor.save_rink_map(
-                args["landmarks"],
+                args.get("landmarks", []),
                 args.get("goals"),
                 rink_size=args.get("rink_size", [60.96, 25.908]),
+                observations=args.get("observations"),
+                layout=args.get("layout"),
+                allow_partial=args.get("allow_partial", False),
+                expected_revision=args.get("expected_revision"),
+            ),
+            "rink-assist": lambda editor, args: editor.assist_rink_map(
+                args["observations"],
+                detect=args.get("detect", False),
+                use_mask=args.get("use_mask", False),
+                layout=args.get("layout"),
                 expected_revision=args.get("expected_revision"),
             ),
             "lens": lambda editor, args: editor.set_lens_calibration(
@@ -100,10 +109,21 @@ class WorkspaceEditors:
                 if previous:
                     previous.close()
                 editor = OperatorWorkspace(game).leveling_session()
+                try:
+                    info = editor.info()
+                    for source, path in zip(info["sources"], editor.sources):
+                        source["path"] = str(path)
+                    if args.get("from_rink_map"):
+                        estimate = OperatorWorkspace(game).rink_map_leveling(
+                            yaw=info["rotation_degrees"][0]
+                        )
+                        info["rotation_degrees"] = estimate["rotation_degrees"]
+                        info["rink_leveling"] = estimate
+                    editor.annotate_sources(info)
+                except BaseException:
+                    editor.close()
+                    raise
                 self.leveling[game] = editor
-                info = editor.info()
-                for source, path in zip(info["sources"], editor.sources):
-                    source["path"] = str(path)
                 return info
             editor = self.leveling.get(game)
             if editor is None:
@@ -198,18 +218,15 @@ def launch_desktop(
                 stdout=log,
                 stderr=subprocess.STDOUT,
             )
-        if module and game_id:
-            from hmlib.ui.runtime_setup import launch_arguments
-
+        if module:
             kind = "stitch" if module.endswith(".stitch") else "track"
             workspace.start_command(
-                [
-                    sys.executable,
-                    "-m",
-                    module,
-                    *launch_arguments(workspace.game(game_id), kind),
-                    *(arguments or []),
-                ],
+                workspace.pipeline_command(
+                    workspace.game(game_id) if game_id else None,
+                    kind,
+                    arguments or [],
+                    initial_launch=True,
+                ),
                 game_id,
                 kind,
             )

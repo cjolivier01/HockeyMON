@@ -49,6 +49,32 @@ _OVERLAYS = {
     "Player_Speed": ("plot_speed", "_plot_speed"),
     "Rink_Boundaries": ("plot_boundaries", "_plot_boundaries"),
 }
+OVERLAY_OWNER_PARAMS = {
+    "plot_individual_player_tracking": ("plot_tracking", False),
+    "plot_tracking_circles": ("draw_tracking_circles", True),
+    "plot_trajectories": ("plot_trajectories", False),
+}
+
+
+def overlay_owner_values(config: dict) -> dict[str, bool]:
+    """Find the late overlay owner's actual constructor values in this graph."""
+    owners = [
+        spec
+        for spec in config.get("aspen", {}).get("plugins", {}).values()
+        if str(spec.get("class", "")).endswith(".OverlayPlugin") and spec.get("enabled", True)
+    ]
+    if len(owners) > 1:
+        raise ValueError("Live overlay controls require a single OverlayPlugin owner")
+    if not owners:
+        return {}
+    params = owners[0].get("params") or {}
+    values = {}
+    for key, (parameter, default) in OVERLAY_OWNER_PARAMS.items():
+        value = params.get(parameter, default)
+        if isinstance(value, str) and value.startswith("GLOBAL."):
+            value = get_nested_value(config, value.removeprefix("GLOBAL."), default)
+        values[key] = bool(value)
+    return values
 
 
 class OperatorControls:
@@ -56,6 +82,7 @@ class OperatorControls:
         self.tracker = tracker
         self.process = tracker._hm_ui_process
         self.blend = None
+        self.overlay_values = overlay_owner_values(tracker._game_config)
         self._last_filters = self._filter_values(tracker._game_config)
         # The command line may override the persisted enable flag.
         self._last_filters["Ignore_Largest_Count"] = (
@@ -84,7 +111,9 @@ class OperatorControls:
         self.process.add_window(_OVERLAY_WINDOW)
         defaults = {}
         for name, (key, attribute) in _OVERLAYS.items():
-            value = int(getattr(tracker, attribute))
+            value = int(self.overlay_values.get(key, getattr(tracker, attribute)))
+            if key in self.overlay_values:
+                setattr(tracker, attribute, False)
             self._last_overlays[name] = value
             self.process.add_slider(
                 _OVERLAY_WINDOW,
@@ -191,7 +220,10 @@ class OperatorControls:
         for name, (key, attribute) in _OVERLAYS.items():
             value = self.process.get_value(_OVERLAY_WINDOW, name, poll=False)
             if value != self._last_overlays[name]:
-                setattr(tracker, attribute, bool(value))
+                if key in self.overlay_values:
+                    self.overlay_values[key] = bool(value)
+                else:
+                    setattr(tracker, attribute, bool(value))
                 tracker._set_ui_config_value(("plot", key), bool(value))
                 self._last_overlays[name] = value
         if self.blend is not None:
@@ -227,7 +259,10 @@ class OperatorControls:
         self._last_scoreboard = self._scoreboard_values(source)
         for name, (key, attribute) in _OVERLAYS.items():
             value = bool(get_nested_value(source, f"plot.{key}", key == "plot_tracking_circles"))
-            setattr(tracker, attribute, value)
+            if key in self.overlay_values:
+                self.overlay_values[key] = value
+            else:
+                setattr(tracker, attribute, value)
             self._last_overlays[name] = int(value)
         if self.blend is not None:
             self.blend._restore_managed_config(source)

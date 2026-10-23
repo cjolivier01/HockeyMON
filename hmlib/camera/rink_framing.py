@@ -41,8 +41,9 @@ class RinkCameraGuide:
         self.scale = 1.0
         self.info = {}
         length, width = mapping["rink_size"]
+        goal_inset = mapping.get("layout", {}).get("goal_inset", 3.3528)
         self.goals = unproject_rink_points(
-            [[3.3528, width / 2], [length - 3.3528, width / 2]],
+            [[goal_inset, width / 2], [length - goal_inset, width / 2]],
             mapping,
             image_size=image_size,
         )
@@ -67,7 +68,9 @@ class RinkCameraGuide:
         pixels = (boxes[:, :2] + boxes[:, 2:]) / 2
         pixels[:, 1] = boxes[:, 3]
         points = np.asarray(
-            project_rink_points(pixels.tolist(), self.mapping, image_size=self.image_size)
+            project_rink_points(
+                pixels.tolist(), self.mapping, image_size=self.image_size, allow_missing=True
+            )
         )
         located, heights, velocities, pixel_velocities = [], [], [], []
         for index, (identity, pixel, point) in enumerate(zip(ids, pixels, points)):
@@ -211,6 +214,8 @@ def draw_rink_map(image, overlay: dict):
                 1,
             )
         for x, y in points:
+            if not np.isfinite([x, y]).all():
+                continue
             px, py = round(x / overlay["size"][0] * map_width), round(
                 y / overlay["size"][1] * map_height
             )

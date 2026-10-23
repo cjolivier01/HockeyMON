@@ -109,6 +109,9 @@ class ReidPlugin(Plugin):
             raise ValueError("ReID image and detection batches must align")
         session = self._ensure_session()
         for image, frame in zip(images, frames):
+            # Decoders and stitchers publish BGR original_images. The pinned
+            # NVIDIA preprocessing contract (also used by team embeddings) is RGB.
+            rgb = image.flip(0 if image.shape[0] == 3 else -1)
             instances = getattr(frame, "pred_instances", None)
             if instances is None:
                 continue
@@ -126,7 +129,7 @@ class ReidPlugin(Plugin):
             features = boxes.new_zeros((len(boxes), 256), dtype=torch.float32)
             for start in range(0, len(active), self.batch_size):
                 indices = active[start : start + self.batch_size]
-                crops = player_crops(image, boxes[indices])
+                crops = player_crops(rgb, boxes[indices])
                 output = session.run(None, {session.get_inputs()[0].name: crops.cpu().numpy()})[0]
                 if output.shape != (len(indices), 256) or not np.isfinite(output).all():
                     raise ValueError("ReID inference returned invalid appearance embeddings")

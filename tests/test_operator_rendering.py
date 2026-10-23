@@ -9,13 +9,9 @@ from hmlib.vis.pt_text import _create_text_images, find_font_path
 
 
 def mapping():
-    return {
-        "version": 1,
-        "image_size": [1000, 500],
-        "rink_size": [60.96, 25.908],
-        "homography": [[0.06096, 0, 0], [0, 0.051816, 0], [0, 0, 1]],
-        "goals": [],
-    }
+    from test_rink_map_geometry import planar_test_mapping
+
+    return planar_test_mapping()
 
 
 def should_anticipate_consistent_player_motion_and_reset_after_seek():

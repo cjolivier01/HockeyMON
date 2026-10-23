@@ -87,6 +87,67 @@ def should_apply_overlay_to_runtime_and_persist_only_changed_field(tmp_path):
     assert tracker._game_config["plot"] == {"plot_individual_player_tracking": True}
 
 
+def should_route_live_overlays_to_the_graph_owner_and_restore_without_double_drawing(tmp_path):
+    import torch
+
+    from hmlib.aspen.plugins.overlay_plugin import OverlayPlugin
+    from hmlib.utils.gpu import unwrap_tensor
+
+    tracker, _ = make_tracker(tmp_path)
+    tracker._game_config["plot"] = {
+        "plot_individual_player_tracking": True,
+        "plot_tracking_circles": False,
+    }
+    tracker._game_config["aspen"] = {
+        "plugins": {
+            "overlays": {
+                "class": "hmlib.aspen.plugins.overlay_plugin.OverlayPlugin",
+                "params": {"plot_tracking": True, "draw_tracking_circles": False},
+            }
+        }
+    }
+    controls = OperatorControls(tracker)
+    assert controls.process.get_value("Program Overlays", "Player_Boxes", poll=False) == 1
+    assert controls.process.get_value("Program Overlays", "Tracking_Circles", poll=False) == 0
+    owner = OverlayPlugin(plot_tracking=True, draw_tracking_circles=False, print_available=False)
+    tracks = SimpleNamespace(
+        instances_id=torch.tensor([1]),
+        bboxes=torch.tensor([[20.0, 20.0, 60.0, 80.0]]),
+        scores=torch.tensor([0.9]),
+        labels=torch.tensor([0]),
+    )
+    sample = SimpleNamespace(
+        video_data_samples=[SimpleNamespace(pred_track_instances=tracks, frame_id=1)]
+    )
+    original = torch.full((1, 100, 120, 3), 200, dtype=torch.uint8)
+    context = {
+        "img": original,
+        "data_samples": sample,
+        "shared": {"overlay_controls": controls.overlay_values},
+    }
+    rendered = unwrap_tensor(owner.forward(context)["img"])
+    assert torch.any(rendered != original)
+    assert not tracker._plot_individual_player_tracking
+    assert not tracker._plot_trajectories
+    assert not tracker._plot_tracking_circles
+    before = copy.deepcopy(tracker._game_config)
+    controls.process.set_value("Program Overlays", "Player_Boxes", 0)
+    controls.apply()
+    assert owner.forward(context) == {}
+    controls.process.set_value("Program Overlays", "Player_Trajectories", 1)
+    controls.process.set_value("Program Overlays", "Tracking_Circles", 1)
+    controls.apply()
+    owner.forward(context)
+    assert owner._plot_trajectories and owner._draw_tracking_circles
+    assert not tracker._plot_individual_player_tracking and not tracker._plot_trajectories
+    controls.restore(before)
+    owner.forward(context)
+    assert (
+        owner._plot_tracking and not owner._plot_trajectories and not owner._draw_tracking_circles
+    )
+    assert not tracker._plot_individual_player_tracking and not tracker._plot_tracking_circles
+
+
 def should_process_controls_during_pause_and_step_exactly_one_batch(tmp_path):
     process = HmUiProcess(tmpdir=tmp_path)
     process.enable_playback()

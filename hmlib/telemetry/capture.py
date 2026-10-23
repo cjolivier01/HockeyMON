@@ -9,6 +9,7 @@ import threading
 import numpy as np
 import torch
 
+from hmlib.aspen.player_semantics import SettledActions, SettledJerseys
 from hmlib.utils.gpu import unwrap_tensor
 
 CAPTURE_KEYS = {
@@ -118,10 +119,13 @@ def _observations(sample, kind, context, index):
     if not np.isfinite(scores).all():
         raise ValueError("Nonfinite telemetry scores")
     attributes = {}
+    settled = []
     if kind == "tracks":
         for key in ("jersey_results", "action_results"):
             batches = context.get(key)
             if batches is not None and index < len(batches) and batches[index] is not None:
+                if isinstance(batches[index], (SettledJerseys, SettledActions)):
+                    settled.append(key)
                 for entry in batches[index]:
                     entry = _json_copy(entry)
                     if isinstance(entry, dict) and "tracking_id" in entry:
@@ -131,7 +135,12 @@ def _observations(sample, kind, context, index):
         row = (*box, float(score), int(label))
         if kind == "tracks":
             track_id = str(int(ids[i]))
-            row = (track_id, *row, json.dumps(attributes.get(track_id, {}), allow_nan=False))
+            track_attributes = attributes.get(track_id, {})
+            if settled:
+                # Preserve display-state ownership even when this track has no
+                # visible label. The backend selection is fixed for the run.
+                track_attributes["settled_results"] = settled
+            row = (track_id, *row, json.dumps(track_attributes, allow_nan=False))
         rows.append(row)
     return rows
 

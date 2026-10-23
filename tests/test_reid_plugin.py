@@ -53,6 +53,21 @@ def should_attach_normalized_features_only_to_valid_detections():
     assert result["data_samples"] is context["data_samples"]
 
 
+@pytest.mark.parametrize("channels_last", [False, True])
+def should_convert_pipeline_bgr_frames_to_rgb_before_model_inference(channels_last):
+    plugin = ReidPlugin("unused.onnx")
+    plugin.session = Session()
+    bgr = torch.tensor([30.0, 70.0, 210.0])[:, None, None].expand(3, 10, 20)
+    image = bgr.permute(1, 2, 0) if channels_last else bgr
+    instances = SimpleNamespace(bboxes=torch.tensor([[0.0, 0.0, 20.0, 10.0]]), scores=torch.ones(1))
+    sample = SimpleNamespace(video_data_samples=[SimpleNamespace(pred_instances=instances)])
+    plugin.forward({"original_images": image[None], "data_samples": [sample]})
+    actual = torch.from_numpy(plugin.session.calls[0])
+    expected = torch.tensor([210.0, 70.0, 30.0]) - torch.tensor([123.675, 116.28, 103.53])
+    expected = (expected * 0.01735207357279195).reshape(1, 3, 1, 1).expand_as(actual)
+    torch.testing.assert_close(actual, expected)
+
+
 def should_keep_disabled_graph_unchanged_and_insert_reid_before_tracking(tmp_path):
     config = {"aspen": {"plugins": {"tracker": {"depends": ["mask"], "params": {}}}}}
     configure_reid(config, tmp_path)

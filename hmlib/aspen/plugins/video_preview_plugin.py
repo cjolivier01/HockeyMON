@@ -77,7 +77,12 @@ class VideoPreviewPlugin(Plugin):
         cfg = cfg or {}
         normalize_runtime_config(cfg)
         if self._routes is None:
+            from hmlib.ui.output_cadence import recording_fps
+
             route_config = dict(cfg.get("video_out", {}))
+            route_config["output_fps"] = recording_fps(
+                cfg, float(context.get("fps") or shared_cfg.get("fps") or 30)
+            )
             for key, value in (
                 ("show_youtube", self._show_youtube),
                 ("youtube_stream_url", self._youtube_stream_url),
