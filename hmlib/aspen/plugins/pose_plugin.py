@@ -1,7 +1,12 @@
-from typing import Any, Dict, List, Optional, Set
+import copy
+import logging
+import math
+from typing import Any
 
+import numpy as np
 import torch
 
+from hmlib.aspen.pose_runtime import PoseRuntime, pose_settings
 from hmlib.tracking_utils.utils import get_track_mask
 from hmlib.utils.cuda_graph import CudaGraphCallable
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor, wrap_tensor
@@ -9,19 +14,16 @@ from hmlib.utils.image import make_channels_last
 
 from .base import Plugin
 
+logger = logging.getLogger(__name__)
 
-def _to_cuda_tensor(value: Any, *, device: torch.device) -> Optional[torch.Tensor]:
+
+def _to_cuda_tensor(value: Any, *, device: torch.device) -> torch.Tensor | None:
     if isinstance(value, torch.Tensor):
         t = value
     else:
         t = None
-        try:
-            import numpy as np  # type: ignore
-
-            if isinstance(value, np.ndarray):
-                t = torch.from_numpy(value)
-        except Exception:
-            t = None
+        if isinstance(value, np.ndarray):
+            t = torch.from_numpy(value)
         if t is None:
             if (
                 isinstance(value, (list, tuple))
@@ -67,10 +69,278 @@ class PosePlugin(Plugin):
         self._default_plot_pose: bool = bool(plot_pose)
         self._cuda_graph_enabled: bool = bool(cuda_graph)
         self._cuda_graph_max_instances: int = int(max(1, cuda_graph_max_instances))
-        self._pose_cg: Optional[CudaGraphCallable] = None
-        self._pose_cg_device: Optional[torch.device] = None
+        self._pose_cg: CudaGraphCallable | None = None
+        self._pose_cg_device: torch.device | None = None
+        self._runtime = PoseRuntime()
+        self._pose_sample_type = None
+        self._pose_instance_type = None
+        self._warned_missing_timing = False
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
+        if not self.enabled or context.get("pose_inferencer") is None:
+            self._runtime.reset()
+            return {}
+        images_any = context.get("original_images")
+        if images_any is None:
+            return {}
+        images = unwrap_tensor(images_any)
+        if len(images) == 0:
+            return {"pose_results": [], "pose_display_metadata": []}
+        track_sample = self._get_track_data_sample(context.get("data_samples"))
+        if track_sample is not None and len(track_sample.video_data_samples) != len(images):
+            raise ValueError("Pose requires one tracking sample for each source image")
+        shared = context.get("shared", {})
+        rate_hz, continuous = pose_settings(shared.get("game_config", {}))
+        fps = context.get("fps", shared.get("fps"))
+        frame_id = context.get("frame_id")
+        frame_ids = context.get("frame_ids")
+        if frame_ids is not None:
+            frame_ids = unwrap_tensor(frame_ids)
+            if len(frame_ids) != len(images):
+                raise ValueError("Pose requires one frame ID for each source image")
+        metas = (
+            [getattr(frame, "metainfo", {}) for frame in track_sample.video_data_samples]
+            if track_sample is not None
+            else []
+        )
+        if fps is None and metas:
+            fps = metas[0].get("fps")
+        have_pts = len(metas) == len(images) and all("pts_ns" in meta for meta in metas)
+        have_ids = (
+            frame_ids is not None
+            or frame_id is not None
+            or (
+                len(metas) == len(images)
+                and all("frame_id" in meta or "pts_ns" in meta for meta in metas)
+            )
+        )
+        valid_fps = fps is not None and math.isfinite(float(fps)) and float(fps) > 0
+        if not have_pts and not (have_ids and valid_fps):
+            self._runtime.reset()
+            if not self._warned_missing_timing:
+                logger.warning(
+                    "Pose source timing unavailable; running fresh inference on all incoming frames with display hold disabled"
+                )
+                self._warned_missing_timing = True
+            return self._forward_inference(context)
+        fps = float(fps) if valid_fps else None
+        show = bool(context.get("plot_pose") or shared.get("plot_pose", self._default_plot_pose))
+        inferencer = context["pose_inferencer"]
+        implementation = getattr(inferencer, "inferencer", None)
+        visualizer = getattr(implementation, "visualizer", None)
+        source = (
+            shared.get("game_id"),
+            shared.get("source_id"),
+            tuple(images.shape[1:]) if isinstance(images, torch.Tensor) else tuple(images[0].shape),
+        )
+        output = []
+        display_metadata = []
+        drawn = False
+        for index, image in enumerate(images):
+            meta = metas[index] if index < len(metas) else {}
+            if "pts_ns" in meta:
+                timestamp = float(meta["pts_ns"]) / 1e9
+            else:
+                identifier = (
+                    frame_ids[index]
+                    if frame_ids is not None
+                    else meta.get(
+                        "frame_id", int(frame_id) + index if frame_id is not None else None
+                    )
+                )
+                if identifier is None:
+                    raise ValueError("Pose cadence requires a frame ID for every source image")
+                timestamp = float(identifier) / fps
+            frame = track_sample.video_data_samples[index] if track_sample is not None else None
+            instances = getattr(frame, "pred_track_instances", None)
+            identifiers = getattr(instances, "instances_id", None)
+            boxes = getattr(instances, "bboxes", None)
+            ids = []
+            source_indices = []
+            boxes_by_id = {}
+            if identifiers is not None and boxes is not None:
+                identifiers = unwrap_tensor(identifiers)
+                boxes = unwrap_tensor(boxes)
+                mask = get_track_mask(instances)
+                source_indices = (
+                    torch.nonzero(mask).flatten().tolist()
+                    if isinstance(mask, torch.Tensor)
+                    else list(range(len(identifiers)))
+                )
+                ids = [int(identifiers[position]) for position in source_indices]
+                boxes_by_id = {
+                    track_id: boxes[position] for track_id, position in zip(ids, source_indices)
+                }
+            due_ids = self._runtime.due(
+                timestamp,
+                ids if identifiers is not None else [-1],
+                source=source,
+                rate_hz=rate_hz,
+                limit=self._cuda_graph_max_instances,
+            )
+            fresh = {"predictions": []}
+            if due_ids:
+                single = dict(context)
+                single["original_images"] = images[index : index + 1]
+                single["plot_pose"] = False
+                single["shared"] = dict(shared, plot_pose=False)
+                detector_inputs = context.get("inputs")
+                if detector_inputs is not None:
+                    detector_inputs = unwrap_tensor(detector_inputs)
+                    single["inputs"] = (
+                        detector_inputs[:, index : index + 1]
+                        if detector_inputs.ndim == 5
+                        else detector_inputs[index : index + 1]
+                    )
+                if frame is not None:
+                    frame_copy = copy.copy(frame)
+                    if identifiers is not None:
+                        chosen = [
+                            position
+                            for track_id, position in zip(ids, source_indices)
+                            if track_id in due_ids
+                        ]
+                        # Track tensors can carry producer-stream events. MMEngine
+                        # cannot fancy-index those wrappers, and the selected
+                        # compact batch needs matching validity metadata.
+                        unwrapped = copy.copy(instances)
+                        fields = (
+                            instances.items()
+                            if hasattr(instances, "items")
+                            else vars(instances).items()
+                        )
+                        for name, value in fields:
+                            if isinstance(value, StreamTensorBase):
+                                setattr(unwrapped, name, unwrap_tensor(value))
+                        selected_instances = unwrapped[chosen]
+                        if hasattr(selected_instances, "set_metainfo"):
+                            selected_instances.set_metainfo(
+                                {
+                                    "track_mask": torch.ones(
+                                        len(chosen), dtype=torch.bool, device=boxes.device
+                                    ),
+                                    "num_tracks": torch.tensor([len(chosen)], dtype=torch.long),
+                                }
+                            )
+                        frame_copy.pred_track_instances = selected_instances
+                    sample_copy = copy.copy(track_sample)
+                    sample_copy.video_data_samples = [frame_copy]
+                    single["data_samples"] = (
+                        [sample_copy]
+                        if isinstance(context.get("data_samples"), list)
+                        else sample_copy
+                    )
+                result = self._forward_inference(single)
+                fresh_results = result.get("pose_results", [])
+                if len(fresh_results) != 1:
+                    raise ValueError(
+                        "Pose inference must return one result for each selected frame"
+                    )
+                fresh = fresh_results[0]
+                self._remember_poses(
+                    fresh,
+                    timestamp,
+                    {
+                        track_id: boxes_by_id[track_id]
+                        for track_id in due_ids
+                        if track_id in boxes_by_id
+                    },
+                )
+            output.append(fresh)
+            display = self._runtime.drawing(timestamp, boxes_by_id, continuous=continuous)
+            display_metadata.append(
+                {
+                    "source_time": timestamp,
+                    "poses": [
+                        {
+                            "track_id": track_id,
+                            "observed_time": observation.timestamp,
+                            "held": timestamp > observation.timestamp + 1e-9,
+                        }
+                        for track_id, observation in display
+                    ],
+                }
+            )
+            if show and visualizer is not None:
+                samples = fresh.get("predictions", [])
+                held = [
+                    (track_id, observation)
+                    for track_id, observation in display
+                    if timestamp > observation.timestamp + 1e-9
+                ]
+                if held:
+                    sample = self._pose_sample_type()
+                    prediction = self._pose_instance_type()
+                    prediction.keypoints = torch.stack(
+                        [observation.keypoints for _, observation in held]
+                    )
+                    prediction.keypoint_scores = torch.stack(
+                        [observation.scores for _, observation in held]
+                    )
+                    prediction.bboxes = torch.stack([observation.box for _, observation in held])
+                    sample.pred_instances = prediction
+                    samples = [*samples, sample]
+                for sample in samples:
+                    image = visualizer.add_datasample(
+                        name="pose results",
+                        image=image,
+                        data_sample=sample,
+                        clone_image=False,
+                        draw_gt=False,
+                        draw_bbox=False,
+                        show_kpt_idx=False,
+                        kpt_thr=inferencer.filter_args.get("kpt_thr", 0.3),
+                    )
+                    images[index] = image
+                    drawn = True
+        result = {"pose_results": output, "pose_display_metadata": display_metadata}
+        if drawn:
+            result["original_images"] = wrap_tensor(images)
+        return result
+
+    def _remember_poses(self, result, timestamp, tracked_boxes):
+        if not tracked_boxes:
+            return
+        track_ids = list(tracked_boxes)
+        used = set()
+        for sample in result.get("predictions", []):
+            instances = getattr(sample, "pred_instances", None)
+            keypoints = getattr(instances, "keypoints", None)
+            pose_boxes = getattr(instances, "bboxes", None)
+            if keypoints is None or pose_boxes is None:
+                continue
+            keypoints = torch.as_tensor(keypoints)
+            pose_boxes = torch.as_tensor(pose_boxes, device=keypoints.device)
+            scores = getattr(instances, "keypoint_scores", None)
+            scores = (
+                torch.as_tensor(scores, device=keypoints.device)
+                if scores is not None
+                else torch.ones(keypoints.shape[:-1], device=keypoints.device)
+            )
+            targets = torch.stack(
+                [tracked_boxes[track_id].to(device=keypoints.device) for track_id in track_ids]
+            )
+            left_top = torch.maximum(pose_boxes[:, None, :2], targets[None, :, :2])
+            right_bottom = torch.minimum(pose_boxes[:, None, 2:4], targets[None, :, 2:4])
+            intersection = (right_bottom - left_top).clamp(min=0).prod(dim=-1)
+            area = (pose_boxes[:, 2:4] - pose_boxes[:, :2]).clamp(min=0).prod(dim=-1)
+            target_area = (targets[:, 2:4] - targets[:, :2]).clamp(min=0).prod(dim=-1)
+            overlap = intersection / (area[:, None] + target_area[None, :] - intersection).clamp(
+                min=1e-9
+            )
+            scores_iou, matches = overlap.max(dim=1)
+            for index, (score, match) in enumerate(zip(scores_iou.tolist(), matches.tolist())):
+                track_id = track_ids[match]
+                if score < 0.3 or track_id in used:
+                    continue
+                used.add(track_id)
+                self._pose_sample_type = type(sample)
+                self._pose_instance_type = type(instances)
+                self._runtime.observe(
+                    track_id, timestamp, targets[match], keypoints[index], scores[index]
+                )
+
+    def _forward_inference(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
@@ -91,7 +361,7 @@ class PosePlugin(Plugin):
         elif hasattr(original_images, "__len__"):
             frame_count = len(original_images)
 
-        for vs in track_data_sample.video_data_samples:
+        for vs in track_data_sample.video_data_samples if track_data_sample is not None else []:
             pred_track_instances = getattr(vs, "pred_track_instances", None)
             if pred_track_instances is not None:
                 pred_track_instances.bboxes = unwrap_tensor(pred_track_instances.bboxes)
@@ -101,12 +371,10 @@ class PosePlugin(Plugin):
             # If track instances are absent, fall back to MMPose's internal detector path.
 
         per_frame_bboxes, frame_metas = self._collect_bboxes(track_data_sample, frame_count)
-        if per_frame_bboxes is not None:
-            try:
-                if all((not torch.is_tensor(b)) or b.numel() == 0 for b in per_frame_bboxes):
-                    per_frame_bboxes = None
-            except Exception:
-                pass
+        if per_frame_bboxes is not None and all(
+            (not torch.is_tensor(box)) or box.numel() == 0 for box in per_frame_bboxes
+        ):
+            per_frame_bboxes = None
 
         det_imgs_tensor = context.get("inputs")
         if isinstance(det_imgs_tensor, StreamTensorBase):
@@ -114,8 +382,8 @@ class PosePlugin(Plugin):
         det_inputs_tensor = self._normalize_det_images(det_imgs_tensor, frame_count)
 
         use_det_imgs = False
-        scale_factors: List[torch.Tensor] = []
-        inv_scale_factors: List[torch.Tensor] = []
+        scale_factors: list[torch.Tensor] = []
+        inv_scale_factors: list[torch.Tensor] = []
         if (
             det_inputs_tensor is not None
             and frame_metas is not None
@@ -152,9 +420,7 @@ class PosePlugin(Plugin):
         else:
             inputs_tensor = det_inputs_tensor
 
-        inputs: List[torch.Tensor] = []
-        for img in inputs_tensor:
-            inputs.append(img)
+        inputs: list[torch.Tensor] = list(inputs_tensor)
         inputs = make_channels_last(torch.stack(inputs))
 
         inputs = inputs.contiguous()
@@ -188,16 +454,13 @@ class PosePlugin(Plugin):
             collate_fn = pose_impl.collate_fn
             dataset_meta = getattr(model, "dataset_meta", {}) or {}
 
-            def _build_empty_predictions() -> List[Any]:
-                try:
-                    from mmengine.structures import InstanceData
-                    from mmpose.structures import PoseDataSample
+            def _build_empty_predictions() -> list[Any]:
+                from mmengine.structures import InstanceData
+                from mmpose.structures import PoseDataSample
 
-                    empty_ds = PoseDataSample()
-                    empty_ds.pred_instances = InstanceData()
-                    return [empty_ds]
-                except Exception:
-                    return []
+                empty_ds = PoseDataSample()
+                empty_ds.pred_instances = InstanceData()
+                return [empty_ds]
 
             use_pose_cudagraph = (
                 self._cuda_graph_enabled
@@ -333,10 +596,10 @@ class PosePlugin(Plugin):
                         pad[:, 3] = 1.0
                         bxs = torch.cat([bxs, pad], dim=0)
 
-                    batched_data_infos: List[Any] = []
+                    batched_data_infos: list[Any] = []
                     for j in range(bxs.shape[0]):
                         bbox = bxs[j]
-                        inst: Dict[str, Any] = {
+                        inst: dict[str, Any] = {
                             "img": img,
                             "img_path": None,
                             "hm_frame_index": frame_index,
@@ -354,10 +617,10 @@ class PosePlugin(Plugin):
                                 raise RuntimeError(
                                     "Pose CUDA graph got empty proc_inputs['inputs']"
                                 )
-                            tensors: List[torch.Tensor] = []
+                            tensors: list[torch.Tensor] = []
                             for item in inputs_t:
                                 if not isinstance(item, torch.Tensor):
-                                    raise RuntimeError(
+                                    raise TypeError(
                                         "Pose CUDA graph requires tensor items in proc_inputs['inputs']"
                                     )
                                 t = item
@@ -372,9 +635,7 @@ class PosePlugin(Plugin):
                                 inputs_t = torch.stack(tensors, dim=0)
                             proc_inputs["inputs"] = inputs_t
                         else:
-                            raise RuntimeError(
-                                "Pose CUDA graph requires tensor proc_inputs['inputs']"
-                            )
+                            raise TypeError("Pose CUDA graph requires tensor proc_inputs['inputs']")
                     if inputs_t.device != model_device:
                         inputs_t = inputs_t.to(device=model_device, non_blocking=True)
                         proc_inputs["inputs"] = inputs_t
@@ -388,16 +649,13 @@ class PosePlugin(Plugin):
                         raise RuntimeError(
                             "Pose CUDA graph requires proc_inputs['data_samples'] list"
                         )
-                    centers_l: List[torch.Tensor] = []
-                    scales_l: List[torch.Tensor] = []
-                    sizes_l: List[torch.Tensor] = []
+                    centers_l: list[torch.Tensor] = []
+                    scales_l: list[torch.Tensor] = []
+                    sizes_l: list[torch.Tensor] = []
                     for ds in data_samples:
                         meta = getattr(ds, "metainfo", {}) or {}
                         if not isinstance(meta, dict):
-                            try:
-                                meta = dict(meta)
-                            except Exception:
-                                meta = {}
+                            meta = dict(meta)
                         for k in ("input_center", "input_scale", "input_size"):
                             if k not in meta:
                                 raise RuntimeError(f"Pose CUDA graph requires metainfo[{k}]")
@@ -427,8 +685,8 @@ class PosePlugin(Plugin):
                     keypoints = keypoints[:valid_count]
                     kp_scores = kp_scores[:valid_count]
 
-                    gt_boxes: List[torch.Tensor] = []
-                    gt_scores: List[torch.Tensor] = []
+                    gt_boxes: list[torch.Tensor] = []
+                    gt_scores: list[torch.Tensor] = []
                     for ds in data_samples[:valid_count]:
                         gt = getattr(ds, "gt_instances", None)
                         if (
@@ -463,9 +721,9 @@ class PosePlugin(Plugin):
                     )
                     all_pose_results.append({"predictions": [merged]})
             else:
-                batched_data_infos: List[Any] = []
-                frame_batch_indices: List[int] = []
-                empty_frame_indices: Set[int] = set()
+                batched_data_infos: list[Any] = []
+                frame_batch_indices: list[int] = []
+                empty_frame_indices: set[int] = set()
 
                 for i, (img, bxs) in enumerate(zip(inputs, per_frame_bboxes)):
                     if bxs.numel() == 0:
@@ -474,7 +732,7 @@ class PosePlugin(Plugin):
 
                     for j in range(bxs.shape[0]):
                         bbox = bxs[j]
-                        inst: Dict[str, Any] = {
+                        inst: dict[str, Any] = {
                             "img": img,
                             "img_path": None,
                             "hm_frame_index": i,
@@ -485,8 +743,8 @@ class PosePlugin(Plugin):
                         batched_data_infos.append(pipeline(inst))
                         frame_batch_indices.append(i)
 
-                frame_predictions: List[Optional[List[Any]]] = [None] * len(inputs)
-                preds: Optional[List[Any]] = None
+                frame_predictions: list[list[Any] | None] = [None] * len(inputs)
+                preds: list[Any] | None = None
                 if batched_data_infos:
                     proc_inputs = collate_fn(batched_data_infos)
                     tried_runner = None
@@ -528,7 +786,7 @@ class PosePlugin(Plugin):
                 if preds:
                     batch_index_iter = iter(frame_batch_indices)
                     for data_sample in preds:
-                        frame_idx: Optional[int] = None
+                        frame_idx: int | None = None
                         meta = getattr(data_sample, "metainfo", {}) or {}
                         if isinstance(meta, dict):
                             frame_idx = meta.get("hm_frame_index")
@@ -588,13 +846,14 @@ class PosePlugin(Plugin):
                         drawn_original_images.append(img)
         else:
             # Fallback: let MMPose handle detection internally
-            for pose_results in pose_inferencer(
-                inputs=inputs,
-                return_datasamples=True,
-                visualize=show,
-                **pose_inferencer.filter_args,
-            ):
-                all_pose_results.append(pose_results)
+            all_pose_results = list(
+                pose_inferencer(
+                    inputs=inputs,
+                    return_datasamples=True,
+                    visualize=show,
+                    **pose_inferencer.filter_args,
+                )
+            )
 
             if use_det_imgs and inv_scale_factors:
                 self._restore_pose_outputs(all_pose_results, inv_scale_factors)
@@ -617,7 +876,7 @@ class PosePlugin(Plugin):
                         # show_image("pose", img, wait=False)
 
         pose_results = all_pose_results
-        out: Dict[str, Any] = {"pose_results": pose_results}
+        out: dict[str, Any] = {"pose_results": pose_results}
         if drawn_original_images and isinstance(original_images, torch.Tensor):
             # `original_images` is mutated in-place (original_images[i] = img) above.
             out["original_images"] = wrap_tensor(original_images)
@@ -636,23 +895,17 @@ class PosePlugin(Plugin):
         return track_samples
 
     @staticmethod
-    def _collect_bboxes(track_data_sample, expected_len: Optional[int]):
+    def _collect_bboxes(track_data_sample, expected_len: int | None):
         if track_data_sample is None:
             return None, None
-        try:
-            sample_len = len(track_data_sample)
-        except Exception:
-            return None, None
-        bboxes: List[torch.Tensor] = []
-        metas: List[Dict[str, Any]] = []
+        sample_len = len(track_data_sample)
+        bboxes: list[torch.Tensor] = []
+        metas: list[dict[str, Any]] = []
         for frame_index in range(sample_len):
             ds = track_data_sample[frame_index]
             meta = getattr(ds, "metainfo", {}) or {}
             if not isinstance(meta, dict):
-                try:
-                    meta = dict(meta)
-                except Exception:
-                    meta = {}
+                meta = dict(meta)
             metas.append(meta)
             inst = getattr(ds, "pred_track_instances", None)
             if inst is None or not hasattr(inst, "bboxes"):
@@ -695,7 +948,7 @@ class PosePlugin(Plugin):
         return bboxes, metas
 
     @staticmethod
-    def _normalize_det_images(det_imgs, expected_len: Optional[int]):
+    def _normalize_det_images(det_imgs, expected_len: int | None):
         if det_imgs is None:
             return None
         if not isinstance(det_imgs, torch.Tensor):
@@ -711,7 +964,7 @@ class PosePlugin(Plugin):
         return det_imgs
 
     @staticmethod
-    def _extract_scale_tensor(meta: Dict[str, Any], device: torch.device) -> Optional[torch.Tensor]:
+    def _extract_scale_tensor(meta: dict[str, Any], device: torch.device) -> torch.Tensor | None:
         if not meta:
             return None
         scale_val = None
@@ -732,7 +985,7 @@ class PosePlugin(Plugin):
         return scale_tensor
 
     @staticmethod
-    def _extract_img_hw(meta: Dict[str, Any]) -> Optional[tuple]:
+    def _extract_img_hw(meta: dict[str, Any]) -> tuple | None:
         if not meta:
             return None
         for key in ("img_shape", "batch_input_shape", "pad_shape"):
@@ -746,9 +999,9 @@ class PosePlugin(Plugin):
 
     @staticmethod
     def _scale_bboxes_for_detection(
-        bboxes: List[torch.Tensor], scale_list: List[torch.Tensor]
-    ) -> List[torch.Tensor]:
-        scaled: List[torch.Tensor] = []
+        bboxes: list[torch.Tensor], scale_list: list[torch.Tensor]
+    ) -> list[torch.Tensor]:
+        scaled: list[torch.Tensor] = []
         for boxes, scale in zip(bboxes, scale_list):
             if boxes.numel() == 0:
                 scaled.append(boxes)
@@ -763,7 +1016,7 @@ class PosePlugin(Plugin):
         return scaled
 
     def _restore_pose_outputs(
-        self, pose_results: List[Dict[str, Any]], inv_scale_list: List[torch.Tensor]
+        self, pose_results: list[dict[str, Any]], inv_scale_list: list[torch.Tensor]
     ) -> None:
         if not pose_results or not inv_scale_list:
             return
@@ -826,7 +1079,10 @@ class PosePlugin(Plugin):
             "original_images",
             "pose_inferencer",
             "plot_pose",
+            "fps",
+            "frame_id",
+            "frame_ids",
         }
 
     def output_keys(self):
-        return {"pose_results", "original_images"}
+        return {"pose_results", "original_images", "pose_display_metadata"}

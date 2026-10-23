@@ -199,6 +199,34 @@ def should_deploy_video_and_csvs_as_one_generation(tmp_path):
     assert (destination / "tracking-3.csv").read_bytes() == sources["tracking.csv"].read_bytes()
 
 
+def should_publish_current_segments_without_republishing_a_stale_primary(tmp_path):
+    from hmlib.cli.hmtrack import _deploy_output_artifacts
+
+    work = tmp_path / "work"
+    work.mkdir()
+    stale = work / "tracking_output.mp4"
+    stale.write_bytes(b"previous run")
+    segment = work / "stitched_output.mkv"
+    segment.write_bytes(b"current run")
+    manifest = work / "recording_segments.json"
+    manifest.write_text('{"schema": 1, "segments": []}')
+    destination = tmp_path / "game"
+    result = _deploy_output_artifacts(
+        output_video_path=str(stale),
+        output_video=None,
+        results_folder=str(work),
+        target_deploy_dir=str(destination),
+        game_id="game",
+        supplementary_paths=(segment, manifest),
+        recorded_output_paths=(segment,),
+    )
+    assert result is None
+    assert _visible(destination) == [
+        "game-stitched_output-1.mkv",
+        "recording_segments-1.json",
+    ]
+
+
 def should_preserve_explicit_video_name_and_matching_csv_suffix(tmp_path):
     from hmlib.cli.hmtrack import _deploy_output_artifacts
 

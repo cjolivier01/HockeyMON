@@ -32,6 +32,8 @@ from hmlib.telemetry.database import (
 class RecordingArtifacts:
     telemetry_path: Path | None
     supplementary_paths: tuple[Path, ...] = ()
+    stopped: bool = False
+    output_paths: tuple[Path, ...] = ()
 
 
 def configuration_snapshot(value, active=None, path="root"):
@@ -196,7 +198,7 @@ class TelemetryRecorder:
                 "UPDATE runs SET sample_count=? WHERE run_id=?", (self._sample_id, self.run_id)
             )
             connection.commit()
-        except BaseException as error:
+        except BaseException as error:  # noqa: BLE001 - Worker errors are re-raised by close().
             self._error = error
         finally:
             if connection is not None:

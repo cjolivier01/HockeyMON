@@ -337,11 +337,16 @@ def should_keep_loaded_tracks_in_experiment_recording_graph():
             }
         }
     }
+    cfg["aspen"]["plugins"]["team_affiliation"] = {"depends": ["tracker"]}
+    _enable_load_tracking_plugin(cfg, disable_detector=True)
     _enable_load_tracking_plugin(cfg, disable_detector=True)
     plugins = cfg["aspen"]["plugins"]
     assert plugins["save_tracking"]["enabled"]
     assert plugins["save_tracking"]["depends"] == ["load_tracking"]
     assert not plugins["tracker"]["enabled"]
+    assert plugins["team_affiliation"]["depends"] == ["load_tracking"]
+    assert plugins["camera_controller"]["depends"] == ["replay_camera_join"]
+    assert plugins["replay_camera_join"]["depends"] == ["load_tracking", "ice_config"]
 
 
 def should_publish_exact_labeled_supplements_without_stale_outputs(tmp_path):

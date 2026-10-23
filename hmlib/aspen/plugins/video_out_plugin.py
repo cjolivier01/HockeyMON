@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Optional
+import tempfile
+from pathlib import Path
+from typing import Any
 
 from hmlib.builder import HM
 from hmlib.config import get_nested_value, normalize_runtime_config
+from hmlib.utils.gpu import unwrap_tensor
+from hmlib.utils.image import make_channels_last
 from hmlib.utils.path import add_prefix_to_filename
 from hmlib.video.bitrate import select_source_bitrate_density
 from hmlib.video.video_out import VideoOutput
@@ -21,28 +25,28 @@ class VideoOutPlugin(Plugin):
     def __init__(
         self,
         enabled: bool = True,
-        output_video_path: Optional[str] = None,
+        output_video_path: str | None = None,
         cache_size: int = 2,
         preview_via_sink: bool = True,
-        video_out_device: Optional[str] = None,
+        video_out_device: str | None = None,
         skip_final_save: bool = False,
-        save_frame_dir: Optional[str] = None,
-        encoder_backend: Optional[str] = None,
-        mux_audio_file: Optional[str] = None,
+        save_frame_dir: str | None = None,
+        encoder_backend: str | None = None,
+        mux_audio_file: str | None = None,
         mux_audio_stream: int = 0,
         mux_audio_offset_seconds: float = 0.0,
         mux_audio_aac_bitrate: str = "192k",
-        output_width: Optional[str | int] = None,
-        output_height: Optional[str | int] = None,
-        show_image: Optional[bool] = None,
-        show_scaled: Optional[float] = None,
-        show_youtube: Optional[bool] = None,
-        youtube_stream_url: Optional[str] = None,
-        youtube_stream_key: Optional[str] = None,
-        headless_preview_host: Optional[str] = None,
-        headless_preview_port: Optional[int] = None,
-        always_stream: Optional[bool] = None,
-        bit_rate: Optional[int] = None,
+        output_width: str | int | None = None,
+        output_height: str | int | None = None,
+        show_image: bool | None = None,
+        show_scaled: float | None = None,
+        show_youtube: bool | None = None,
+        youtube_stream_url: str | None = None,
+        youtube_stream_key: str | None = None,
+        headless_preview_host: str | None = None,
+        headless_preview_port: int | None = None,
+        always_stream: bool | None = None,
+        bit_rate: int | None = None,
     ) -> None:
         """Construct the Aspen video sink plugin.
 
@@ -81,7 +85,11 @@ class VideoOutPlugin(Plugin):
         @param bit_rate: Optional target encoded video bitrate.
         """
         super().__init__(enabled=enabled)
-        self._vo: Optional[VideoOutput] = None
+        self._vo: VideoOutput | None = None
+        self._archives: dict[str, VideoOutput] = {}
+        self._archive_paths: list[Path] = []
+        self._archive_dir: Path | None = None
+        self._archive_audio: dict | None = None
         self._out_path = output_video_path
         self._cache = int(cache_size)
         self._preview_via_sink = bool(preview_via_sink)
@@ -104,6 +112,16 @@ class VideoOutPlugin(Plugin):
         self._headless_preview_port = headless_preview_port
         self._always_stream = bool(always_stream) if always_stream is not None else None
         self._bit_rate = bit_rate
+        self._frames_written = 0
+        self._primary_active = False
+        self._primary_path: Path | None = None
+        self._main_options: dict = {}
+        self._archive_options: dict = {}
+        self._segment_counts: dict[str, int] = {}
+        self._segments: list[dict] = []
+        self._path_audio: dict[Path, dict] = {}
+        self._recording_capabilities: list[str] = []
+        self._segments_manifest: Path | None = None
 
     def set_cuda_graph_enabled(self, enabled: bool) -> bool:
         self._cuda_graph_enabled = bool(enabled)
@@ -111,7 +129,7 @@ class VideoOutPlugin(Plugin):
             self._vo.set_cuda_graph_enabled(enabled)
         return True
 
-    def _resolve_output_path(self, cfg: Dict[str, Any], context: Dict[str, Any]) -> str:
+    def _resolve_output_path(self, cfg: dict[str, Any], context: dict[str, Any]) -> str:
         out_path = self._out_path
         if not out_path or "/" not in out_path:
             # Prefer the resolved game config path, but still allow a bare
@@ -130,25 +148,20 @@ class VideoOutPlugin(Plugin):
         if isinstance(shared, dict):
             label = shared.get("output_label") or shared.get("label")
         if label:
-            try:
-                out_path = str(add_prefix_to_filename(out_path, str(label)))
-            except Exception:
-                pass
+            out_path = str(add_prefix_to_filename(out_path, str(label)))
         return str(out_path)
 
-    def _resolve_fps(self, context: Dict[str, Any]) -> float:
+    def _resolve_fps(self, context: dict[str, Any]) -> float:
         shared = context.get("shared", {})
-        fps = None
-        try:
-            fps_val = context.get("fps")
-            if fps_val is None and isinstance(shared, dict):
-                fps_val = shared.get("fps")
-            fps = float(fps_val) if fps_val is not None else None
-        except Exception:
-            fps = None
-        return 30.0 if fps is None else float(fps)
+        fps_val = context.get("fps")
+        if fps_val is None and isinstance(shared, dict):
+            fps_val = shared.get("fps")
+        fps = 30.0 if fps_val is None else float(fps_val)
+        if fps <= 0:
+            raise ValueError("Recording FPS must be positive")
+        return fps
 
-    def _ensure_initialized(self, context: Dict[str, Any]) -> None:
+    def _ensure_initialized(self, context: dict[str, Any]) -> None:
         if self._vo is not None:
             return
         shared = context.get("shared", {})
@@ -194,6 +207,13 @@ class VideoOutPlugin(Plugin):
             if shared.get("mux_audio_aac_bitrate") is not None:
                 mux_audio_aac_bitrate = str(shared.get("mux_audio_aac_bitrate") or "192k")
 
+        if mux_audio_file:
+            self._archive_audio = {
+                "source": mux_audio_file,
+                "stream": mux_audio_stream,
+                "offset_seconds": mux_audio_offset_seconds,
+                "bitrate": mux_audio_aac_bitrate,
+            }
         show_image = False
         show_scaled = None
         show_youtube = False
@@ -292,48 +312,249 @@ class VideoOutPlugin(Plugin):
                 )
             )
 
-        self._vo = VideoOutput(
-            output_video_path=out_path,
-            fps=fps,
-            bit_rate=bit_rate,
-            source_bitrate_density=source_bitrate_density,
-            mux_audio_file=mux_audio_file,
-            mux_audio_stream=mux_audio_stream,
-            mux_audio_offset_seconds=mux_audio_offset_seconds,
-            mux_audio_aac_bitrate=mux_audio_aac_bitrate,
-            save_frame_dir=self._save_dir,
-            name="TRACKING",
-            skip_final_save=self._skip_final_save,
-            progress_bar=progress_bar,
-            cache_size=self._cache,
-            device=vo_dev,
-            output_width=self._output_width,
-            output_height=self._output_height,
-            show_image=show_image,
-            show_scaled=show_scaled,
-            show_youtube=show_youtube,
-            youtube_stream_url=youtube_stream_url,
-            youtube_stream_key=youtube_stream_key,
-            headless_preview_host=headless_preview_host,
-            headless_preview_port=headless_preview_port,
-            always_stream=always_stream,
-            profiler=shared.get("profiler", None) if isinstance(shared, dict) else None,
-            enable_end_zones=False,
-            encoder_backend=self._encoder_backend,
+        self._primary_active = bool(
+            cfg.get("video_out", {}).get("archive_program", not self._skip_final_save)
         )
+        self._main_options = {
+            "output_video_path": out_path,
+            "fps": fps,
+            "bit_rate": bit_rate,
+            "source_bitrate_density": source_bitrate_density,
+            "mux_audio_file": mux_audio_file,
+            "mux_audio_stream": mux_audio_stream,
+            "mux_audio_offset_seconds": mux_audio_offset_seconds,
+            "mux_audio_aac_bitrate": mux_audio_aac_bitrate,
+            "save_frame_dir": self._save_dir,
+            "name": "TRACKING",
+            "skip_final_save": not self._primary_active,
+            "progress_bar": progress_bar,
+            "cache_size": self._cache,
+            "device": vo_dev,
+            "output_width": self._output_width,
+            "output_height": self._output_height,
+            "show_image": show_image,
+            "show_scaled": show_scaled,
+            "show_youtube": show_youtube,
+            "youtube_stream_url": youtube_stream_url,
+            "youtube_stream_key": youtube_stream_key,
+            "headless_preview_host": headless_preview_host,
+            "headless_preview_port": headless_preview_port,
+            "always_stream": always_stream,
+            "profiler": shared.get("profiler", None) if isinstance(shared, dict) else None,
+            "enable_end_zones": False,
+            "encoder_backend": self._encoder_backend,
+        }
+        self._vo = VideoOutput(**self._main_options)
         if hasattr(self._vo, "set_cuda_graph_enabled"):
             self._vo.set_cuda_graph_enabled(self._cuda_graph_enabled)
+        self._archive_options = {
+            "fps": fps,
+            "cache_size": self._cache,
+            "device": vo_dev,
+            "skip_final_save": False,
+            "encoder_backend": self._encoder_backend,
+            "enable_end_zones": False,
+            "profiler": shared.get("profiler"),
+        }
+        if self._primary_active:
+            self._primary_path = Path(out_path)
+            self._segment_counts["archive_program"] = 1
+            self._register_segment("archive_program", self._primary_path)
+
+    def _register_segment(self, role: str, path: Path) -> None:
+        self._segments.append(
+            {
+                "role": role,
+                "path": str(path),
+                "start_frame": self._frames_written,
+                "state": "recording",
+            }
+        )
+        if self._archive_audio:
+            self._path_audio[path] = {
+                **self._archive_audio,
+                "offset_seconds": self._archive_audio["offset_seconds"]
+                - self._frames_written / self._archive_options["fps"],
+            }
+
+    def _segment_path(self, role: str, basename: str) -> Path:
+        if self._archive_dir is None:
+            Path(self._out_path).parent.mkdir(parents=True, exist_ok=True)
+            self._archive_dir = Path(
+                tempfile.mkdtemp(prefix=".archives-", dir=Path(self._out_path).parent)
+            )
+        number = self._segment_counts.get(role, 0) + 1
+        self._segment_counts[role] = number
+        name = Path(basename)
+        if number > 1:
+            name = name.with_stem(f"{name.stem}-part{number}")
+        path = self._archive_dir / name
+        self._archive_paths.append(path)
+        return path
+
+    def _finish_segment(self, path: Path, writer: VideoOutput) -> None:
+        writer.stop()
+        if path.is_file() and path in self._path_audio:
+            from hmlib.ui.output_audio import ensure_archive_audio
+
+            ensure_archive_audio(path, **self._path_audio[path])
+        for segment in self._segments:
+            if segment["path"] == str(path):
+                segment.update(state="finalized", end_frame=self._frames_written)
+
+    def _publish_recordings(self, *, state: str = "running") -> None:
+        session = os.environ.get("HM_UI_SESSION_DIR")
+        if session:
+            from hmlib.ui.workspace.files import write_json
+
+            write_json(
+                Path(session) / "recording-state.json",
+                {
+                    "state": state,
+                    "capabilities": self._recording_capabilities,
+                    "active": {
+                        "archive_program": self._primary_active,
+                        "archive_stitched": "original_images" in self._archives,
+                        "archive_program_4k": "program_4k_img" in self._archives,
+                    },
+                    "segments": self._segments,
+                },
+            )
+
+    def _sync_recordings(self, context: dict) -> None:
+        shared = context.get("shared", {})
+        config = shared.get("game_config", {}).get("video_out", {})
+        self._recording_capabilities = ["archive_program"]
+        if context.get("original_images") is not None:
+            self._recording_capabilities.append("archive_stitched")
+        if shared.get("program_4k_available") or context.get("program_4k_img") is not None:
+            self._recording_capabilities.append("archive_program_4k")
+        shared["recording_capabilities"] = self._recording_capabilities
+        primary = bool(config.get("archive_program", not self._skip_final_save))
+        changed = False
+        if primary != self._primary_active:
+            if self._primary_active:
+                self._finish_segment(self._primary_path, self._vo)
+                self._vo = VideoOutput(
+                    **{**self._main_options, "skip_final_save": True, "mux_audio_file": None}
+                )
+                self._vo.set_cuda_graph_enabled(False)
+            else:
+                path = self._segment_path("archive_program", Path(self._out_path).name)
+                # Segments trim audio after encoding so all encoder backends
+                # use the same current playback position and zero-based PTS.
+                self._vo = VideoOutput(
+                    **{
+                        **self._main_options,
+                        "output_video_path": str(path),
+                        "skip_final_save": False,
+                        "mux_audio_file": None,
+                    }
+                )
+                self._vo.set_cuda_graph_enabled(False)
+                self._primary_path = path
+                self._register_segment("archive_program", path)
+            self._primary_active = primary
+            changed = True
+        for flag, source, basename in (
+            ("archive_stitched", "original_images", "stitched_output.mkv"),
+            ("archive_program_4k", "program_4k_img", "program_4k_output.mkv"),
+        ):
+            wanted = bool(config.get(flag, False))
+            if wanted and flag not in self._recording_capabilities:
+                raise ValueError(f"{flag} is unavailable in this pipeline")
+            writer = self._archives.get(source)
+            if writer is not None and not wanted:
+                path = next(
+                    Path(item["path"])
+                    for item in reversed(self._segments)
+                    if item["role"] == flag and item["state"] == "recording"
+                )
+                self._finish_segment(path, writer)
+                del self._archives[source]
+                changed = True
+            elif wanted and writer is None and context.get(source) is not None:
+                if Path(self._out_path).stem == Path(basename).stem:
+                    basename = f"{Path(basename).stem}-full{Path(basename).suffix}"
+                path = self._segment_path(flag, basename)
+                writer = VideoOutput(
+                    output_video_path=str(path), name=flag.upper(), **self._archive_options
+                )
+                writer.set_cuda_graph_enabled(False)
+                self._archives[source] = writer
+                self._register_segment(flag, path)
+                changed = True
+        if changed or not self._frames_written:
+            self._publish_recordings()
+
+    def output_paths(self) -> tuple[Path, ...]:
+        return tuple(Path(item["path"]) for item in self._segments if Path(item["path"]).is_file())
+
+    def supplementary_paths(self) -> tuple[Path, ...]:
+        paths = [path for path in self._archive_paths if path.is_file()]
+        if self._segments_manifest is not None:
+            paths.append(self._segments_manifest)
+        return tuple(paths)
 
     def finalize(self) -> None:
-        if self._vo is not None:
-            with self.profile_scope("video_out.finalize"):
-                self._vo.stop()
+        from hmlib.utils.finalization import finalize_resources
+
+        actions = []
+        for source, writer in self._archives.items():
+            role = "archive_stitched" if source == "original_images" else "archive_program_4k"
+            path = next(
+                Path(item["path"])
+                for item in reversed(self._segments)
+                if item["role"] == role and item["state"] == "recording"
+            )
+            actions.append((role, lambda p=path, w=writer: self._finish_segment(p, w)))
+        if self._vo is not None and self._primary_active:
+            actions.append(
+                ("program archive", lambda: self._finish_segment(self._primary_path, self._vo))
+            )
+        elif self._vo is not None:
+            actions.append(("program preview", self._vo.stop))
+        with self.profile_scope("video_out.finalize"):
+            finalize_resources(actions)
+        self._archives.clear()
+        self._primary_active = False
+        if any(
+            item["start_frame"] or item.get("end_frame") != self._frames_written
+            for item in self._segments
+        ):
+            from hmlib.ui.workspace.files import write_json
+
+            if self._archive_dir is None:
+                self._archive_dir = Path(
+                    tempfile.mkdtemp(prefix=".archives-", dir=Path(self._out_path).parent)
+                )
+            self._segments_manifest = self._archive_dir / "recording_segments.json"
+            fps = self._archive_options["fps"]
+            write_json(
+                self._segments_manifest,
+                {
+                    "schema": 1,
+                    "fps": fps,
+                    "segments": [
+                        {
+                            **{key: value for key, value in item.items() if key != "path"},
+                            "filename": Path(item["path"]).name,
+                            "timeline_offset_seconds": item["start_frame"] / fps,
+                            "duration_seconds": (item["end_frame"] - item["start_frame"]) / fps,
+                        }
+                        for item in self._segments
+                        if Path(item["path"]).is_file()
+                    ],
+                },
+            )
+        self._publish_recordings(state="finalized")
 
     def input_keys(self):
         if not hasattr(self, "_input_keys"):
             self._input_keys = {
                 "img",
                 "original_images",
+                "program_4k_img",
                 "current_box",
                 "frame_ids",
                 "player_bottom_points",
@@ -355,11 +576,12 @@ class VideoOutPlugin(Plugin):
     def output_keys(self):
         return set()
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
         with self.profile_scope("video_out.ensure_initialized"):
             self._ensure_initialized(context)
+            self._sync_recordings(context)
         assert self._vo is not None
         prepared = dict(context)
         if not prepared.get("video_out_prepared", False):
@@ -369,6 +591,27 @@ class VideoOutPlugin(Plugin):
                 prepared = self._vo.prepare_results(prepared)
         with self.profile_scope("video_out.write"):
             self._vo.write_prepared_results(prepared)
+        for source, writer in self._archives.items():
+            frames = make_channels_last(unwrap_tensor(context[source]))
+            if frames.ndim == 3:
+                frames = frames.unsqueeze(0)
+            frames = frames.contiguous()
+            height, width = frames.shape[-3:-1]
+            archive = dict(context)
+            archive.update(
+                img=frames,
+                video_out_prepared=False,
+                video_frame_cfg={
+                    **context["video_frame_cfg"],
+                    "output_frame_width": width,
+                    "output_frame_height": height,
+                    "output_aspect_ratio": width / height,
+                },
+            )
+            archive.pop("end_zone_img", None)
+            writer.write_prepared_results(writer.prepare_results(archive))
+        frames = unwrap_tensor(context["img"])
+        self._frames_written += int(frames.shape[0]) if frames.ndim == 4 else 1
         return {}
 
 

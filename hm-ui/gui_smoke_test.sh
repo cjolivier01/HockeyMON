@@ -18,7 +18,7 @@ state_dir="$(mktemp -d "${TEST_TMPDIR:-/tmp}/hm-ui-gui-smoke.XXXXXX")"
 trap 'rm -rf "${state_dir}"' EXIT
 
 set +e
-LIBGL_ALWAYS_SOFTWARE=1 WINIT_UNIX_BACKEND=x11 timeout 5s xvfb-run -a \
+env -u WAYLAND_DISPLAY LIBGL_ALWAYS_SOFTWARE=1 WINIT_UNIX_BACKEND=x11 timeout 5s xvfb-run -a \
   "${hm_ui}" \
   --spec "${spec}" \
   --state "${state_dir}/state.json" \
@@ -62,8 +62,8 @@ selected = state["windows"]["Stitch Blend"]["Seam_Blend_Mode"]
 if selected != 2:
     raise SystemExit(f"expected the out-of-range choice index to clamp to 2, got {selected}")
 reported = state.get("spec_version")
-if reported != 2:
-    raise SystemExit(f"expected spec_version 2 from the sidecar, got {reported!r}")
+if reported != 3:
+    raise SystemExit(f"expected spec_version 3 from the sidecar, got {reported!r}")
 EOF
 then
   cat "${state}" >&2 2>/dev/null || true

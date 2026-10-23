@@ -1,11 +1,26 @@
 import argparse
 from contextlib import nullcontext
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 import torch
 
 from hmlib.utils import torch_tensorrt_runtime
+
+
+class _PoseModelFixture(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.test_cfg = {}
+
+    @staticmethod
+    def data_preprocessor(data, training=False):
+        return data
+
+    @staticmethod
+    def add_pred_to_datasample(instances, fields, samples):
+        return instances
 
 
 class _PreallocationController:
@@ -262,7 +277,7 @@ def should_enumerate_tensor_rt_11_plugins_without_probing_missing_creators() -> 
     )
 
     class _Registry:
-        all_creators = [creator]
+        all_creators: ClassVar = [creator]
 
         def get_creator(self, _name, _version, _namespace):
             raise AssertionError(
@@ -350,7 +365,7 @@ def should_reuse_one_static_pose_engine_across_player_counts(monkeypatch, tmp_pa
 
     monkeypatch.setattr(pose_factory_plugin, "compile_torch_tensorrt", _compile)
 
-    class _Model(torch.nn.Module):
+    class _Model(_PoseModelFixture):
         def __init__(self) -> None:
             super().__init__()
             self.backbone = torch.nn.Conv2d(3, 3, kernel_size=1)
@@ -382,11 +397,11 @@ def should_chunk_and_trim_static_pose_batches(monkeypatch, tmp_path) -> None:
             super().__init__()
             self.batch_sizes = []
 
-        def predict(self, feats, data_samples):
+        def predict(self, feats, data_samples, test_cfg):
             self.batch_sizes.append(feats.shape[0])
             return list(data_samples)
 
-    class _Model(torch.nn.Module):
+    class _Model(_PoseModelFixture):
         def __init__(self) -> None:
             super().__init__()
             self.backbone = torch.nn.Identity()
@@ -537,62 +552,20 @@ def should_resolve_rocm_detector_backends_to_head(monkeypatch) -> None:
     )
 
 
-def should_skip_trt_detector_wrapper_on_rocm(monkeypatch) -> None:
+def should_refuse_requested_trt_detector_backend_on_rocm(monkeypatch) -> None:
     from hmlib.aspen.plugins import detector_factory_plugin
 
     monkeypatch.setattr(detector_factory_plugin, "_is_rocm_runtime", lambda: True)
     monkeypatch.setattr(detector_factory_plugin, "_runtime_supports_tensorrt", lambda: False)
-    monkeypatch.setattr(detector_factory_plugin, "_runtime_supports_torchvision_nms", lambda: False)
+    plugin = detector_factory_plugin.DetectorFactoryPlugin(trt={"enable": True})
+    plugin._model = torch.nn.Identity()
 
-    created = {}
-
-    class YOLOXHead:
-        pass
-
-    class _Model(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.bbox_head = YOLOXHead()
-
-    class _FakeTorchWrapper:
-        def __init__(
-            self,
-            *,
-            model,
-            profiler,
-            nms_backend,
-            nms_test,
-            nms_plugin,
-            cuda_graph,
-        ) -> None:
-            created["model"] = model
-            created["profiler"] = profiler
-            created["nms_backend"] = nms_backend
-            created["nms_test"] = nms_test
-            created["nms_plugin"] = nms_plugin
-            created["cuda_graph"] = cuda_graph
-
-    def _unexpected_trt_wrapper(*_args, **_kwargs):
-        raise AssertionError("TRT detector wrapper should not be created on ROCm")
-
-    monkeypatch.setattr(detector_factory_plugin, "_TrtDetectorWrapper", _unexpected_trt_wrapper)
-    monkeypatch.setattr(detector_factory_plugin, "_TorchDetectorWrapper", _FakeTorchWrapper)
-
-    plugin = detector_factory_plugin.DetectorFactoryPlugin(
-        detector={"type": "FakeDetector"},
-        trt={"enable": True, "nms_backend": "trt"},
-        nms_backend="trt",
-    )
-    plugin._model = _Model()
-
-    result = plugin.forward({})
-
-    assert isinstance(result["detector_model"], _FakeTorchWrapper)
-    assert created["model"] is plugin._model
-    assert created["nms_backend"] == "head"
+    with pytest.raises(RuntimeError, match="TensorRT detector backend is unavailable on ROCm"):
+        plugin.forward({})
+    assert plugin._runtime_detector is None
 
 
-def should_surface_pose_compile_failure_and_use_pytorch_split_path(monkeypatch, tmp_path) -> None:
+def should_surface_pose_compile_failure_without_switching_backend(monkeypatch, tmp_path) -> None:
     from hmlib.aspen.plugins import pose_factory_plugin
 
     def _compile(*_args, **_kwargs):
@@ -601,29 +574,28 @@ def should_surface_pose_compile_failure_and_use_pytorch_split_path(monkeypatch, 
     monkeypatch.setattr(pose_factory_plugin, "compile_torch_tensorrt", _compile)
 
     class _Head(torch.nn.Module):
-        def predict(self, feats, data_samples):
+        def predict(self, feats, data_samples, test_cfg):
             return [(feats, data_samples)]
 
-    class _Model(torch.nn.Module):
+    class _Model(_PoseModelFixture):
         def __init__(self) -> None:
             super().__init__()
             self.backbone = torch.nn.Conv2d(3, 3, kernel_size=1)
             self.head = _Head()
 
     runner = pose_factory_plugin._TrtPoseRunner(_Model(), engine_path=str(tmp_path / "pose.engine"))
-    result = runner.forward(
-        {
-            "inputs": torch.randn(1, 3, 16, 16),
-            "data_samples": [object()],
-        }
-    )
-
-    assert runner._trt_disabled_reason == "unsupported TensorRT operator"
+    with pytest.raises(RuntimeError, match="TensorRT pose compilation failed") as raised:
+        runner.forward(
+            {
+                "inputs": torch.randn(1, 3, 16, 16),
+                "data_samples": [object()],
+            }
+        )
+    assert "unsupported TensorRT operator" in str(raised.value.__cause__)
     assert runner._trt_module is None
-    assert len(result) == 1
 
 
-def should_not_disable_pose_engine_when_only_head_decode_fails(monkeypatch, tmp_path) -> None:
+def should_surface_pose_decode_failure_without_switching_backend(monkeypatch, tmp_path) -> None:
     from hmlib.aspen.plugins import pose_factory_plugin
 
     monkeypatch.setattr(
@@ -633,10 +605,10 @@ def should_not_disable_pose_engine_when_only_head_decode_fails(monkeypatch, tmp_
     )
 
     class _Head(torch.nn.Module):
-        def predict(self, _feats, _data_samples):
+        def predict(self, _feats, _data_samples, test_cfg):
             raise ValueError("malformed pose metadata")
 
-    class _Model(torch.nn.Module):
+    class _Model(_PoseModelFixture):
         def __init__(self) -> None:
             super().__init__()
             self.backbone = torch.nn.Identity()
@@ -650,13 +622,12 @@ def should_not_disable_pose_engine_when_only_head_decode_fails(monkeypatch, tmp_
     fallback_result = [object()]
     runner.set_fallback_test_step(lambda _inputs: fallback_result)
 
-    result = runner.forward(
-        {
-            "inputs": torch.randn(1, 3, 16, 16),
-            "data_samples": [object()],
-        }
-    )
-
-    assert result is fallback_result
-    assert runner._trt_disabled_reason is None
+    with pytest.raises(RuntimeError, match="TensorRT pose inference failed") as raised:
+        runner.forward(
+            {
+                "inputs": torch.randn(1, 3, 16, 16),
+                "data_samples": [object()],
+            }
+        )
+    assert "malformed pose metadata" in str(raised.value.__cause__)
     assert runner._trt_module is not None

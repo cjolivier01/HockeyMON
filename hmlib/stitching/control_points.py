@@ -7,7 +7,6 @@ filters used when building two-camera stitching projects.
 import gc
 import os
 from pathlib import Path
-from typing import Dict, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -16,6 +15,7 @@ import torch.nn.functional as F
 
 from hmlib.stitching.akaze import LensCalibrationPair, match_akaze
 from hmlib.stitching.calibration import CalibrationAlignmentError
+from hmlib.stitching.geometric_filtering import ControlPointFiltering, geometric_inliers
 from hmlib.utils.image import image_height, image_width
 
 CONTROL_POINT_MATCHERS = (
@@ -68,6 +68,15 @@ def select_evenly_spaced(batch, n_samples):
     return selected_indices
 
 
+def normalize_control_point_resolution(value: str | None) -> str:
+    """Resolve the shared SuperPoint preference; other matchers retain their own size."""
+    if value is None or value == "auto":
+        return "2k"
+    if not isinstance(value, str) or value.lower() not in ("native", "1k", "2k"):
+        raise ValueError("Control-point resolution must be native, 1k, 2k or auto")
+    return value.lower()
+
+
 def normalize_control_point_matcher(matcher: str) -> str:
     """Return the canonical control-point matcher name or raise."""
     normalized = str(matcher).strip().lower().replace("_", "-")
@@ -79,7 +88,7 @@ def normalize_control_point_matcher(matcher: str) -> str:
 
 
 def _image_to_rgb_tensor(
-    image: Union[str, Path, np.ndarray, torch.Tensor],
+    image: str | Path | np.ndarray | torch.Tensor,
 ) -> torch.Tensor:
     if isinstance(image, (str, Path)):
         image_bgr = cv2.imread(str(image), cv2.IMREAD_COLOR)
@@ -135,7 +144,8 @@ def _match_superpoint_lightglue(
     image1: torch.Tensor,
     device: torch.device,
     max_num_keypoints: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    resolution: str = "2k",
+) -> tuple[torch.Tensor, torch.Tensor]:
     import kornia.feature as kornia_feature
 
     from hmlib.stitching.superpoint import SuperPoint
@@ -151,10 +161,9 @@ def _match_superpoint_lightglue(
         .eval()
         .to(device)
     )
-    # extract() resizes to SUPERPOINT_RESIZE internally and reports keypoints back
-    # in source-image coordinates, so no outer resize is needed here.
-    feats0 = extractor.extract(image0)
-    feats1 = extractor.extract(image1)
+    # The extractor restores source pixel centers after resize/padding.
+    feats0 = extractor.extract(image0, resolution=resolution)
+    feats1 = extractor.extract(image1, resolution=resolution)
     matches = matcher({"image0": feats0, "image1": feats1})["matches"][0]
     points0 = feats0["keypoints"][0][matches[:, 0]]
     points1 = feats1["keypoints"][0][matches[:, 1]]
@@ -166,7 +175,7 @@ def _match_dedode_lightglue(
     image1: torch.Tensor,
     device: torch.device,
     max_num_keypoints: int,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     import kornia.feature as kornia_feature
 
     resized0, scale_x0, scale_y0 = _resize_for_matching(
@@ -218,7 +227,7 @@ def _resize_for_matching(
     image: torch.Tensor,
     max_dimension: int,
     dimension_multiple: int = 1,
-) -> Tuple[torch.Tensor, float, float]:
+) -> tuple[torch.Tensor, float, float]:
     if max_dimension <= 0:
         raise ValueError("max_dimension must be positive")
     if dimension_multiple <= 0:
@@ -227,11 +236,11 @@ def _resize_for_matching(
     scale = min(1.0, max_dimension / float(max(height, width)))
     resized_height = max(
         dimension_multiple,
-        int(round(height * scale / dimension_multiple)) * dimension_multiple,
+        round(height * scale / dimension_multiple) * dimension_multiple,
     )
     resized_width = max(
         dimension_multiple,
-        int(round(width * scale / dimension_multiple)) * dimension_multiple,
+        round(width * scale / dimension_multiple) * dimension_multiple,
     )
     if resized_height == height and resized_width == width:
         return image, 1.0, 1.0
@@ -244,7 +253,7 @@ def _resize_for_matching(
     return resized, width / float(resized_width), height / float(resized_height)
 
 
-def _resize_for_loftr(image: torch.Tensor) -> Tuple[torch.Tensor, float, float]:
+def _resize_for_loftr(image: torch.Tensor) -> tuple[torch.Tensor, float, float]:
     return _resize_for_matching(
         image,
         max_dimension=_LOFTR_MAX_IMAGE_DIMENSION,
@@ -256,7 +265,7 @@ def _match_loftr(
     image0: torch.Tensor,
     image1: torch.Tensor,
     device: torch.device,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     import kornia.feature as kornia_feature
 
     resized0, scale_x0, scale_y0 = _resize_for_loftr(image0)
@@ -361,7 +370,7 @@ def cvtcolor_bgr_to_rgb(image_bgr: torch.Tensor) -> torch.Tensor:
 
 def compute_destination_size_wh(
     img: torch.Tensor, homography_matrix: torch.Tensor
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """Compute destination width/height after applying a homography.
 
     @param img: Source image tensor (H, W or B, C, H, W).
@@ -404,15 +413,17 @@ def compute_destination_size_wh(
 
 
 def calculate_control_points(
-    image0: Union[str, Path, np.ndarray, torch.Tensor],
-    image1: Union[str, Path, np.ndarray, torch.Tensor],
+    image0: str | Path | np.ndarray | torch.Tensor,
+    image1: str | Path | np.ndarray | torch.Tensor,
     max_control_points: int,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
     max_num_keypoints: int = 2048,
-    output_directory: Optional[str] = None,
+    output_directory: str | None = None,
     matcher: str = DEFAULT_CONTROL_POINT_MATCHER,
-    lens_calibration: Optional[LensCalibrationPair] = None,
-) -> Dict[str, torch.Tensor]:
+    lens_calibration: LensCalibrationPair | None = None,
+    control_point_resolution: str | None = None,
+    control_point_filtering: ControlPointFiltering | None = None,
+) -> dict[str, torch.Tensor]:
     """Compute control points for a pair of images with a selected matcher.
 
     @param image0: First image (path or tensor).
@@ -425,6 +436,7 @@ def calculate_control_points(
     @return: Dict containing tensors ``m_kpts0`` and ``m_kpts1`` (Nx2).
     """
     matcher = normalize_control_point_matcher(matcher)
+    resolution = normalize_control_point_resolution(control_point_resolution)
     if matcher == "akaze-hamming":
         device = torch.device("cpu")  # OpenCV AKAZE runs once per calibration frame on the CPU.
     elif lens_calibration is not None:
@@ -442,7 +454,7 @@ def calculate_control_points(
     with torch.inference_mode():
         if matcher == "superpoint-lightglue":
             m_kpts0, m_kpts1 = _match_superpoint_lightglue(
-                image0_tensor, image1_tensor, device, max_num_keypoints
+                image0_tensor, image1_tensor, device, max_num_keypoints, resolution
             )
         elif matcher == "dedode-lightglue":
             m_kpts0, m_kpts1 = _match_dedode_lightglue(
@@ -451,7 +463,38 @@ def calculate_control_points(
         elif matcher == "loftr":
             m_kpts0, m_kpts1 = _match_loftr(image0_tensor, image1_tensor, device)
         else:
-            m_kpts0, m_kpts1 = match_akaze(image0_tensor, image1_tensor, lens_calibration)
+            m_kpts0, m_kpts1 = match_akaze(
+                image0_tensor, image1_tensor, lens_calibration, filtering=control_point_filtering
+            )
+
+    if matcher != "akaze-hamming":
+        detector_points = []
+        for image, points in ((image0_tensor, m_kpts0), (image1_tensor, m_kpts1)):
+            height, width = image.shape[-2:]
+            offset = 0.5 if matcher == "superpoint-lightglue" else 0.0
+            if matcher == "superpoint-lightglue":
+                scale = (
+                    min(2048 / width, 1152 / height)
+                    if resolution == "2k"
+                    else 1024 / max(width, height) if resolution == "1k" else 1.0
+                )
+                size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            else:
+                maximum = (
+                    _LOFTR_MAX_IMAGE_DIMENSION
+                    if matcher == "loftr"
+                    else _DEDODE_MAX_IMAGE_DIMENSION
+                )
+                multiple = 8 if matcher == "loftr" else 1
+                scale = min(1.0, maximum / max(width, height))
+                size = tuple(
+                    max(multiple, round(dimension * scale / multiple) * multiple)
+                    for dimension in (width, height)
+                )
+            points = points.detach().cpu().numpy()
+            detector_points.append((points + offset) * np.array(size) / (width, height) - offset)
+        indices = geometric_inliers(*detector_points, control_point_filtering, matcher)
+        m_kpts0, m_kpts1 = m_kpts0[indices], m_kpts1[indices]
 
     if m_kpts0.shape[0] < 4:
         raise CalibrationAlignmentError(
@@ -476,7 +519,7 @@ def calculate_control_points(
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
-    control_points = dict(m_kpts0=m_kpts0, m_kpts1=m_kpts1)
+    control_points = {"m_kpts0": m_kpts0, "m_kpts1": m_kpts1}
     return control_points
 
 

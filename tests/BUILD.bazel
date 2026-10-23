@@ -1225,3 +1225,212 @@ sh_test(
         "test_telemetry_producer.py",
     ],
 )
+
+sh_test(
+    name = "test_calibration_workspace",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_calibration_workspace.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_calibration_workspace.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_desktop_workspace",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_desktop_workspace.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_desktop_workspace.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_operator_controls",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_operator_controls.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_operator_controls.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_operator_rendering",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_operator_rendering.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_operator_rendering.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_pose_runtime",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_pose_runtime.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_pose_runtime.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_rink_mask_sampling",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_rink_mask_sampling.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_rink_mask_sampling.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_stitching_optics",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_stitching_optics.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_stitching_optics.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_ui_output_routes",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_ui_output_routes.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_ui_output_routes.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_ui_workspace",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_ui_workspace.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_ui_workspace.py",
+        "stitching_fixtures.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_ui_workspace_highlights",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_ui_workspace_highlights.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_ui_workspace_highlights.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_model_preparation",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_model_preparation.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_model_preparation.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_reid_plugin",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_reid_plugin.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_reid_plugin.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_model_backend_contract",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_model_backend_contract.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_model_backend_contract.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_native_player_analytics",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_native_player_analytics.py", "av", "cv2", "numpy", "onnxruntime", "PIL", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_native_player_analytics.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_ui_workspace_tracks",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_ui_workspace_tracks.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_ui_workspace_tracks.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_ui_workspace_replay",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_ui_workspace_replay.py", "av", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_ui_workspace_replay.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)

@@ -11,12 +11,13 @@ import sys
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import torch
 
 from hmlib.config import (
     get_game_config_private,
+    get_game_dir,
     get_nested_value,
     load_config_file,
     set_nested_value,
@@ -150,14 +151,14 @@ def _run_smoke_test(args: argparse.Namespace) -> int:
     return 0
 
 
-def _arg_was_explicit(args: Optional[argparse.Namespace], name: str) -> bool:
+def _arg_was_explicit(args: argparse.Namespace | None, name: str) -> bool:
     explicit = getattr(args, "explicit_arg_names", None)
     if explicit is None:
         return False
     return name in set(explicit)
 
 
-def _config_override_was_explicit(args: Optional[argparse.Namespace], *config_keys: str) -> bool:
+def _config_override_was_explicit(args: argparse.Namespace | None, *config_keys: str) -> bool:
     if args is None:
         return False
     overrides = getattr(args, "config_overrides", None) or []
@@ -178,7 +179,7 @@ def _override_value_is_global_link(value: Any, source_path: str) -> bool:
 
 
 def _plugin_config_override_was_explicit(
-    args: Optional[argparse.Namespace], plugin_path: str, source_path: str
+    args: argparse.Namespace | None, plugin_path: str, source_path: str
 ) -> bool:
     if args is None:
         return False
@@ -196,12 +197,12 @@ def _plugin_config_override_was_explicit(
     return False
 
 
-def _config_value(config: Dict[str, Any], path: str) -> Any:
+def _config_value(config: dict[str, Any], path: str) -> Any:
     return get_nested_value(config, path, _CONFIG_MISSING)
 
 
 def _config_value_is_default_or_missing(
-    config: Dict[str, Any], baseline_config: Dict[str, Any], path: str
+    config: dict[str, Any], baseline_config: dict[str, Any], path: str
 ) -> bool:
     current = _config_value(config, path)
     if current is _CONFIG_MISSING:
@@ -211,7 +212,7 @@ def _config_value_is_default_or_missing(
 
 
 def _plugin_value_follows_source_or_missing(
-    config: Dict[str, Any], plugin_path: str, source_path: str
+    config: dict[str, Any], plugin_path: str, source_path: str
 ) -> bool:
     plugin_value = _config_value(config, plugin_path)
     if plugin_value is _CONFIG_MISSING:
@@ -223,7 +224,7 @@ def _plugin_value_follows_source_or_missing(
 
 
 def _game_or_private_config_was_explicit(
-    args: Optional[argparse.Namespace], *config_keys: str
+    args: argparse.Namespace | None, *config_keys: str
 ) -> bool:
     if args is None or args.game_id is None:
         return False
@@ -244,7 +245,7 @@ def _game_or_private_config_was_explicit(
 
 
 def _game_or_private_plugin_config_was_explicit(
-    args: Optional[argparse.Namespace], plugin_path: str, source_path: str
+    args: argparse.Namespace | None, plugin_path: str, source_path: str
 ) -> bool:
     if args is None or args.game_id is None:
         return False
@@ -263,7 +264,7 @@ def _game_or_private_plugin_config_was_explicit(
     return False
 
 
-def _arm_rink_overlay(aspen_cfg_all: Dict[str, Any]) -> None:
+def _arm_rink_overlay(aspen_cfg_all: dict[str, Any]) -> None:
     """Enable the rink_overlay node when either overlay has been asked for.
 
     Derived once, here, where the config is final. An arg -> config mapping
@@ -279,7 +280,7 @@ def _arm_rink_overlay(aspen_cfg_all: Dict[str, Any]) -> None:
 
 
 def _apply_stitch_buffering_defaults(
-    aspen_cfg_all: Dict[str, Any], args: Optional[argparse.Namespace]
+    aspen_cfg_all: dict[str, Any], args: argparse.Namespace | None
 ) -> None:
     """Clamp stitch pipeline buffering so panoramas do not queue multiple frames by default."""
     aspen_cfg = aspen_cfg_all.setdefault("aspen", {})
@@ -292,27 +293,19 @@ def _apply_stitch_buffering_defaults(
     baseline_config = _get_baseline_runtime_config()
     applied: list[str] = []
 
-    if not _arg_was_explicit(args, "aspen_max_concurrent") and not _config_override_was_explicit(
-        args, "aspen.pipeline.max_concurrent"
+    for argument, key in (
+        ("aspen_max_concurrent", "max_concurrent"),
+        ("aspen_thread_queue_size", "queue_size"),
     ):
-        if not _game_or_private_config_was_explicit(args, "aspen.pipeline.max_concurrent") and (
-            _config_value_is_default_or_missing(
-                aspen_cfg_all, baseline_config, "aspen.pipeline.max_concurrent"
-            )
+        config_key = f"aspen.pipeline.{key}"
+        if (
+            not _arg_was_explicit(args, argument)
+            and not _config_override_was_explicit(args, config_key)
+            and not _game_or_private_config_was_explicit(args, config_key)
+            and _config_value_is_default_or_missing(aspen_cfg_all, baseline_config, config_key)
         ):
-            pipeline_cfg["max_concurrent"] = 1
-            applied.append("aspen.pipeline.max_concurrent=1")
-
-    if not _arg_was_explicit(args, "aspen_thread_queue_size") and not _config_override_was_explicit(
-        args, "aspen.pipeline.queue_size"
-    ):
-        if not _game_or_private_config_was_explicit(args, "aspen.pipeline.queue_size") and (
-            _config_value_is_default_or_missing(
-                aspen_cfg_all, baseline_config, "aspen.pipeline.queue_size"
-            )
-        ):
-            pipeline_cfg["queue_size"] = 1
-            applied.append("aspen.pipeline.queue_size=1")
+            pipeline_cfg[key] = 1
+            applied.append(f"{config_key}=1")
 
     if not applied:
         return
@@ -324,7 +317,7 @@ def _apply_stitch_buffering_defaults(
 
 
 def _apply_single_lowmem_gpu_overrides(
-    args: argparse.Namespace, aspen_cfg_all: Optional[Dict[str, Any]]
+    args: argparse.Namespace, aspen_cfg_all: dict[str, Any] | None
 ) -> bool:
     print("Adjusting stitch configuration for a single low-memory GPU environment...")
     explicit = set(getattr(args, "explicit_arg_names", None) or [])
@@ -536,7 +529,7 @@ def _apply_single_lowmem_gpu_overrides(
 
 
 def _resolve_stitch_tensor_dtype(
-    default_dtype: torch.dtype, stitch_cfg: Dict[str, Any]
+    default_dtype: torch.dtype, stitch_cfg: dict[str, Any]
 ) -> torch.dtype:
     dtype_value = stitch_cfg.get("dtype")
     if dtype_value is None:
@@ -554,38 +547,44 @@ def _resolve_stitch_tensor_dtype(
     raise ValueError(f"Unsupported stitch dtype: {dtype_value!r}")
 
 
+_DEFAULT_REMAPPING_DEVICE = torch.device("cuda", 0)
+_DEFAULT_ENCODER_DEVICE = torch.device("cpu")
+
+
 def stitch_videos(
     dir_name: str,
-    videos: Dict[str, List[Path]],
+    videos: dict[str, list[Path]],
     max_control_points: int,
-    lfo: int = None,
-    rfo: int = None,
-    game_id: str = None,
+    lfo: int | None = None,
+    rfo: int | None = None,
+    game_id: str | None = None,
     project_file_name: str = "hm_project.pto",
     blend_mode: str = "laplacian",
-    blend_feather_fraction: Optional[float] = None,
+    blend_feather_fraction: float | None = None,
     start_frame_number: int = 0,
-    max_frames: int = None,
+    max_frames: int | None = None,
     batch_size: int = 1,
     show: bool = False,
-    show_scaled: Optional[float] = None,
+    show_scaled: float | None = None,
     output_stitched_video_file: str = os.path.join(".", "stitched_output.mkv"),
-    decoder_device: Optional[torch.device] = None,
-    remapping_device: torch.device = torch.device("cuda", 0),
-    encoder_device: torch.device = torch.device("cpu"),
+    decoder_device: torch.device | None = None,
+    remapping_device: torch.device = _DEFAULT_REMAPPING_DEVICE,
+    encoder_device: torch.device = _DEFAULT_ENCODER_DEVICE,
     ignore_clip_box: bool = True,
     cache_size: int = 4,
     dtype: torch.dtype = torch.float,
-    start_frame_time: Optional[str] = None,
-    stitch_frame_time: Optional[str] = None,
-    force: Optional[bool] = False,
+    start_frame_time: str | None = None,
+    stitch_frame_time: str | None = None,
+    force: bool | None = False,
     minimize_blend: bool = True,
     python_blender: bool = False,
     configure_only: bool = False,
     lowmem: bool = False,
-    post_stitch_rotate_degrees: Optional[float] = None,
+    post_stitch_rotate_degrees: float | None = None,
     camera_ui: int = 0,
-    args: Optional[argparse.Namespace] = None,
+    args: argparse.Namespace | None = None,
+    deploy_dir: str | None = None,
+    audio_options: dict | None = None,
 ):
     from hmlib.config import (
         get_clip_box,
@@ -606,11 +605,11 @@ def stitch_videos(
         from hmlib.aspen import AspenNet as ImportedAspenNet
 
         AspenNet = ImportedAspenNet
-        import hmlib.hm_transforms  # noqa: F401
-        import hmlib.transforms  # noqa: F401
+        import hmlib.hm_transforms
+        import hmlib.transforms
     else:
         try:
-            import hmlib.hm_transforms  # noqa: F401
+            import hmlib.hm_transforms
             import hmlib.transforms  # noqa: F401
         except ModuleNotFoundError:
             pass
@@ -638,7 +637,7 @@ def stitch_videos(
             getattr(args, "video_stream_decode_method", None) if args is not None else None
         )
         if dir_name is None and game_id:
-            dir_name = os.path.join(os.environ["HOME"], "Videos", game_id)
+            dir_name = get_game_dir(game_id)
         left_vid = BasicVideoInfo(",".join(videos["left"]))
         right_vid = BasicVideoInfo(",".join(videos["right"]))
         total_frames = min(left_vid.frame_count, right_vid.frame_count)
@@ -650,7 +649,7 @@ def stitch_videos(
             resolve_globals=False,
             ignore_private_config=ignore_private_config,
         )
-        aspen_cfg_all: Dict[str, Any] = load_yaml_files_ordered(
+        aspen_cfg_all: dict[str, Any] = load_yaml_files_ordered(
             ["config/aspen/stitching.yaml"], base=base_cfg
         )
         normalize_runtime_config(aspen_cfg_all)
@@ -672,9 +671,8 @@ def stitch_videos(
                 explicit_arg_names=getattr(args, "explicit_arg_names", None),
             )
             configure_cfg_all = copy.deepcopy(aspen_cfg_all)
-            if lowmem:
-                if _apply_single_lowmem_gpu_overrides(args, aspen_cfg_all):
-                    dtype = torch.float16
+            if lowmem and _apply_single_lowmem_gpu_overrides(args, aspen_cfg_all):
+                dtype = torch.float16
         else:
             configure_cfg_all = copy.deepcopy(aspen_cfg_all)
         raw_stitch_params = copy.deepcopy(
@@ -749,7 +747,11 @@ def stitch_videos(
             if not stitch_time_is_zero and stitch_frame_time:
                 try:
                     stitch_time_is_zero = convert_hms_to_seconds(str(stitch_frame_time)) <= 0
-                except Exception:
+                except (ValueError, TypeError, OverflowError) as error:
+                    logger.warning(
+                        "Could not interpret stitch frame time; treating it as an explicit selection: %s",
+                        error,
+                    )
                     stitch_time_is_zero = False
             if stitch_time_is_zero:
                 stitch_frame_time = start_frame_time
@@ -757,12 +759,12 @@ def stitch_videos(
         if stitch_frame_time:
             seconds = convert_hms_to_seconds(str(stitch_frame_time))
             if seconds > 0:
-                stitch_frame_number = int(round(seconds * left_vid.fps))
+                stitch_frame_number = round(seconds * left_vid.fps)
         if start_frame_time:
             assert not start_frame_number
             seconds = convert_hms_to_seconds(start_frame_time)
             if seconds > 0:
-                start_frame_number = int(round(seconds * left_vid.fps))
+                start_frame_number = round(seconds * left_vid.fps)
 
         pto_project_file, lfo, rfo = configure_video_stitching(
             dir_name,
@@ -793,7 +795,7 @@ def stitch_videos(
 
         profiler = getattr(args, "profiler", None)
         if args is not None:
-            setattr(args, "stitch_pto_project_file", str(pto_project_file))
+            args.stitch_pto_project_file = str(pto_project_file)
 
         # Keep the dataloader path aligned with the actual Aspen plugin enablement.
         # The stitching graph stores this under `aspen.plugins.stitching.enabled`,
@@ -802,7 +804,7 @@ def stitch_videos(
             get_nested_value(aspen_cfg_all, "aspen.plugins.stitching.enabled", False)
         )
         if args is not None and getattr(args, "aspen_stitching", None) is not None:
-            use_aspen_stitching = bool(getattr(args, "aspen_stitching"))
+            use_aspen_stitching = bool(args.aspen_stitching)
         if camera_ui and not use_aspen_stitching:
             raise ValueError("--camera-ui requires Aspen stitching; remove --no-aspen-stitching")
         if use_aspen_stitching and lowmem:
@@ -917,8 +919,8 @@ def stitch_videos(
         dataset_delivery_fps = 0.0
 
         use_progress_bar: bool = not args.no_progress_bar
-        progress_bar: Optional[ProgressBar] = None
-        scroll_output: Optional[ScrollOutput] = None
+        progress_bar: ProgressBar | None = None
+        scroll_output: ScrollOutput | None = None
 
         shower = None
         if (show or args.show_youtube) and not use_aspen_stitching:
@@ -944,7 +946,7 @@ def stitch_videos(
             dataset = getattr(data_loader, "dataset", None)
             if dataset is not None:
                 try:
-                    total_frames = int(len(dataset))
+                    total_frames = len(dataset)
                 except TypeError:
                     total_frames = int(total_batches) * int(batch_size_hint) if total_batches else 0
             else:
@@ -987,16 +989,16 @@ def stitch_videos(
         # Build AspenNet-based video-output pipeline for stitching.
         # Load the stitching Aspen graph from YAML and wire in CLI-specific
         # parameters (output path, skip-final-save, frame dumping).
-        aspen_graph_cfg: Dict[str, Any] = aspen_cfg_all.get("aspen", {}) or {}
-        plugins_cfg: Dict[str, Any] = aspen_graph_cfg.get("plugins", {}) or {}
+        aspen_graph_cfg: dict[str, Any] = aspen_cfg_all.get("aspen", {}) or {}
+        plugins_cfg: dict[str, Any] = aspen_graph_cfg.get("plugins", {}) or {}
         if not camera_ui:
             # Avoid a worker/queue handoff for a host-side UI sink that cannot
             # do useful work when the camera UI is disabled.
             plugins_cfg.pop("stitch_ui", None)
-        video_out_prep_spec: Dict[str, Any] = plugins_cfg.get("video_out_prep", {}) or {}
-        video_out_prep_params: Dict[str, Any] = video_out_prep_spec.get("params", {}) or {}
-        video_out_spec: Dict[str, Any] = plugins_cfg.get("video_out", {}) or {}
-        video_out_params: Dict[str, Any] = video_out_spec.get("params", {}) or {}
+        video_out_prep_spec: dict[str, Any] = plugins_cfg.get("video_out_prep", {}) or {}
+        video_out_prep_params: dict[str, Any] = video_out_prep_spec.get("params", {}) or {}
+        video_out_spec: dict[str, Any] = plugins_cfg.get("video_out", {}) or {}
+        video_out_params: dict[str, Any] = video_out_spec.get("params", {}) or {}
         output_label = None
         if args is not None:
             output_label = getattr(args, "label", None) or getattr(args, "output_label", None)
@@ -1004,8 +1006,10 @@ def stitch_videos(
         if output_label:
             try:
                 output_path = str(add_prefix_to_filename(output_path, str(output_label)))
-            except Exception:
-                pass
+            except (ValueError, TypeError, OSError) as error:
+                logger.warning(
+                    "Could not apply output label; retaining original filename: %s", error
+                )
         video_out_params.setdefault("output_video_path", output_path)
         video_out_prep_spec["params"] = video_out_prep_params
         plugins_cfg["video_out_prep"] = video_out_prep_spec
@@ -1028,12 +1032,47 @@ def stitch_videos(
             work_dir = args.work_dir
         os.makedirs(work_dir, exist_ok=True)
 
-        aspen_shared: Dict[str, Any] = {
+        source_audio = None
+        if audio_options is not None:
+            from hmlib.ui.output_audio import prepare_chapter_audio
+
+            if audio_options.get("file"):
+                audio_paths = [Path(audio_options["file"])]
+                audio_offset = 0
+            else:
+                role = "left" if lfo <= rfo else "right"
+                audio_paths = [Path(path) for path in videos[role]]
+                audio_offset = lfo if role == "left" else rfo
+            audio_file, source_audio = prepare_chapter_audio(
+                audio_paths, Path(work_dir), stream=int(audio_options.get("stream", 0))
+            )
+            if audio_file is None:
+                if audio_options.get("file"):
+                    raise ValueError(
+                        "The explicitly selected mux audio file has no selected audio stream"
+                    )
+                logger.info("Selected stitching source has no audio stream; recording video only")
+            else:
+                audio_settings = {
+                    "mux_audio_file": audio_file,
+                    "mux_audio_stream": (
+                        0 if source_audio is not None else int(audio_options.get("stream", 0))
+                    ),
+                    "mux_audio_offset_seconds": float(audio_options.get("offset_seconds", 0))
+                    - (audio_offset + start_frame_number) / left_vid.fps,
+                    "mux_audio_aac_bitrate": audio_options.get("bitrate", "192k"),
+                }
+        else:
+            audio_file = None
+
+        aspen_shared: dict[str, Any] = {
             "device": encoder_device,
             "work_dir": work_dir,
             "progress_bar": progress_bar,
             "source_video_paths": list(videos["left"]) + list(videos["right"]),
         }
+        if audio_file is not None:
+            aspen_shared.update(audio_settings)
         if profiler is not None:
             aspen_shared["profiler"] = profiler
         if args is not None:
@@ -1059,6 +1098,9 @@ def stitch_videos(
                 torch.no_grad(),
             ):
                 for i, batch in enumerate(data_loader_iter):
+                    ui = aspen_net.shared.get("hm_ui_process")
+                    if ui is not None and ui.stop_requested:
+                        break
                     if configure_only:
                         break
                     if use_aspen_stitching:
@@ -1133,10 +1175,7 @@ def stitch_videos(
                             assert stitched_image.ndim == 4
                         dataset_delivery_fps = batch_size / max(1e-5, dataset_timer.average_time)
                         logger.info(
-                            "Dataset frame {} ({:.2f} fps)".format(
-                                i * batch_size,
-                                batch_size / max(1e-5, dataset_timer.average_time),
-                            )
+                            f"Dataset frame {i * batch_size} ({batch_size / max(1e-5, dataset_timer.average_time):.2f} fps)"
                         )
                         if i % 100 == 0:
                             dataset_timer = Timer()
@@ -1162,8 +1201,36 @@ def stitch_videos(
             if shower is not None:
                 actions.append(("stitch preview", shower.close))
             actions.append(("stitch pipeline", aspen_net.finalize))
+            if source_audio is not None:
+                actions.append(("temporary source audio", source_audio.cleanup))
             finalize_resources(actions, primary_error=sys.exc_info()[1])
+        if deploy_dir:
+            _publish_stitch_outputs(aspen_net, Path(deploy_dir), game_id)
     return lfo, rfo
+
+
+def _publish_stitch_outputs(aspen_net, destination: Path, game_id: str | None):
+    from hmlib.utils.output_publication import publish_artifacts
+
+    sources = {}
+    for node in aspen_net.exec_order:
+        if not node.module.enabled or not hasattr(node.module, "output_paths"):
+            continue
+        paths = list(node.module.output_paths())
+        if hasattr(node.module, "supplementary_paths"):
+            paths.extend(node.module.supplementary_paths())
+        for path in paths:
+            prefix = f"{game_id}-" if game_id else ""
+            name = path.name if path.name.startswith(prefix) else prefix + path.name
+            if name in sources and sources[name] != path:
+                raise ValueError(f"Two stitching outputs use the same publication name: {name}")
+            sources[name] = path
+    if not sources:
+        return None
+    published = publish_artifacts(sources, destination)
+    for path in published.files.values():
+        logger.info("Published stitching output: %s", path)
+    return published
 
 
 def _main(args) -> None:
@@ -1175,14 +1242,10 @@ def _main(args) -> None:
     # `--force` implies starting from a clean stitch state.
     if args.force or args.clean:
         try:
-            game_dir = (
-                Path(args.video_dir)
-                if args.video_dir
-                else Path(os.environ["HOME"]) / "Videos" / str(args.game_id)
-            )
+            game_dir = Path(args.video_dir) if args.video_dir else Path(get_game_dir(args.game_id))
             if args.game_id and game_dir.exists():
                 clean_stitch_game_artifacts(game_id=args.game_id, game_dir=game_dir)
-        except Exception as ex:
+        except (OSError, RuntimeError, ValueError, TypeError) as ex:
             logger.warning("Failed to clean stitch artifacts: %s", ex)
     if args.clean:
         return
@@ -1200,9 +1263,9 @@ def _main(args) -> None:
         torch.set_default_dtype(HalfFloatType)
 
     if args.single_file or args.configure_only:
-        if "left" in game_videos and game_videos["left"]:
+        if game_videos.get("left"):
             game_videos["left"] = game_videos["left"][:1]
-        if "right" in game_videos and game_videos["right"]:
+        if game_videos.get("right"):
             game_videos["right"] = game_videos["right"][:1]
 
     # If user specified max processing time (-t/--max-time), convert to frames
@@ -1220,7 +1283,7 @@ def _main(args) -> None:
                     args.max_frames,
                     left_vid.fps,
                 )
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
         logger.warning("Failed converting max-time to frames: %s", e)
     # Initialize lightweight profiler and attach to args for downstream use (same pattern as hmtrack.py)
     profiler = None
@@ -1233,9 +1296,10 @@ def _main(args) -> None:
         args.work_dir = results_folder
         default_prof_dir = os.path.join(results_folder, "profiler")
         profiler = build_profiler_from_args(args, save_dir_fallback=default_prof_dir)
-    except Exception:
+    except (ImportError, OSError, RuntimeError, ValueError, TypeError) as error:
+        logger.warning("Profiler initialization failed; profiling is disabled: %s", error)
         profiler = None
-    setattr(args, "profiler", profiler)
+    args.profiler = profiler
 
     gpu_allocator = GpuAllocator(gpus=args.gpus.split(","))
     assert not args.start_frame_offset
@@ -1283,6 +1347,17 @@ def _main(args) -> None:
             post_stitch_rotate_degrees=getattr(args, "stitch_rotate_degrees", None),
             camera_ui=int(args.camera_ui or 0),
             args=args,
+            deploy_dir=args.deploy_dir,
+            audio_options=(
+                None
+                if args.no_audio
+                else {
+                    "file": args.mux_audio_file,
+                    "stream": args.mux_audio_stream,
+                    "offset_seconds": args.mux_audio_offset_seconds,
+                    "bitrate": args.mux_audio_aac_bitrate,
+                }
+            ),
         )
 
     if args.configure_only:
@@ -1301,6 +1376,12 @@ def main() -> None:
     args.explicit_arg_names = hm_opts.collect_explicit_arg_names(parser)
     if args.smoke_test:
         return _run_smoke_test(args)
+    from hmlib.ui.desktop import launch_desktop, use_desktop
+
+    if use_desktop(args.camera_ui):
+        return launch_desktop(
+            game_id=args.game_id, module="hmlib.cli.stitch", arguments=sys.argv[1:]
+        )
     args = hm_opts.init(args, parser=parser)
     _main(args)
 

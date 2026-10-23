@@ -24,7 +24,8 @@ from .features import batched_lab_mean
 #: Backend names accepted in ``team.backend``.
 LAB_BACKEND = "lab"
 PRTREID_BACKEND = "prtreid"
-BACKEND_NAMES = (LAB_BACKEND, PRTREID_BACKEND)
+TAO_BACKEND = "reidentificationnet"
+BACKEND_NAMES = (LAB_BACKEND, PRTREID_BACKEND, TAO_BACKEND)
 
 #: (H, W) every ROI is cut to. This is PRTReid's input geometry, so one
 #: extraction serves both backends -- the lab path just pools it down.
@@ -122,6 +123,41 @@ class PrtreidBackend:
         )
 
 
+class TaoBackend:
+    """Published NVIDIA appearance embedding, clustered per game like PRTReid."""
+
+    name = TAO_BACKEND
+    dim = 256
+
+    def __init__(self, onnx_path: str):
+        from hmlib.aspen.plugins.reid_plugin import ReidPlugin
+
+        self._runner = ReidPlugin(onnx_path)
+        self._lab = LabBackend()
+
+    def extract(self, batch: torch.Tensor) -> BackendOutput:
+        if batch.shape[0] == 0:
+            return _empty_output(self.dim)
+        if batch.ndim != 4 or batch.shape[1:] != (3, *CROP_SIZE):
+            raise ValueError("NVIDIA team appearance expects RGB crops [N,3,256,128]")
+        session = self._runner._ensure_session()
+        mean = batch.new_tensor([123.675, 116.28, 103.53], dtype=torch.float32).view(1, 3, 1, 1)
+        features = []
+        for start in range(0, len(batch), self._runner.batch_size):
+            crops = (
+                batch[start : start + self._runner.batch_size].float() - mean
+            ) * 0.01735207357279195
+            output = session.run(None, {session.get_inputs()[0].name: crops.cpu().numpy()})[0]
+            embeddings = torch.as_tensor(output)
+            if embeddings.shape != (len(crops), self.dim) or not torch.isfinite(embeddings).all():
+                raise ValueError("NVIDIA team appearance returned invalid embeddings")
+            features.append(F.normalize(embeddings, p=2, dim=1))
+        return BackendOutput(
+            features=torch.cat(features).float(),
+            lightness=self._lab.extract(batch).lightness,
+        )
+
+
 def stack_crops(crops: Sequence[torch.Tensor], size: Sequence[int] = CROP_SIZE) -> torch.Tensor:
     """Resize a list of differently-sized crops into one ``(N, 3, H, W)`` batch.
 
@@ -152,6 +188,7 @@ def build_backend(
     prtreid_weights: str = "",
     prtreid_backbone_weights: str = "",
     prtreid_device: str = "cuda",
+    reid_onnx_path: str = "",
 ):
     """Construct a backend by name.
 
@@ -168,6 +205,10 @@ def build_backend(
             backbone_weights=prtreid_backbone_weights,
             device=prtreid_device,
         )
+    if normalised == TAO_BACKEND:
+        if not reid_onnx_path:
+            raise ValueError("Prepare the NVIDIA appearance model before selecting it for teams")
+        return TaoBackend(reid_onnx_path)
     raise ValueError(
         f"unknown team.backend {backend!r}; expected one of {', '.join(BACKEND_NAMES)}"
     )

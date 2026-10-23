@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -26,6 +27,57 @@ else:
     wrap_tensor = None  # type: ignore[assignment]
 
 requires_torch = pytest.mark.skipif(torch is None, reason="requires torch")
+
+
+@requires_torch
+@pytest.mark.parametrize("cached_revision", [None, "old-geometry", "current"])
+def should_sample_timed_mask_during_recording_only_without_a_proven_cache(
+    monkeypatch, cached_revision
+):
+    from hmlib.segm import ice_rink
+    from hmlib.stitching import rink_mask_sampling
+
+    revision = hashlib.sha256(b"geometry|mask-frame:00:00:01").hexdigest()
+    sampled = []
+    configured = []
+    selected_frame = torch.ones((3, 20, 30))
+    cached = (
+        {
+            "combined_mask": torch.ones((20, 30), dtype=torch.bool),
+            "geometry_revision": revision if cached_revision == "current" else cached_revision,
+        }
+        if cached_revision is not None
+        else None
+    )
+
+    def sample(context, frame):
+        sampled.append(context)
+        return selected_frame, "00:00:01"
+
+    def configure(**kwargs):
+        configured.append(kwargs)
+        return {"combined_mask": torch.ones((20, 30), dtype=torch.bool)}
+
+    monkeypatch.setattr(ice_rink, "load_rink_combined_mask", lambda **_kwargs: cached)
+    monkeypatch.setattr(ice_rink, "configure_ice_rink_mask", configure)
+    monkeypatch.setattr(rink_mask_sampling, "sample_rink_mask_frame", sample)
+    context = {
+        "data_samples": make_track_data_sample(num_frames=1, ori_shape=(20, 30)),
+        "original_images": torch.zeros((1, 3, 20, 30)),
+        "game_id": "timed-mask",
+        "telemetry_batch": object(),
+        "camera_input_geometry": {"stitched_geometry_revision": "geometry"},
+        "shared": {"game_config": {"stitching": {"rink_mask_frame_time": "00:00:01"}}},
+    }
+    result = IceRinkSegmConfigPlugin(require_geometry_provenance=True).forward(context)
+    assert result["rink_profile"]["combined_mask"].shape == (20, 30)
+    if cached_revision == "current":
+        assert not sampled and not configured
+    else:
+        assert len(sampled) == len(configured) == 1
+        assert configured[0]["image"] is selected_frame
+        assert configured[0]["geometry_revision"] == revision
+        assert configured[0]["force"] is True
 
 
 @requires_torch

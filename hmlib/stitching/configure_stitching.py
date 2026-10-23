@@ -13,18 +13,18 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any
 
 import cv2
 import numpy as np
@@ -66,20 +66,26 @@ from hmlib.stitching.homography_maps import (
     create_opencv_magsac_mapping_files,
 )
 from hmlib.stitching.hugin import configure_control_points, write_control_points
+from hmlib.stitching.input_lens import InputLens, apply_input_lens
 from hmlib.stitching.projections import (
     apply_projection_framing,
     cap_projection_canvas,
     set_source_horizontal_fov,
 )
+from hmlib.stitching.pto_sources import rewrite_pto_sources as _rewrite_pto_sources
 from hmlib.stitching.seam import normalize_canvas_seam_mask
-from hmlib.stitching.settings import MAPPING_BACKENDS as MAPPING_BACKENDS
-from hmlib.stitching.settings import OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS
-from hmlib.stitching.settings import StitchingSettings
-from hmlib.stitching.settings import normalize_mapping_backend as normalize_mapping_backend
+from hmlib.stitching.settings import MAPPING_BACKENDS as MAPPING_BACKENDS  # noqa: PLC0414
 from hmlib.stitching.settings import (
+    OPENCV_MAPPING_BACKENDS as OPENCV_MAPPING_BACKENDS,  # noqa: PLC0414
+)
+from hmlib.stitching.settings import (
+    StitchingSettings,
     normalize_max_output_dimension,
     read_stitching_settings,
     validate_output_scale,
+)
+from hmlib.stitching.settings import (
+    normalize_mapping_backend as normalize_mapping_backend,  # noqa: PLC0414
 )
 from hmlib.video.ffmpeg import BasicVideoInfo
 from hmlib.video.video_stream import extract_frame_image
@@ -95,6 +101,7 @@ _STITCH_ROTATION_PATH = "stitching.projection_framing.rotation_degrees"
 _STITCH_GEOMETRY_CONFIG_PATHS = (
     ("stitching", "control_points"),
     ("rink", "scoreboard", "perspective_polygon"),
+    ("rink", "workspace_map"),
     ("rink", "ice_contours_mask_count"),
     ("rink", "ice_contours_mask_centroid"),
     ("rink", "ice_contours_combined_bbox"),
@@ -105,6 +112,11 @@ _STITCH_GEOMETRY_CONFIG_PATHS = (
 )
 _CALIBRATION_CONFIG_KEYS = (
     "control_point_matcher",
+    "control_point_resolution",
+    "control_point_filtering",
+    "input_lens",
+    "camera_automation",
+    "auto_input_lens_frozen",
     "mapping_backend",
     "projection",
     "projection_parameters",
@@ -123,12 +135,12 @@ _CALIBRATION_CONFIG_KEYS = (
 
 
 _stitch_game_lock = stitching_lock
-_command_directory: ContextVar[Optional[Path]] = ContextVar(
+_command_directory: ContextVar[Path | None] = ContextVar(
     "stitching_command_directory", default=None
 )
 
 
-def _resolve_local_binary(executable: str) -> Optional[str]:
+def _resolve_local_binary(executable: str) -> str | None:
     """Return a package-local binary path if available.
 
     Prefers `<hmlib_root>/bin/<executable>` both for Bazel runfiles
@@ -153,7 +165,7 @@ def _resolve_stitching_binary(executable: str) -> str:
     return _resolve_local_binary(executable) or executable
 
 
-def _save_stitched_reference_frame(dir_name: Union[str, Path]) -> None:
+def _save_stitched_reference_frame(dir_name: str | Path) -> None:
     """Refresh ``s.png`` from the stitched reference panorama, when available."""
     panorama_file = Path(dir_name) / "panorama.tif"
     if not panorama_file.exists():
@@ -172,8 +184,10 @@ def _save_stitched_reference_frame(dir_name: Union[str, Path]) -> None:
         if image.mode != "RGB":
             image = image.convert("RGB")
         image.save(frame_file)
-    except Exception:
-        raise RuntimeError(f"Failed to refresh stitched reference frame under {dir_name}")
+    except (OSError, ValueError) as error:
+        raise RuntimeError(
+            f"Failed to refresh stitched reference frame under {dir_name}"
+        ) from error
 
 
 def get_multiblend_bin() -> str:
@@ -195,9 +209,9 @@ def get_enblend_bin() -> str:
 def _run_stitching_command(
     cmd: Sequence[str],
     *,
-    input_text: Optional[str] = None,
-    timeout_seconds: Optional[float] = None,
-    cancel_event: Optional[threading.Event] = None,
+    input_text: str | None = None,
+    timeout_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> str:
     """Run an external stitching command and fail if it does not complete."""
     logger.info("Running stitching command: %s", " ".join(cmd))
@@ -278,7 +292,7 @@ def get_tiff_tag_value(tiff_tag):
     return float(numerator) / denominator
 
 
-def is_older_than(file1: Union[str, Path], file2: Union[str, Path]) -> Optional[bool]:
+def is_older_than(file1: str | Path, file2: str | Path) -> bool | None:
     """Return True if `file2` is older than `file1`, or None if missing."""
     try:
         mtime1 = Path(file1).stat().st_mtime_ns
@@ -302,13 +316,13 @@ def _keep_autooptimiser_fresh(project: Path, autooptimiser: Path) -> None:
 
 
 def _stitch_project_is_complete(
-    project_file_path: Union[str, Path],
-    autooptimiser_path: Union[str, Path],
-    control_point_matcher: Optional[str] = None,
-    mapping_backend: Optional[str] = None,
-    max_output_dimension: Optional[int] = None,
-    settings: Optional[StitchingSettings] = None,
-    provenance: Optional[Dict[str, str]] = None,
+    project_file_path: str | Path,
+    autooptimiser_path: str | Path,
+    control_point_matcher: str | None = None,
+    mapping_backend: str | None = None,
+    max_output_dimension: int | None = None,
+    settings: StitchingSettings | None = None,
+    provenance: dict[str, str] | None = None,
 ) -> bool:
     """Return whether every artifact required to initialize stitching exists."""
     project_path = Path(project_file_path)
@@ -356,7 +370,7 @@ def _stitch_project_is_complete(
     )
 
 
-def _read_stitch_artifact_manifest(game_dir: Union[str, Path]) -> Optional[Dict[str, str]]:
+def _read_stitch_artifact_manifest(game_dir: str | Path) -> dict[str, str] | None:
     """Read the backend choices used to build cached stitching artifacts."""
     manifest_path = Path(game_dir) / _STITCH_ARTIFACT_MANIFEST
     if not manifest_path.is_file():
@@ -389,7 +403,7 @@ def get_image_geo_position(tiff_image_file: str):
     return xpos, ypos
 
 
-def get_extracted_frame_image_file(video_name: str, dir_name: Optional[str] = None):
+def get_extracted_frame_image_file(video_name: str, dir_name: str | None = None):
     """Return the PNG path used when extracting a frame from a video file."""
     if dir_name:
         video_name = os.path.join(dir_name, video_name)
@@ -402,7 +416,7 @@ def extract_frames(
     left_frame_number: int,
     video_right: str,
     right_frame_number: int,
-    force: Optional[bool] = False,
+    force: bool | None = False,
 ):
     """Extract one frame from each side video to PNGs on disk.
 
@@ -464,12 +478,12 @@ def _delete_globs(game_dir: Path, patterns: Sequence[str]) -> int:
 
 
 def _set_hugin_optimization_variables(
-    project_file_path: Union[str, Path], variables: Sequence[str]
+    project_file_path: str | Path, variables: Sequence[str]
 ) -> None:
     """Select explicit geometry variables instead of Hugin's optimizer preset."""
     path = Path(project_file_path)
     lines = path.read_text().splitlines()
-    updated: List[str] = []
+    updated: list[str] = []
     in_variables = False
     replaced = False
 
@@ -513,7 +527,7 @@ def _set_hugin_optimization_variables(
     path.write_text("\n".join(updated) + "\n")
 
 
-def _optimize_hugin_geometry(command: Sequence[str], project: Union[str, Path]) -> None:
+def _optimize_hugin_geometry(command: Sequence[str], project: str | Path) -> None:
     """Try fixed-lens alignment before fitting the shared lens to the matches."""
     for fit_lens in (False, True):
         if fit_lens:
@@ -549,12 +563,12 @@ def _delete_extracted_frames(game_dir: Path) -> int:
     return removed
 
 
-def _delete_nested_key(cfg: Dict[str, Any], path: Sequence[str]) -> bool:
+def _delete_nested_key(cfg: dict[str, Any], path: Sequence[str]) -> bool:
     """Delete a dotted path from a nested dict. Returns True if deleted."""
     if not path:
         return False
     cur: Any = cfg
-    parents: List[Tuple[Dict[str, Any], str]] = []
+    parents: list[tuple[dict[str, Any], str]] = []
     for key in path[:-1]:
         if not isinstance(cur, dict) or key not in cur:
             return False
@@ -563,22 +577,16 @@ def _delete_nested_key(cfg: Dict[str, Any], path: Sequence[str]) -> bool:
     leaf = path[-1]
     if not isinstance(cur, dict) or leaf not in cur:
         return False
-    try:
-        del cur[leaf]
-    except Exception:
-        return False
+    del cur[leaf]
     # Prune empty dicts up the chain
     for parent, key in reversed(parents):
-        try:
-            node = parent.get(key)
-            if isinstance(node, dict) and not node:
-                del parent[key]
-        except Exception:
-            pass
+        node = parent.get(key)
+        if isinstance(node, dict) and not node:
+            del parent[key]
     return True
 
 
-def _parse_stitch_frame_time_seconds(value: Any) -> Optional[float]:
+def _parse_stitch_frame_time_seconds(value: Any) -> float | None:
     if value is None:
         return None
     time_str = str(value).strip()
@@ -591,12 +599,12 @@ def _parse_stitch_frame_time_seconds(value: Any) -> Optional[float]:
         seconds = float(tokens[-1])
         minutes = int(tokens[-2]) if len(tokens) >= 2 else 0
         hours = int(tokens[-3]) if len(tokens) == 3 else 0
-    except Exception:
+    except (ValueError, TypeError):
         return None
     return hours * 3600.0 + minutes * 60.0 + seconds
 
 
-def _normalize_stitch_frame_time_value(value: Any) -> Optional[str]:
+def _normalize_stitch_frame_time_value(value: Any) -> str | None:
     if value is None:
         return None
     time_str = str(value).strip()
@@ -620,7 +628,7 @@ def _stitch_frame_time_values_equal(lhs: Any, rhs: Any) -> bool:
     return lhs_norm == rhs_norm
 
 
-def _get_stitch_frame_time_stamp(cfg: Optional[Dict[str, Any]]) -> Optional[str]:
+def _get_stitch_frame_time_stamp(cfg: dict[str, Any] | None) -> str | None:
     if not isinstance(cfg, dict):
         return None
     normalize_runtime_config(cfg)
@@ -630,7 +638,7 @@ def _get_stitch_frame_time_stamp(cfg: Optional[Dict[str, Any]]) -> Optional[str]
     return _normalize_stitch_frame_time_value(value)
 
 
-def _set_stitch_frame_time_stamp(cfg: Dict[str, Any], stitch_frame_time: Optional[str]) -> bool:
+def _set_stitch_frame_time_stamp(cfg: dict[str, Any], stitch_frame_time: str | None) -> bool:
     if not isinstance(cfg, dict):
         return False
 
@@ -656,13 +664,13 @@ def _set_stitch_frame_time_stamp(cfg: Dict[str, Any], stitch_frame_time: Optiona
 
 
 def sync_stitch_frame_time_state(
-    game_id: Optional[str],
-    game_dir: Union[str, Path],
-    stitch_frame_time: Optional[str],
+    game_id: str | None,
+    game_dir: str | Path,
+    stitch_frame_time: str | None,
     *,
     force: bool = False,
     ignore_private_config: bool = False,
-    game_config: Optional[Dict[str, Any]] = None,
+    game_config: dict[str, Any] | None = None,
 ) -> bool:
     """Persist stitch-frame-time and clean cached stitch artifacts when it changes.
 
@@ -683,14 +691,8 @@ def sync_stitch_frame_time_state(
     if not game_id or ignore_private_config:
         return runtime_changed
 
-    try:
-        private_cfg = get_game_config_private(game_id=game_id) or {}
-        normalize_runtime_config(private_cfg)
-    except Exception as ex:
-        logger.warning(
-            "Failed to load private config for stitch-frame-time sync on %s: %s", game_id, ex
-        )
-        private_cfg = {}
+    private_cfg = get_game_config_private(game_id=game_id) or {}
+    normalize_runtime_config(private_cfg)
 
     previous = _get_stitch_frame_time_stamp(private_cfg)
     changed = not _stitch_frame_time_values_equal(previous, normalized)
@@ -702,33 +704,24 @@ def sync_stitch_frame_time_state(
             previous,
             normalized,
         )
-        try:
-            clean_stitch_game_artifacts(game_id=game_id, game_dir=game_dir)
-        except Exception as ex:
-            logger.warning("Failed to clean stitch artifacts for %s: %s", game_id, ex)
-        try:
-            private_cfg = get_game_config_private(game_id=game_id) or {}
-            normalize_runtime_config(private_cfg)
-        except Exception:
-            private_cfg = {}
+        clean_stitch_game_artifacts(game_id=game_id, game_dir=game_dir)
+        private_cfg = get_game_config_private(game_id=game_id) or {}
+        normalize_runtime_config(private_cfg)
 
     dirty = _set_stitch_frame_time_stamp(private_cfg, normalized)
     if dirty:
-        try:
-            save_private_config(game_id=game_id, data=private_cfg, verbose=True)
-        except Exception as ex:
-            logger.warning("Failed to save stitch-frame-time stamp for %s: %s", game_id, ex)
+        save_private_config(game_id=game_id, data=private_cfg, verbose=True)
 
     return changed or runtime_changed
 
 
-def clean_stitch_game_artifacts(game_id: str, game_dir: Union[str, Path]) -> int:
+def clean_stitch_game_artifacts(game_id: str, game_dir: str | Path) -> int:
     """Clean rebuildable artifacts while excluding readers and publishers."""
     with stitching_lock(game_dir):
         return _clean_stitch_game_artifacts_locked(game_id, game_dir)
 
 
-def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: Union[str, Path]) -> int:
+def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: str | Path) -> int:
     """Delete rebuildable stitching / seam / mask outputs for a game.
 
     Does not delete config.yaml, but removes cached stitching/rink entries
@@ -763,7 +756,7 @@ def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: Union[str, Path]
     try:
         cfg = get_game_config_private(game_id=game_id)
         normalize_runtime_config(cfg)
-    except Exception as ex:
+    except (OSError, ValueError, TypeError, yaml.YAMLError) as ex:
         logger.warning("Failed to load private config while cleaning %s: %s", game_id, ex)
         cfg = None
 
@@ -780,7 +773,7 @@ def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: Union[str, Path]
         if changed:
             try:
                 save_private_config(game_id=game_id, data=cfg, verbose=True)
-            except Exception as ex:
+            except (OSError, ValueError, TypeError, yaml.YAMLError) as ex:
                 logger.warning("Failed to save private config while cleaning %s: %s", game_id, ex)
 
     if removed_files:
@@ -789,7 +782,7 @@ def _clean_stitch_game_artifacts_locked(game_id: str, game_dir: Union[str, Path]
     return removed_files
 
 
-def _calibration_masks(game_dir: Union[str, Path]) -> list[Path]:
+def _calibration_masks(game_dir: str | Path) -> list[Path]:
     # Both the bare calibration pointer and its revision-scoped copies are
     # rebuildable cache. Numbered run snapshots ("rink_mask_0-17.png") are not,
     # and must survive calibration cache invalidation.
@@ -800,7 +793,7 @@ def _calibration_masks(game_dir: Union[str, Path]) -> list[Path]:
     ]
 
 
-def _remove_stitching_geometry_config(config: Dict[str, Any]) -> bool:
+def _remove_stitching_geometry_config(config: dict[str, Any]) -> bool:
     """Remove settings derived from a particular published panorama."""
     changed = False
     for path in _STITCH_GEOMETRY_CONFIG_PATHS:
@@ -808,7 +801,7 @@ def _remove_stitching_geometry_config(config: Dict[str, Any]) -> bool:
     return changed
 
 
-def _calibration_config_guard(config: Optional[Dict[str, Any]]) -> str:
+def _calibration_config_guard(config: dict[str, Any] | None) -> str:
     """Fingerprint settings that must remain fixed after an exact preview."""
     normalized = copy.deepcopy(config) if isinstance(config, dict) else {}
     normalize_runtime_config(normalized)
@@ -825,13 +818,13 @@ def _private_config_path(game_id: str) -> Path:
     return (Path(hmlib_config.GAME_DIR_BASE) / game_id).resolve() / "config.yaml"
 
 
-def _serialize_private_config(config: Dict[str, Any]) -> str:
+def _serialize_private_config(config: dict[str, Any]) -> str:
     normalized = copy.deepcopy(config)
     normalize_runtime_config(normalized)
     return yaml.dump(normalized, sort_keys=False)
 
 
-def _read_private_config_snapshot(path: Path) -> Tuple[Dict[str, Any], Optional[bytes]]:
+def _read_private_config_snapshot(path: Path) -> tuple[dict[str, Any], bytes | None]:
     """Read the exact private config generation that publication must replace."""
     try:
         payload = path.read_bytes()
@@ -843,16 +836,16 @@ def _read_private_config_snapshot(path: Path) -> Tuple[Dict[str, Any], Optional[
     if loaded is None:
         loaded = {}
     if not isinstance(loaded, dict):
-        raise ValueError(f"Private config must contain a mapping: {path}")
+        raise ValueError(f"Private config must contain a mapping: {path}")  # noqa: TRY004
     normalize_runtime_config(loaded)
     return loaded, payload
 
 
 def invalidate_stitching_geometry(
-    game_dir: Union[str, Path],
+    game_dir: str | Path,
     *,
-    game_id: Optional[str] = None,
-    game_config: Optional[Dict[str, Any]] = None,
+    game_id: str | None = None,
+    game_config: dict[str, Any] | None = None,
 ) -> None:
     """Drop derived panorama caches only after a replacement has been validated."""
     with stitching_lock(game_dir):
@@ -867,45 +860,7 @@ def invalidate_stitching_geometry(
             path.unlink(missing_ok=True)
 
 
-def _rewrite_pto_sources(
-    project: Path,
-    *,
-    images: Optional[Sequence[str]] = None,
-    source_directory: Optional[Path] = None,
-    target_directory: Optional[Path] = None,
-) -> None:
-    """Rebind quoted image tokens without matching their escaped text as paths."""
-    lines = project.read_text(encoding="utf-8").splitlines()
-    image_index = 0
-    for index, line in enumerate(lines):
-        if not line.lstrip().startswith(("i ", "i\t")):
-            continue
-        tokens = list(re.finditer(r'(?<!\S)n"(?:\\.|[^"\\])*"', line))
-        if len(tokens) != 1:
-            raise ValueError("Cached PTO does not contain one filename per input image")
-        token = tokens[0]
-        if images is not None:
-            if image_index >= len(images):
-                raise ValueError("Cached PTO contains more than two input images")
-            filename = images[image_index]
-        else:
-            filename = shlex.split(token.group())[0][1:]
-            path = Path(filename)
-            if not path.is_absolute():
-                path = project.parent / path
-            if path.is_relative_to(source_directory):
-                filename = str(target_directory / path.relative_to(source_directory))
-        lines[index] = (
-            line[: token.start()]
-            + "n"
-            + json.dumps(filename, ensure_ascii=False)
-            + line[token.end() :]
-        )
-        image_index += 1
-    project.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _file_provenance(paths: Sequence[Union[str, Path]]) -> str:
+def _file_provenance(paths: Sequence[str | Path]) -> str:
     records = []
     for value in paths:
         path = Path(value).resolve()
@@ -914,7 +869,7 @@ def _file_provenance(paths: Sequence[Union[str, Path]]) -> str:
     return json.dumps(records, sort_keys=True)
 
 
-def _image_content_provenance(paths: Sequence[Union[str, Path]]) -> str:
+def _image_content_provenance(paths: Sequence[str | Path]) -> str:
     """Identify saved input images independently of temporary names and mtimes."""
     records = []
     for path in paths:
@@ -943,14 +898,14 @@ def _image_content_provenance(paths: Sequence[Union[str, Path]]) -> str:
 
 
 def _manifest_matches(
-    manifest: Optional[Dict[str, str]], settings: StitchingSettings, provenance: Dict[str, str]
+    manifest: dict[str, str] | None, settings: StitchingSettings, provenance: dict[str, str]
 ) -> bool:
     return manifest is not None and all(
         manifest.get(key) == value for key, value in {**settings.manifest(), **provenance}.items()
     )
 
 
-def _reference_images_match(directory: Path, manifest: Optional[Dict[str, str]]) -> bool:
+def _reference_images_match(directory: Path, manifest: dict[str, str] | None) -> bool:
     if manifest is None or "reference_images" not in manifest:
         return True
     try:
@@ -962,7 +917,7 @@ def _reference_images_match(directory: Path, manifest: Optional[Dict[str, str]])
         return False
 
 
-def _output_scale_provenance(scale: Optional[float]) -> str:
+def _output_scale_provenance(scale: float | None) -> str:
     return format(1.0 if scale is None else float(scale), ".17g")
 
 
@@ -989,24 +944,24 @@ def _apply_calibration_leveling_result(
 
 def build_stitching_project(
     project_file_path: str,
-    image_files: List[str],
+    image_files: list[str],
     max_control_points: int,
     skip_if_exists: bool = True,
     test_blend: bool = True,
-    fov: Optional[float] = None,
-    scale: Optional[float] = None,
+    fov: float | None = None,
+    scale: float | None = None,
     force: bool = False,
-    control_point_matcher: Optional[str] = None,
-    mapping_backend: Optional[str] = None,
-    max_output_dimension: Optional[int] = None,
-    settings: Optional[StitchingSettings] = None,
-    lens_calibration: Optional[LensCalibrationPair] = None,
+    control_point_matcher: str | None = None,
+    mapping_backend: str | None = None,
+    max_output_dimension: int | None = None,
+    settings: StitchingSettings | None = None,
+    lens_calibration: LensCalibrationPair | None = None,
     lens_calibration_resolved: bool = False,
-    control_points: Optional[Dict[str, torch.Tensor]] = None,
-    provenance: Optional[Dict[str, str]] = None,
-    game_id: Optional[str] = None,
-    game_config: Optional[Dict[str, Any]] = None,
-    control_points_factory: Optional[Callable[[], Dict[str, torch.Tensor]]] = None,
+    control_points: dict[str, torch.Tensor] | None = None,
+    provenance: dict[str, str] | None = None,
+    game_id: str | None = None,
+    game_config: dict[str, Any] | None = None,
+    control_points_factory: Callable[[], dict[str, torch.Tensor]] | None = None,
 ):
     """Build privately and publish a validated generation without losing the old one."""
     settings = settings or read_stitching_settings(
@@ -1045,9 +1000,9 @@ def build_stitching_project(
         lens_profile_fingerprint=lens_calibration.fingerprint if lens_calibration else None,
     )
     effective_settings = [settings]
-    leveling_result: list[Optional[CalibrationLevelingResult]] = [None]
-    leveling_config_guard: list[Optional[Tuple[str, str]]] = [None]
-    calibration_leveling: Optional[CalibrationLevelingCallback] = None
+    leveling_result: list[CalibrationLevelingResult | None] = [None]
+    leveling_config_guard: list[tuple[str, str] | None] = [None]
+    calibration_leveling: CalibrationLevelingCallback | None = None
     if game_id is not None and settings.mapping_backend == "nona":
 
         def calibration_leveling(
@@ -1153,7 +1108,7 @@ def build_stitching_project(
             encoding="utf-8",
         )
         staged_private_config = False
-        expected_private_config: Optional[bytes] = None
+        expected_private_config: bytes | None = None
         selected_result = leveling_result[0]
         if game_id is not None:
             private_config = copy.deepcopy(get_game_config_private(game_id=game_id) or {})
@@ -1246,21 +1201,21 @@ def build_stitching_project(
 
 def _build_stitching_project_in_place(
     project_file_path: str,
-    image_files: List[str],
+    image_files: list[str],
     max_control_points: int,
     skip_if_exists: bool = True,
     test_blend: bool = True,
-    fov: Optional[float] = None,
-    scale: Optional[float] = None,
+    fov: float | None = None,
+    scale: float | None = None,
     force: bool = False,
-    control_point_matcher: Optional[str] = None,
-    mapping_backend: Optional[str] = None,
-    max_output_dimension: Optional[int] = None,
-    settings: Optional[StitchingSettings] = None,
-    lens_calibration: Optional[LensCalibrationPair] = None,
+    control_point_matcher: str | None = None,
+    mapping_backend: str | None = None,
+    max_output_dimension: int | None = None,
+    settings: StitchingSettings | None = None,
+    lens_calibration: LensCalibrationPair | None = None,
     lens_calibration_resolved: bool = False,
-    control_points: Optional[Dict[str, torch.Tensor]] = None,
-    calibration_leveling: Optional[CalibrationLevelingCallback] = None,
+    control_points: dict[str, torch.Tensor] | None = None,
+    calibration_leveling: CalibrationLevelingCallback | None = None,
 ):
     """Create or update a Hugin PTO project and seam masks for two images.
 
@@ -1351,7 +1306,7 @@ def _build_stitching_project_in_place(
             cmd = [
                 "pto_gen",
                 "-p",
-                "0",
+                "3" if settings.input_lens.projection == "full-frame-fisheye" else "0",
                 "-o",
                 hm_project,
                 "-f",
@@ -1373,13 +1328,18 @@ def _build_stitching_project_in_place(
                 ],
             )
 
-        def run_remap_pipeline(control_points: Dict[str, torch.Tensor]) -> bool:
+        def run_remap_pipeline(control_points: dict[str, torch.Tensor]) -> bool:
             nonlocal settings
             remove_remap_outputs()
             if mapping_backend == "nona":
                 cmd = [
                     "autooptimiser",
-                    "-n",
+                    (
+                        "-a"
+                        if settings.input_lens != InputLens()
+                        and settings.input_lens.optimization == "auto"
+                        else "-n"
+                    ),
                     "-l",
                     "-s",
                     "-q",
@@ -1482,7 +1442,7 @@ def _build_stitching_project_in_place(
                     exc.returncode,
                 )
             # See if it came out with a reasonable seam file
-            distribution: Dict[int, float] = get_pixel_value_percentages(seam_file)
+            distribution: dict[int, float] = get_pixel_value_percentages(seam_file)
             # Really, it should be way above this number for a good seam, but so far
             # the "broken case" is much below this number (like 0.5%).
             kMinAllowableSeamPercent: float = 10.0
@@ -1535,10 +1495,17 @@ def _build_stitching_project_in_place(
                 use_hugin=use_hugin,
                 matcher=control_point_matcher,
                 lens_calibration=lens_calibration,
+                control_point_resolution=settings.control_point_resolution,
+                control_point_filtering=settings.control_point_filtering,
             )
         else:
             write_control_points(hm_project, control_points)
-        _set_hugin_optimization_variables(hm_project, ("r1", "p1", "y1"))
+        if settings.input_lens == InputLens():
+            _set_hugin_optimization_variables(hm_project, ("r1", "p1", "y1"))
+        else:
+            Path(hm_project).write_text(
+                apply_input_lens(Path(hm_project).read_text(), settings.input_lens)
+            )
         remap_ok = run_remap_pipeline(control_points)
         if not remap_ok:
             raise RuntimeError(
@@ -1555,7 +1522,7 @@ def _build_stitching_project_in_place(
         _command_directory.reset(command_token)
 
 
-def get_pixel_value_percentages(image_path: str) -> Dict[int, float]:
+def get_pixel_value_percentages(image_path: str) -> dict[int, float]:
     """
     Opens a grayscale image and computes the percentage of each pixel value.
 
@@ -1578,7 +1545,7 @@ def get_pixel_value_percentages(image_path: str) -> Dict[int, float]:
     counts: np.ndarray = np.bincount(arr.flatten(), minlength=256)
 
     # Build percentage dict, omitting values with zero count
-    percentages: Dict[int, float] = {
+    percentages: dict[int, float] = {
         value: (count / total) * 100.0 for value, count in enumerate(counts) if count > 0
     }
 
@@ -1591,21 +1558,21 @@ def configure_video_stitching(
     video_right: str,
     max_control_points: int,
     project_file_name: str = "hm_project.pto",
-    left_frame_offset: int = None,
-    right_frame_offset: int = None,
+    left_frame_offset: int | None = None,
+    right_frame_offset: int | None = None,
     base_frame_offset: int = 0,
     audio_sync_seconds: int = 15,
     force: bool = False,
-    game_id: Optional[str] = None,
-    stitch_frame_time: Optional[str] = None,
+    game_id: str | None = None,
+    stitch_frame_time: str | None = None,
     ignore_private_config: bool = False,
-    game_config: Optional[Dict[str, Any]] = None,
-    control_point_matcher: Optional[str] = None,
-    mapping_backend: Optional[str] = None,
-    max_output_dimension: Optional[int] = None,
-    settings: Optional[StitchingSettings] = None,
-    scale: Optional[float] = None,
-    device: Optional[torch.device] = None,
+    game_config: dict[str, Any] | None = None,
+    control_point_matcher: str | None = None,
+    mapping_backend: str | None = None,
+    max_output_dimension: int | None = None,
+    settings: StitchingSettings | None = None,
+    scale: float | None = None,
+    device: torch.device | None = None,
 ):
     """Configure stitching while serializing shared artifacts per game."""
     settings = settings or read_stitching_settings(
@@ -1625,6 +1592,16 @@ def configure_video_stitching(
     if settings.control_point_matcher == "akaze-hamming" and max_control_points < 6:
         raise ValueError("AKAZE max_control_points must be at least six")
     settings = replace(settings, max_control_points=max_control_points)
+    from hmlib.stitching.video_lens import resolve_video_lens
+
+    videos = [video_left, video_right]
+    if game_config and (game_config.get("game") or {}).get("videos"):
+        from hmlib.stitching.rink_mask_sampling import source_playlists
+
+        playlists = source_playlists(game_config, Path(dir_name))
+        if "left" in playlists and "right" in playlists:
+            videos = playlists["left"] + playlists["right"]
+    settings, _lens_notes = resolve_video_lens(game_config, settings, videos)
     validate_output_scale(scale, settings.mapping_backend)
     control_point_matcher = settings.control_point_matcher
     mapping_backend = settings.mapping_backend
@@ -1672,22 +1649,22 @@ def _configure_video_stitching_locked(
     video_right: str,
     max_control_points: int,
     project_file_name: str = "hm_project.pto",
-    left_frame_offset: int = None,
-    right_frame_offset: int = None,
+    left_frame_offset: int | None = None,
+    right_frame_offset: int | None = None,
     base_frame_offset: int = 0,
     audio_sync_seconds: int = 15,
     force: bool = False,
-    game_id: Optional[str] = None,
-    stitch_frame_time: Optional[str] = None,
+    game_id: str | None = None,
+    stitch_frame_time: str | None = None,
     ignore_private_config: bool = False,
-    game_config: Optional[Dict[str, Any]] = None,
-    control_point_matcher: Optional[str] = None,
+    game_config: dict[str, Any] | None = None,
+    control_point_matcher: str | None = None,
     mapping_backend: str = "nona",
-    max_output_dimension: Optional[int] = None,
-    settings: Optional[StitchingSettings] = None,
-    lens_calibration: Optional[LensCalibrationPair] = None,
-    scale: Optional[float] = None,
-    device: Optional[torch.device] = None,
+    max_output_dimension: int | None = None,
+    settings: StitchingSettings | None = None,
+    lens_calibration: LensCalibrationPair | None = None,
+    scale: float | None = None,
+    device: torch.device | None = None,
 ):
     """Configure a two-camera stitching project from game videos.
 
@@ -1735,6 +1712,7 @@ def _configure_video_stitching_locked(
             video_right=video_right,
             audio_sync_seconds=audio_sync_seconds,
             force=force,
+            sync_method=get_nested_value(game_config or {}, "stitching.sync_method", "audio"),
         )
         left_frame_offset = float(frame_offsets["left"])
         right_frame_offset = float(frame_offsets["right"])
@@ -1789,8 +1767,8 @@ def _configure_video_stitching_locked(
     ):
         left_info, right_info = BasicVideoInfo(video_left), BasicVideoInfo(video_right)
         indices = sample_frame_indices(
-            int(round(base_frame_offset + left_frame_offset)),
-            int(round(base_frame_offset + right_frame_offset)),
+            round(base_frame_offset + left_frame_offset),
+            round(base_frame_offset + right_frame_offset),
             settings.calibration_frame_count,
             left_info.frame_count,
             right_info.frame_count,
@@ -1808,7 +1786,13 @@ def _configure_video_stitching_locked(
             for candidate in calibration_candidates(
                 pairs,
                 max_control_points,
-                partial(calculate_control_points, lens_calibration=lens_calibration, device=device),
+                partial(
+                    calculate_control_points,
+                    lens_calibration=lens_calibration,
+                    device=device,
+                    control_point_resolution=settings.control_point_resolution,
+                    control_point_filtering=settings.control_point_filtering,
+                ),
                 settings.control_point_matcher,
             ):
                 logger.info("Trying stitching calibration using %s", candidate.label)

@@ -72,7 +72,11 @@ def should_resize_superpoint_inputs_to_the_long_edge_and_report_source_coordinat
         height, width = data["image"].shape[-2:]
         seen.append((height, width))
         corners = torch.tensor([[0.0, 0.0], [width - 1.0, height - 1.0]])
-        return {"keypoints": corners[None]}
+        return {
+            "keypoints": corners[None],
+            "keypoint_scores": torch.ones((1, 2)),
+            "descriptors": torch.zeros((1, 2, 256)),
+        }
 
     monkeypatch.setattr(extractor, "forward", fake_forward)
     # 1920x1080 keeps the same 1.875 downscale as a 4K frame without the 95MB
@@ -143,7 +147,7 @@ class _FakeSuperPoint(_FakeModule):
     def __init__(self, features_by_marker: dict[float, dict]) -> None:
         self._features_by_marker = features_by_marker
 
-    def extract(self, image: torch.Tensor) -> dict:
+    def extract(self, image: torch.Tensor, *, resolution="2k") -> dict:
         return self._features_by_marker[float(image.flatten()[0])]
 
 
@@ -216,6 +220,7 @@ def should_route_control_point_matchers_without_duplicate_sampling(
         image,
         max_control_points=20,
         matcher=matcher_name,
+        control_point_filtering={"epipolar_ransac": False, "homography_consistency": False},
         device=torch.device("cpu"),
     )
 

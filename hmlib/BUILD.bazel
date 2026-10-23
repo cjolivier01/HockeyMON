@@ -89,6 +89,7 @@ python_library(
         entry_points = {
             "console_scripts": [
                 "hmtrack = hmlib.cli.hmtrack:main",
+                "hmui = hmlib.ui.desktop:main",
                 "hmstitch = hmlib.cli.stitch:main",
                 "hmlevel = hmlib.cli.level_stitching:main",
                 "hmcreate_control_points = hmlib.cli.create_control_points:main",

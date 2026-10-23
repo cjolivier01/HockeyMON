@@ -10,16 +10,20 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import asdict, dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import yaml
 
 from hmlib.stitching.control_points import (
     DEFAULT_CONTROL_POINT_MATCHER,
     normalize_control_point_matcher,
+    normalize_control_point_resolution,
 )
+from hmlib.stitching.geometric_filtering import ControlPointFiltering, read_control_point_filtering
+from hmlib.stitching.input_lens import InputLens, read_camera_automation, read_input_lens
 
 MAX_CANVAS_DIMENSION = 65534
 MAX_CANVAS_PIXELS = 256 * 1024 * 1024
@@ -106,11 +110,11 @@ def normalize_projection(value: str) -> str:
 
 def _number(value: Any, path: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        raise ValueError(f"{path} must be a finite number")
+        raise ValueError(f"{path} must be a finite number")  # noqa: TRY004
     try:
         result = float(value)
-    except ValueError as exc:
-        raise ValueError(f"{path} must be a finite number") from exc
+    except ValueError:
+        raise ValueError(f"{path} must be a finite number")
     if not math.isfinite(result):
         raise ValueError(f"{path} must be a finite number")
     return result
@@ -120,7 +124,7 @@ def _mapping(value: Any, path: str) -> Mapping[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, Mapping):
-        raise ValueError(f"{path} must be a mapping")
+        raise ValueError(f"{path} must be a mapping")  # noqa: TRY004 - public validation contract
     return value
 
 
@@ -328,6 +332,11 @@ class StitchingSettings:
     calibration_frame_count: int = 4
     max_control_points: int = 1500
     lens_profile_fingerprint: str | None = None
+    control_point_resolution: str = "2k"
+    control_point_filtering: ControlPointFiltering = field(default_factory=ControlPointFiltering)
+    input_lens: InputLens = field(default_factory=InputLens)
+    camera_auto_fov: bool = False
+    camera_auto_lens: bool = False
 
     def manifest(self) -> dict[str, str]:
         """Stable resolved provenance, independent of config spelling/inheritance."""
@@ -395,6 +404,10 @@ def read_stitching_settings(
         raise ValueError(
             "Camera FOV must be between 0 and 360 horizontally, and 0 and 180 vertically"
         )
+    lens = read_input_lens(stitch.get("input_lens"), read_input_lens(preset.get("input_lens")))
+    auto_fov, auto_lens = read_camera_automation(stitch, camera)
+    if backend != "nona" and lens != InputLens():
+        raise ValueError("Input lens correction requires mapping_backend=nona")
     # Check and resolve the baseline's framing before the game's, so a config
     # that omits a key lands on the same value whether or not it was merged with
     # baseline.yaml, instead of on a literal that has to be edited every time
@@ -493,4 +506,11 @@ def read_stitching_settings(
         width,
         int(frame_count),
         int(point_count),
+        input_lens=lens,
+        camera_auto_fov=auto_fov,
+        camera_auto_lens=auto_lens,
+        control_point_filtering=read_control_point_filtering(stitch.get("control_point_filtering")),
+        control_point_resolution=normalize_control_point_resolution(
+            stitch.get("control_point_resolution")
+        ),
     )

@@ -10,7 +10,7 @@ import math
 import os
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import cv2
 import numpy as np
@@ -42,7 +42,7 @@ from hmlib.utils.image import (
 from .base import Plugin
 
 
-def _to_tensor(tensor: Union[torch.Tensor, StreamTensorBase, np.ndarray]) -> torch.Tensor:
+def _to_tensor(tensor: torch.Tensor | StreamTensorBase | np.ndarray) -> torch.Tensor:
     tensor = unwrap_tensor(tensor)
     if isinstance(tensor, torch.Tensor):
         return tensor
@@ -51,7 +51,7 @@ def _to_tensor(tensor: Union[torch.Tensor, StreamTensorBase, np.ndarray]) -> tor
     raise TypeError(f"Unexpected tensor type: {type(tensor)}")
 
 
-def _parse_dtype(dtype: Optional[Union[str, torch.dtype]]) -> torch.dtype:
+def _parse_dtype(dtype: str | torch.dtype | None) -> torch.dtype:
     if dtype is None:
         return torch.float32
     if isinstance(dtype, torch.dtype):
@@ -92,31 +92,28 @@ class StitchingPlugin(Plugin):
     def __init__(
         self,
         enabled: bool = True,
-        pto_project_file: Optional[str] = None,
-        dir_name: Optional[str] = None,
+        pto_project_file: str | None = None,
+        dir_name: str | None = None,
         blend_mode: str = "laplacian",
-        blend_feather_fraction: Optional[float] = None,
+        blend_feather_fraction: float | None = None,
         python_blender: bool = False,
         use_cuda_pano_n: bool = False,
         minimize_blend: bool = True,
-        dtype: Optional[Union[str, torch.dtype]] = None,
-        max_blend_levels: Optional[int] = None,
+        dtype: str | torch.dtype | None = None,
+        max_blend_levels: int | None = None,
         no_cuda_streams: bool = False,
-        post_stitch_rotate_degrees: Optional[float] = None,
-        left_color_pipeline: Optional[List[Dict[str, Any]]] = None,
-        right_color_pipeline: Optional[List[Dict[str, Any]]] = None,
+        post_stitch_rotate_degrees: float | None = None,
+        left_color_pipeline: list[dict[str, Any]] | None = None,
+        right_color_pipeline: list[dict[str, Any]] | None = None,
         capture_rgb_stats: bool = False,
-        max_output_width: Optional[int] = None,
+        max_output_width: int | None = None,
         cache_rotation_grid: bool = True,
     ) -> None:
         super().__init__(enabled=enabled)
         self._pto_project_file = pto_project_file
         self._dir_name = Path(dir_name) if dir_name else None
         if self._pto_project_file and not self._dir_name:
-            try:
-                self._dir_name = Path(self._pto_project_file).parent
-            except Exception:
-                self._dir_name = None
+            self._dir_name = Path(self._pto_project_file).parent
         # Not str(): an explicit YAML null resolves to None, which means "inherit
         # the default" the same way it does in HStream. str() would make it the
         # literal "None" and turn an inherit into a rejected mode.
@@ -141,21 +138,22 @@ class StitchingPlugin(Plugin):
         self._max_output_width = int(max_output_width) if max_output_width else None
         self._cache_rotation_grid = bool(cache_rotation_grid)
 
-        self._left_color_pipeline: Optional[Compose] = None
-        self._right_color_pipeline: Optional[Compose] = None
-        self._config_ref: Optional[Dict[str, Any]] = None
+        self._left_color_pipeline: Compose | None = None
+        self._right_color_pipeline: Compose | None = None
+        self._config_ref: dict[str, Any] | None = None
         self._initialized: bool = False
         self._stitcher = None
+        self._mask_generation_signature = None
         self._geometry_stitcher = None
         self._geometry_session = None
         self._geometry_source_identity = None
-        self._rotate_cache: Dict[Tuple[Any, ...], Dict[str, torch.Tensor]] = {}
-        self._rotate_grid_cache: Dict[Tuple[Any, ...], torch.Tensor] = {}
-        self._width_t: Optional[torch.Tensor] = None
-        self._height_t: Optional[torch.Tensor] = None
+        self._rotate_cache: dict[tuple[Any, ...], dict[str, torch.Tensor]] = {}
+        self._rotate_grid_cache: dict[tuple[Any, ...], torch.Tensor] = {}
+        self._width_t: torch.Tensor | None = None
+        self._height_t: torch.Tensor | None = None
         self._iter_num: int = 0
 
-    def _ensure_initialized(self, context: Dict[str, Any]) -> None:
+    def _ensure_initialized(self, context: dict[str, Any]) -> None:
         if self._initialized:
             return
         shared = context.get("shared", {}) if isinstance(context, dict) else {}
@@ -163,10 +161,7 @@ class StitchingPlugin(Plugin):
         if cfg is None:
             game_id = shared.get("game_id")
             if game_id:
-                try:
-                    cfg = get_game_config(game_id=game_id)
-                except Exception:
-                    cfg = None
+                cfg = get_game_config(game_id=game_id)
         if isinstance(cfg, dict):
             self._config_ref = cfg
         self._build_color_pipelines()
@@ -176,33 +171,26 @@ class StitchingPlugin(Plugin):
         self._left_color_pipeline = None
         self._right_color_pipeline = None
 
-        def _make_pipeline(spec: Optional[List[Dict[str, Any]]]) -> Optional[Compose]:
+        def _make_pipeline(spec: list[dict[str, Any]] | None) -> Compose | None:
             if not spec:
                 return None
-            try:
-                pipeline = Compose(copy.deepcopy(spec))
-                for tf in pipeline:
-                    if tf.__class__.__name__ == "HmImageColorAdjust":
-                        tf.channel_order = "bgr"
-                        if self._config_ref is not None:
-                            setattr(tf, "config_ref", self._config_ref)
-                return pipeline
-            except Exception:
-                logger.debug("StitchingPlugin failed to build color pipeline", exc_info=True)
-                return None
+            pipeline = Compose(copy.deepcopy(spec))
+            for tf in pipeline:
+                if tf.__class__.__name__ == "HmImageColorAdjust":
+                    tf.channel_order = "bgr"
+                    if self._config_ref is not None:
+                        tf.config_ref = self._config_ref
+            return pipeline
 
         self._left_color_pipeline = _make_pipeline(self._left_color_pipeline_cfg)
         self._right_color_pipeline = _make_pipeline(self._right_color_pipeline_cfg)
 
-    def _resolve_dir_name(self, context: Dict[str, Any]) -> Path:
+    def _resolve_dir_name(self, context: dict[str, Any]) -> Path:
         if self._dir_name is not None:
             return self._dir_name
         if self._pto_project_file:
-            try:
-                self._dir_name = Path(self._pto_project_file).parent
-                return self._dir_name
-            except Exception:
-                pass
+            self._dir_name = Path(self._pto_project_file).parent
+            return self._dir_name
         shared = context.get("shared", {})
         game_dir = shared.get("game_dir")
         if game_dir:
@@ -210,7 +198,7 @@ class StitchingPlugin(Plugin):
             return self._dir_name
         raise RuntimeError("StitchingPlugin needs dir_name or pto_project_file")
 
-    def _geometry_source(self, context: Dict[str, Any]) -> Dict[str, str]:
+    def _geometry_source(self, context: dict[str, Any]) -> dict[str, str]:
         """Return a stable identity for the calibration behind the stitcher.
 
         Native HStream configs carry a revision generated from the actual
@@ -236,10 +224,7 @@ class StitchingPlugin(Plugin):
                 "stitching.rink_mask_revision",
                 "rink.rink_mask_revision",
             ):
-                try:
-                    native_revision = get_nested_value(cfg, path, None)
-                except Exception:
-                    native_revision = None
+                native_revision = get_nested_value(cfg, path, None)
                 if native_revision is not None:
                     break
 
@@ -252,10 +237,7 @@ class StitchingPlugin(Plugin):
 
         pto_project_file = self._pto_project_file
         if pto_project_file is None and isinstance(cfg, dict):
-            try:
-                pto_project_file = get_nested_value(cfg, "stitching.pto_project_file", None)
-            except Exception:
-                pto_project_file = None
+            pto_project_file = get_nested_value(cfg, "stitching.pto_project_file", None)
         if pto_project_file and "://" not in str(pto_project_file):
             pto_path = Path(str(pto_project_file)).expanduser()
             if pto_path.is_file():
@@ -279,8 +261,8 @@ class StitchingPlugin(Plugin):
 
     def _make_geometry_revision(
         self,
-        context: Dict[str, Any],
-        imgs: List[torch.Tensor],
+        context: dict[str, Any],
+        imgs: list[torch.Tensor],
         blended: torch.Tensor,
         applied_rotation: float,
     ) -> str:
@@ -372,8 +354,8 @@ class StitchingPlugin(Plugin):
 
     def _create_stitcher(
         self,
-        context: Dict[str, Any],
-        imgs: List[torch.Tensor],
+        context: dict[str, Any],
+        imgs: list[torch.Tensor],
         device: torch.device,
     ) -> None:
         if self._stitcher is not None:
@@ -422,20 +404,128 @@ class StitchingPlugin(Plugin):
             feather_fraction=blend.feather_fraction,
             levels=blend.levels,
         )
+        self._mask_generation_signature = self._mask_source_signature(dir_name)
 
-    def _resolve_rotation_degrees(self, context: Dict[str, Any]) -> Optional[float]:
+    @staticmethod
+    def _mask_source_signature(directory):
+        paths = sorted(
+            path
+            for path in Path(directory).iterdir()
+            if path.name in (".stitching_artifacts.json", "autooptimiser_out.pto", "seam_file.png")
+            or path.name.startswith("mapping_")
+        )
+        return tuple(
+            (path.name, path.stat().st_size, path.stat().st_mtime_ns, path.stat().st_ctime_ns)
+            for path in paths
+            if path.is_file()
+        )
+
+    def _render_images(self, imgs):
+        if isinstance(self._stitcher, (CudaStitchPanoF32, CudaStitchPanoU8)):
+            if len(imgs) != 2:
+                raise RuntimeError(
+                    f"Expected 2 stitch inputs for {type(self._stitcher).__name__}; got {len(imgs)}"
+                )
+            imgs_0 = self._ensure_rgba_channels_last(imgs[0])
+            imgs_1 = self._ensure_rgba_channels_last(imgs[1])
+            blended = torch.empty(
+                [
+                    imgs_0.shape[0],
+                    self._stitcher.canvas_height(),
+                    self._stitcher.canvas_width(),
+                    imgs_0.shape[-1],
+                ],
+                dtype=imgs_0.dtype,
+                device=imgs_0.device,
+            )
+            stream_handle = torch.cuda.current_stream(imgs_0.device).cuda_stream
+            self._stitcher.process(
+                imgs_0.contiguous(),
+                imgs_1.contiguous(),
+                blended,
+                stream_handle,
+            )
+        elif isinstance(self._stitcher, (CudaStitchPanoNF32, CudaStitchPanoNU8)):
+            imgs_rgba = [self._ensure_rgba_channels_last(img) for img in imgs]
+            blended = torch.empty(
+                [
+                    imgs_rgba[0].shape[0],
+                    self._stitcher.canvas_height(),
+                    self._stitcher.canvas_width(),
+                    imgs_rgba[0].shape[-1],
+                ],
+                dtype=imgs_rgba[0].dtype,
+                device=imgs_rgba[0].device,
+            )
+            stream_handle = torch.cuda.current_stream(imgs_rgba[0].device).cuda_stream
+            self._stitcher.process([img.contiguous() for img in imgs_rgba], blended, stream_handle)
+        else:
+            blended = self._stitcher.forward(inputs=imgs)
+
+        return blended
+
+    def _make_mask_renderer(self, context, imgs, rotation):
+        device = imgs[0].device
+        sizes = [(image_width(image), image_height(image)) for image in imgs]
+        dtypes = [image.dtype for image in imgs]
+        generation = self._mask_generation_signature
+
+        def render(frames):
+            directory = str(self._resolve_dir_name(context))
+            if generation is not None and self._mask_source_signature(directory) != generation:
+                raise ValueError(
+                    "Calibration changed during playback; restart before sampling a rink mask"
+                )
+            if len(frames) != len(sizes):
+                raise ValueError("Mask renderer needs the active source camera count")
+            # Own maps, scratch space and transforms: the pipeline may already
+            # be rendering a later playback frame on another worker.
+            renderer = StitchingPlugin(
+                dir_name=directory,
+                blend_mode=self._blend.mode,
+                blend_feather_fraction=self._blend.feather_fraction,
+                max_blend_levels=self._blend.levels,
+                python_blender=self._python_blender,
+                use_cuda_pano_n=self._use_cuda_pano_n,
+                minimize_blend=self._minimize_blend,
+                dtype=self._dtype,
+                max_output_width=self._max_output_width,
+                left_color_pipeline=self._left_color_pipeline_cfg,
+                right_color_pipeline=self._right_color_pipeline_cfg,
+            )
+            renderer._ensure_initialized(context)
+            prepared = []
+            for index, frame in enumerate(frames):
+                if (image_width(frame), image_height(frame)) != sizes[index]:
+                    raise ValueError("Mask source dimensions differ from the active stitch input")
+                prepared.append(frame.unsqueeze(0).to(device=device, dtype=dtypes[index]))
+            for index, pipeline in enumerate(
+                (renderer._left_color_pipeline, renderer._right_color_pipeline)
+            ):
+                if pipeline is not None:
+                    prepared[index] = pipeline({"img": prepared[index]})["img"]
+            renderer._create_stitcher(context, prepared, device)
+            if generation is not None and self._mask_source_signature(directory) != generation:
+                raise ValueError("Calibration changed while constructing the mask renderer")
+            with torch.inference_mode():
+                blended = renderer._prepare_frame_for_video(renderer._render_images(prepared))
+                if rotation is not None and abs(rotation) > 1e-6:
+                    blended = renderer._rotate_tensor_keep_size(blended, rotation)
+                result = make_channels_first(blended)[0].detach().cpu()
+            return result
+
+        return render
+
+    def _resolve_rotation_degrees(self, context: dict[str, Any]) -> float | None:
         shared = context.get("shared", {})
         cfg = shared.get("game_config") or {}
-        try:
-            val = get_nested_value(cfg, "stitching.post_stitch_rotate_degrees", None)
-            if val is not None:
-                return float(val)
-        except Exception:
-            pass
+        val = get_nested_value(cfg, "stitching.post_stitch_rotate_degrees", None)
+        if val is not None:
+            return float(val)
         return self._post_stitch_rotate_degrees
 
     def _prepare_frame_for_video(
-        self, image: torch.Tensor, image_roi: Optional[List[int]] = None
+        self, image: torch.Tensor, image_roi: list[int] | None = None
     ) -> torch.Tensor:
         if not image_roi:
             if image.shape[-1] == 4:
@@ -561,14 +651,14 @@ class StitchingPlugin(Plugin):
         #     pass
         return results
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
         stitch_inputs = context.get("stitch_inputs")
         if stitch_inputs is None:
             raise RuntimeError("StitchingPlugin requires 'stitch_inputs' in context")
-        image_data_list: List[Dict[str, Any]]
+        image_data_list: list[dict[str, Any]]
         if isinstance(stitch_inputs, dict):
             views = stitch_inputs.get("views")
             if isinstance(views, (list, tuple)):
@@ -611,13 +701,14 @@ class StitchingPlugin(Plugin):
         if ids is None:
             raise RuntimeError("StitchingPlugin could not resolve frame ids")
 
-        pre_stats_list: Optional[List[Optional[Dict[str, Tuple[float, float, float]]]]] = None
+        pre_stats_list: list[dict[str, tuple[float, float, float]] | None] | None = None
         if self._capture_rgb_stats:
             pre_stats_list = []
             for img in imgs:
                 try:
                     pre_stats_list.append(MOTLoadVideoWithOrig.compute_rgb_stats(img))
-                except Exception:
+                except (RuntimeError, ValueError, TypeError) as error:
+                    logger.warning("Source color statistics unavailable: %s", error)
                     pre_stats_list.append(None)
 
         if self._left_color_pipeline is not None:
@@ -626,59 +717,31 @@ class StitchingPlugin(Plugin):
                 data_0 = self._left_color_pipeline(data_0)
                 if "img" in data_0:
                     imgs[0] = data_0["img"]
-            except Exception:
-                logger.debug("Left stitch color pipeline failed", exc_info=True)
+            except (RuntimeError, ValueError, TypeError, KeyError):
+                logger.warning(
+                    "Left stitch color pipeline failed; using unadjusted input", exc_info=True
+                )
         if self._right_color_pipeline is not None:
             try:
                 data_1 = {"img": imgs[1]}
                 data_1 = self._right_color_pipeline(data_1)
                 if "img" in data_1:
                     imgs[1] = data_1["img"]
-            except Exception:
-                logger.debug("Right stitch color pipeline failed", exc_info=True)
+            except (RuntimeError, ValueError, TypeError, KeyError):
+                logger.warning(
+                    "Right stitch color pipeline failed; using unadjusted input", exc_info=True
+                )
+
+        ui = context.get("shared", {}).get("hm_ui_process")
+        if ui is not None and not ui.closed:
+            for index, source in enumerate(imgs[:2], start=1):
+                name = f"Camera {index}"
+                if name in ui.preview_paths:
+                    ui.publish_preview(wrap_tensor(source), name=name)
 
         device = imgs[0].device
         self._create_stitcher(context=context, imgs=imgs, device=device)
-        if isinstance(self._stitcher, (CudaStitchPanoF32, CudaStitchPanoU8)):
-            if len(imgs) != 2:
-                raise RuntimeError(
-                    f"Expected 2 stitch inputs for {type(self._stitcher).__name__}; got {len(imgs)}"
-                )
-            imgs_0 = self._ensure_rgba_channels_last(imgs[0])
-            imgs_1 = self._ensure_rgba_channels_last(imgs[1])
-            blended = torch.empty(
-                [
-                    imgs_0.shape[0],
-                    self._stitcher.canvas_height(),
-                    self._stitcher.canvas_width(),
-                    imgs_0.shape[-1],
-                ],
-                dtype=imgs_0.dtype,
-                device=imgs_0.device,
-            )
-            stream_handle = torch.cuda.current_stream(imgs_0.device).cuda_stream
-            self._stitcher.process(
-                imgs_0.contiguous(),
-                imgs_1.contiguous(),
-                blended,
-                stream_handle,
-            )
-        elif isinstance(self._stitcher, (CudaStitchPanoNF32, CudaStitchPanoNU8)):
-            imgs_rgba = [self._ensure_rgba_channels_last(img) for img in imgs]
-            blended = torch.empty(
-                [
-                    imgs_rgba[0].shape[0],
-                    self._stitcher.canvas_height(),
-                    self._stitcher.canvas_width(),
-                    imgs_rgba[0].shape[-1],
-                ],
-                dtype=imgs_rgba[0].dtype,
-                device=imgs_rgba[0].device,
-            )
-            stream_handle = torch.cuda.current_stream(imgs_rgba[0].device).cuda_stream
-            self._stitcher.process([img.contiguous() for img in imgs_rgba], blended, stream_handle)
-        else:
-            blended = self._stitcher.forward(inputs=imgs)
+        blended = self._render_images(imgs)
 
         blended = self._prepare_frame_for_video(blended, image_roi=None)
 
@@ -688,11 +751,12 @@ class StitchingPlugin(Plugin):
             blended = self._rotate_tensor_keep_size(blended, rotate_degrees)
             applied_rotation = float(rotate_degrees)
 
-        rgb_stats: Optional[Dict[str, Any]] = None
+        rgb_stats: dict[str, Any] | None = None
         if self._capture_rgb_stats:
             try:
                 post_stats = MOTLoadVideoWithOrig.compute_rgb_stats(blended)
-            except Exception:
+            except (RuntimeError, ValueError, TypeError) as error:
+                logger.warning("Stitched color statistics unavailable: %s", error)
                 post_stats = None
             rgb_stats = {"inputs": pre_stats_list, "stitched": post_stats}
             if pre_stats_list is not None and len(pre_stats_list) >= 1:
@@ -709,29 +773,25 @@ class StitchingPlugin(Plugin):
         # Prepare a lightweight dict for the MMEngine pipeline. We keep this local
         # and surface the pipeline outputs as top-level Aspen context keys rather
         # than nesting under a shared `data` object.
-        data_item: Dict[str, Any] = {}
+        data_item: dict[str, Any] = {}
         fps_value = context.get("stitch_fps") or context.get("fps")
         hm_real_time_fps = None
         fps_scalar = None
         if fps_value:
-            try:
-                fps_scalar = float(fps_value)
-                hm_real_time_fps = [fps_scalar for _ in range(len(ids))]
-                data_item["hm_real_time_fps"] = hm_real_time_fps
-                data_item["fps"] = fps_scalar
-            except Exception:
-                fps_scalar = None
-                hm_real_time_fps = None
+            fps_scalar = float(fps_value)
+            hm_real_time_fps = [fps_scalar for _ in range(len(ids))]
+            data_item["hm_real_time_fps"] = hm_real_time_fps
+            data_item["fps"] = fps_scalar
 
         data_item.update(
-            dict(
-                img=blended,
-                img_info=dict(
-                    frame_id=int(ids[0].item()) if isinstance(ids, torch.Tensor) else int(ids[0])
-                ),
-                img_prefix=None,
-                img_id=ids,
-            )
+            {
+                "img": blended,
+                "img_info": {
+                    "frame_id": int(ids[0].item()) if isinstance(ids, torch.Tensor) else int(ids[0])
+                },
+                "img_prefix": None,
+                "img_id": ids,
+            }
         )
         if rgb_stats is not None:
             data_item.setdefault("debug_rgb_stats", {})["stitch"] = rgb_stats
@@ -788,8 +848,9 @@ class StitchingPlugin(Plugin):
             blended=blended,
             applied_rotation=applied_rotation,
         )
-        out: Dict[str, Any] = {
+        out: dict[str, Any] = {
             "original_images": original_images,
+            "rink_mask_renderer": self._make_mask_renderer(context, imgs, applied_rotation),
             "camera_input_geometry": {
                 "post_stitch_rotate_degrees": applied_rotation,
                 "stitched_geometry_revision": geometry_revision,
@@ -819,6 +880,7 @@ class StitchingPlugin(Plugin):
             "inputs",
             "data_samples",
             "original_images",
+            "rink_mask_renderer",
             "camera_input_geometry",
             "debug_rgb_stats",
             "hm_real_time_fps",
@@ -828,10 +890,10 @@ class StitchingPlugin(Plugin):
             "img",
         }
 
-    def get_post_stitch_rotate_degrees(self) -> Optional[float]:
+    def get_post_stitch_rotate_degrees(self) -> float | None:
         return self._post_stitch_rotate_degrees
 
-    def set_post_stitch_rotate_degrees(self, degrees: Optional[float]) -> None:
+    def set_post_stitch_rotate_degrees(self, degrees: float | None) -> None:
         self._post_stitch_rotate_degrees = degrees
 
 
@@ -841,7 +903,7 @@ def _is_none(val: Any) -> bool:
     return val is None
 
 
-def _fix_clip_box(clip_box: Any, hw: List[int]) -> Any:
+def _fix_clip_box(clip_box: Any, hw: list[int]) -> Any:
     if isinstance(clip_box, list):
         if _is_none(clip_box[0]):
             clip_box[0] = 0

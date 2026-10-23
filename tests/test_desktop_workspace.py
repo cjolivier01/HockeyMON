@@ -1,0 +1,292 @@
+import copy
+import json
+import sys
+
+import pytest
+import yaml
+
+from hmlib.ui.desktop import WorkspaceEditors
+from hmlib.ui.runtime_setup import OperatorWorkspace, apply_engine_preferences, launch_arguments
+from hmlib.ui.workspace import Workspace
+
+
+@pytest.fixture
+def desktop(tmp_path):
+    root = tmp_path / "games"
+    with Workspace(root, tmp_path / "session") as workspace:
+        workspace.dispatch("games.create", {"game_id": "operator-test"})
+        editors = WorkspaceEditors(workspace)
+        try:
+            yield workspace
+        finally:
+            editors.close()
+
+
+def should_persist_operator_settings_through_durable_commands_and_launch(desktop):
+    snapshot = desktop.dispatch("calibration.snapshot", {})
+    changes = {
+        "hm_ui.run.detector": "hockeyref",
+        "hm_ui.run.precision": "trt-fp32",
+        "hm_ui.run.analytics": "pose-jersey",
+        "hm_ui.run.save_video": False,
+        "video_out.output_width": "1920",
+        "video_out.bit_rate": "8M",
+        "team.backend": "lab",
+        "team.enabled": True,
+    }
+    (desktop.commands / "setup-1.json").write_text(
+        json.dumps(
+            {
+                "id": "setup-1",
+                "operation": "calibration.update",
+                "args": {"changes": changes, "expected_revision": snapshot["revision"]},
+            }
+        )
+    )
+    desktop.poll()
+    result = json.loads((desktop.results / "setup-1.json").read_text())
+    assert result["ok"], result
+    private = yaml.safe_load((desktop.game() / "config.yaml").read_text())
+    assert private["video_out"]["output_width"] == 1920
+    assert "stitching" not in private
+    arguments = launch_arguments(desktop.game(), "track")
+    assert "--detector-model" in arguments and "hockeyref" in arguments
+    assert "--no-detector-trt-fp16" in arguments
+    assert "--detect-jersey-numbers" in arguments
+    assert "--no-save-video" in arguments
+    config_index = arguments.index("--config")
+    assert arguments[config_index + 1].endswith("tracking_pose_jersey.yaml")
+    command = desktop.pipeline_command(desktop.game(), "track", ["--detector-model", "distilled"])
+    assert command[-2:] == ["--detector-model", "distilled"]
+    before = (desktop.game() / "config.yaml").read_bytes()
+    desktop.poll()
+    assert (desktop.game() / "config.yaml").read_bytes() == before
+
+
+def should_fence_stale_operator_edits_and_running_game_changes(desktop):
+    snapshot = desktop.dispatch("calibration.snapshot", {})
+    desktop.dispatch("calibration.update", {"changes": {"team.backend": "lab"}})
+    with pytest.raises(ValueError, match="changed"):
+        desktop.dispatch(
+            "calibration.update",
+            {"changes": {"team.enabled": True}, "expected_revision": snapshot["revision"]},
+        )
+    desktop.start_command(
+        [sys.executable, "-c", "import time; time.sleep(30)"], desktop.game().name
+    )
+    with pytest.raises(RuntimeError, match="Stop job"):
+        desktop.dispatch("calibration.update", {"changes": {"team.enabled": True}})
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"video_out.output_width": "1919"},
+        {"video_out.output_height": "nan"},
+        {"video_out.bit_rate": "8M;false"},
+        {"video_out.youtube_stream_url": "http://example.com"},
+        {"hm_ui.run.precision": "trt-int8"},
+        {"hm_ui.run.batch_size": 0},
+    ],
+)
+def should_reject_invalid_run_settings_without_mutation(desktop, change):
+    path = desktop.game() / "config.yaml"
+    before = path.read_bytes()
+    with pytest.raises(ValueError):
+        desktop.dispatch("calibration.update", {"changes": change})
+    assert path.read_bytes() == before
+
+
+def should_clear_old_engines_without_constructing_missing_graph_nodes():
+    config = {
+        "hm_ui": {"run": {"precision": "pytorch", "pose_precision": "onnx"}},
+        "aspen": {
+            "plugins": {
+                "detector_factory": {"params": {"trt": {"enable": True, "engine": "saved.engine"}}}
+            }
+        },
+    }
+    original = copy.deepcopy(config)
+    apply_engine_preferences(config)
+    assert config["aspen"]["plugins"]["detector_factory"]["params"]["trt"] == {
+        "enable": False,
+        "engine": "saved.engine",
+    }
+    assert "pose_factory" not in config["aspen"]["plugins"]
+    assert config["hm_ui"] == original["hm_ui"]
+
+
+def should_preserve_automatic_dimensions_after_reloading(desktop):
+    editor = OperatorWorkspace(desktop.game())
+    editor.update_settings({"video_out.output_width": "1920", "video_out.output_height": "1080"})
+    editor.update_settings(
+        {"video_out.output_width": "auto", "video_out.output_height": "", "video_out.bit_rate": ""}
+    )
+    assert editor.snapshot()["settings"]["video_out.output_width"] == "auto"
+    assert editor.snapshot()["settings"]["video_out.output_height"] == ""
+
+
+def should_inspect_unprepared_engines_without_loading_weights(desktop):
+    desktop.dispatch(
+        "calibration.update",
+        {
+            "changes": {
+                "hm_ui.run.precision": "onnx-int8",
+                "hm_ui.run.pose_precision": "trt-fp32",
+                "hm_ui.run.analytics": "pose",
+            }
+        },
+    )
+    graph = desktop.dispatch("pipeline.inspect", {})
+    nodes = {node["name"]: node for node in graph["nodes"]}
+    detector = nodes["detector_factory"]["params"]
+    assert detector["onnx"]["enable"] is True
+    assert detector["onnx"]["preparation"] == "missing"
+    assert detector["trt"]["enable"] is False
+    assert nodes["pose_factory"]["params"]["trt"]["fp16"] is False
+
+
+@pytest.mark.parametrize(
+    "analysis", ["tracking", "jersey", "pose", "pose-jersey", "pose-actions", "pose-jersey-actions"]
+)
+def should_keep_complete_output_graph_for_each_analysis_preset(
+    desktop, analysis, monkeypatch, tmp_path
+):
+    import graphlib
+
+    from hmlib.aspen import AspenNet
+
+    desktop.dispatch("calibration.update", {"changes": {"hm_ui.run.analytics": analysis}})
+    arguments = launch_arguments(desktop.game(), "track")
+    paths = [arguments[index + 1] for index, value in enumerate(arguments) if value == "--config"]
+    graph = desktop.dispatch("pipeline.inspect", {})
+    assert graph["graph"] == " + ".join(paths)
+    nodes = {node["name"]: node for node in graph["nodes"]}
+    order = list(
+        graphlib.TopologicalSorter(
+            {name: node["depends"] for name, node in nodes.items()}
+        ).static_order()
+    )
+    assert {"detector_factory", "detector", "tracker", "apply_camera", "video_out"} <= nodes.keys()
+    assert ("pose" in nodes) == ("pose" in analysis)
+    assert ("jersey_numbers" in nodes) == ("jersey" in analysis)
+    assert ("actions" in nodes) == ("actions" in analysis)
+    if "actions" in nodes:
+        assert order.index("actions") < order.index("overlays")
+        assert order.index("actions") < order.index("play_tracker")
+    if "jersey_numbers" in nodes:
+        assert order.index("jersey_numbers") < order.index("overlays")
+    monkeypatch.chdir(tmp_path)
+    stubbed = copy.deepcopy(nodes)
+    for node in stubbed.values():
+        if "JoinPlugin" not in node["class"]:
+            node["enabled"] = False
+    AspenNet(analysis, {"plugins": stubbed})
+
+
+def should_validate_custom_analysis_dependencies_and_apply_pose_model(desktop):
+    editor = OperatorWorkspace(desktop.game())
+    editor.update_settings(
+        {"hm_ui.run.analytics": "custom", "pipeline.player-analytics.jersey.enable": True}
+    )
+    graph = desktop.dispatch("pipeline.inspect", {})
+    nodes = {node["name"]: node for node in graph["nodes"]}
+    assert "pose" not in nodes
+    assert nodes["jersey_numbers"]["params"]["roi_mode"] == "bbox"
+    for changes in (
+        {"pipeline.player-analytics.jersey.roi-mode": "pose"},
+        {"pipeline.player-analytics.action.enable": True},
+        {
+            "pipeline.player-analytics.pose.enable": True,
+            "pipeline.player-analytics.action.enable": True,
+            "pipeline.player-analytics.pose.rate-hz": "5",
+        },
+        {"hm_ui.run.pose_model": "custom"},
+    ):
+        with pytest.raises(ValueError):
+            editor.update_settings(changes)
+    editor.update_settings(
+        {
+            "pipeline.player-analytics.pose.enable": True,
+            "pipeline.player-analytics.action.enable": True,
+            "pipeline.player-analytics.pose.rate-hz": "fps",
+            "hm_ui.run.pose_model": "coco",
+        }
+    )
+    nodes = {node["name"]: node for node in desktop.dispatch("pipeline.inspect", {})["nodes"]}
+    assert "coco" in nodes["pose_factory"]["params"]["pose_config"]
+    assert "actions" in nodes
+
+
+def should_toggle_individual_analysis_from_the_current_preset_and_resolve_custom_paths(desktop):
+    editor = OperatorWorkspace(desktop.game())
+    editor.update_settings({"hm_ui.run.analytics": "pose"})
+    assert editor.snapshot()["settings"]["pipeline.player-analytics.pose.enable"] is True
+    editor.update_settings({"pipeline.player-analytics.jersey.enable": True})
+    saved = editor.snapshot()["settings"]
+    assert saved["hm_ui.run.analytics"] == "custom"
+    assert saved["pipeline.player-analytics.pose.enable"] is True
+    assert saved["pipeline.player-analytics.jersey.enable"] is True
+    editor.update_settings(
+        {"hm_ui.run.jersey_model": "custom", "hm_ui.run.jersey_model_path": "models/jersey.onnx"}
+    )
+    nodes = {node["name"]: node for node in desktop.dispatch("pipeline.inspect", {})["nodes"]}
+    assert nodes["jersey_numbers"]["class"].endswith("ParseqJerseyPlugin")
+    assert nodes["jersey_numbers"]["params"]["model_path"] == str(
+        desktop.game() / "models/jersey.onnx"
+    )
+    editor.update_settings({"pipeline.player-analytics.jersey.roi-mode": "pose"})
+    nodes = {node["name"]: node for node in desktop.dispatch("pipeline.inspect", {})["nodes"]}
+    assert "coco" in nodes["pose_factory"]["params"]["pose_config"]
+
+
+def should_offer_baseline_camera_parameters_for_setup_and_experiments(desktop):
+    from hmlib.config import ROOT_DIR, baseline_config
+
+    editor = OperatorWorkspace(desktop.game())
+    snapshot = editor.snapshot()
+    values = snapshot["settings"]
+    baseline = baseline_config(ROOT_DIR)["rink"]["camera"]
+    assert values["rink.camera.max_speed_ratio_x"] == baseline["max_speed_ratio_x"]
+    assert values["rink.camera.color.contrast"] == baseline["color"]["contrast"]
+    keys = [spec["key"] for spec in snapshot["catalog"]]
+    assert len(keys) == len(set(keys))
+    editor.update_settings(
+        {"rink.camera.follower_box_scale_width": 1.8, "rink.camera.color.gamma": 1.2}
+    )
+    values = editor.snapshot()["settings"]
+    assert values["rink.camera.follower_box_scale_width"] == 1.8
+    assert values["rink.camera.color.gamma"] == 1.2
+    with pytest.raises(ValueError):
+        editor.update_settings({"rink.camera.color.gamma": 0})
+
+
+def should_inspect_unprepared_appearance_and_exact_native_pose_models(desktop):
+    from hmlib.ui.analytics_graph import NATIVE_POSE_SHA256
+
+    OperatorWorkspace(desktop.game()).update_settings(
+        {"hm_ui.run.analytics": "pose-actions", "pipeline.tracker.reid-enable": True}
+    )
+    nodes = {node["name"]: node for node in desktop.dispatch("pipeline.inspect", {})["nodes"]}
+    assert nodes["tracker"]["depends"] == ["player_reid"]
+    assert nodes["player_reid"]["params"]["onnx_path"].endswith("reid.onnx")
+    assert nodes["pose_factory"]["params"]["pose_checkpoint_sha256"] == NATIVE_POSE_SHA256
+    assert nodes["pose_factory"]["params"]["pose_config"].endswith("rtmpose-m_coco17-256x192.py")
+    assert nodes["actions"]["class"].endswith("TemporalActionPlugin")
+
+
+def should_keep_manual_video_synchronization_for_audio(monkeypatch):
+    import hmlib.stitching.synchronize as sync
+    from hmlib.cli.hmtrack import _resolve_mux_audio_source
+
+    def unexpected_audio_matching(*args):
+        pytest.fail("Manual/IMU synchronization must not perform audio matching")
+
+    monkeypatch.setattr(sync, "synchronize_by_audio", unexpected_audio_matching)
+    assert _resolve_mux_audio_source(
+        {"left": ["left.mp4"], "right": ["right.mp4"]}, frame_offsets=(23, 0)
+    ) == ("right.mp4", None)
+    assert _resolve_mux_audio_source(["left.mp4", "right.mp4"], frame_offsets=(0, 17)) == (
+        "left.mp4",
+        None,
+    )

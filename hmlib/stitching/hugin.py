@@ -11,7 +11,7 @@ import re
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import cv2
 import numpy as np
@@ -19,15 +19,12 @@ import torch
 
 from hmlib.log import get_logger
 from hmlib.stitching.akaze import LensCalibrationPair
-from hmlib.stitching.control_points import (
-    DEFAULT_CONTROL_POINT_MATCHER,
-    calculate_control_points,
-)
+from hmlib.stitching.control_points import DEFAULT_CONTROL_POINT_MATCHER, calculate_control_points
 
 _CONTROL_POINTS_LINE = "# control points"
 
 
-def load_pto_file(file_path: str) -> List[str]:
+def load_pto_file(file_path: str) -> list[str]:
     """Load the content of a PTO file into a list of lines."""
     with open(file_path, "r") as file:
         lines = file.readlines()
@@ -37,9 +34,9 @@ def load_pto_file(file_path: str) -> List[str]:
     return lines
 
 
-def parse_pto_content(lines: List[str]) -> Dict[str, str]:
+def parse_pto_content(lines: list[str]) -> dict[str, str]:
     """Parse PTO content to a simple ``key=value`` dict."""
-    parsed_data: Dict[str, str] = {}
+    parsed_data: dict[str, str] = {}
     for line in lines:
         if line.startswith("#"):  # Skip comments
             continue
@@ -50,21 +47,20 @@ def parse_pto_content(lines: List[str]) -> Dict[str, str]:
     return parsed_data
 
 
-def save_pto_file(file_path: str, data: List[str]):
+def save_pto_file(file_path: str, data: list[str]):
     """Save modified PTO file content back to disk."""
     with open(file_path, "w") as file:
-        for line in data:
-            file.write(f"{line}\n")
+        file.writelines(f"{line}\n" for line in data)
 
 
-def remove_control_points(lines: List[str]) -> Tuple[List[str], int]:
+def remove_control_points(lines: list[str]) -> tuple[list[str], int]:
     """Remove existing control-point lines from a PTO file.
 
     @param lines: PTO file lines.
     @return: Tuple ``(new_lines, prev_control_point_count)``.
     """
     prev_control_point_count: int = 0
-    new_lines: List[str] = []
+    new_lines: list[str] = []
     for line in lines:
         if line.startswith(_CONTROL_POINTS_LINE):
             continue
@@ -97,10 +93,10 @@ def split_string_with_letter_prefix(s):
     return letters, rest
 
 
-def extract_prefix_map(tokens: Union[List[str], str]) -> OrderedDict[str, str]:
+def extract_prefix_map(tokens: list[str] | str) -> OrderedDict[str, str]:
     if isinstance(tokens, str):
         tokens = tokens.split(" ")
-    results: Dict[str, str] = OrderedDict()
+    results: dict[str, str] = OrderedDict()
     for token in tokens:
         if not token:
             continue
@@ -109,9 +105,9 @@ def extract_prefix_map(tokens: Union[List[str], str]) -> OrderedDict[str, str]:
     return results
 
 
-def parse_hugin_control_points(lines: List[str]) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
-    points0: List[Tuple[float, float]] = []
-    points1: List[Tuple[float, float]] = []
+def parse_hugin_control_points(lines: list[str]) -> tuple[torch.Tensor, torch.Tensor] | None:
+    points0: list[tuple[float, float]] = []
+    points1: list[tuple[float, float]] = []
     for line in lines:
         if line.startswith("c "):
             tokens = line.split(" ")
@@ -137,11 +133,13 @@ def configure_control_points(
     image1: str,
     max_control_points: int,
     force: bool = False,
-    output_directory: Optional[str] = None,
+    output_directory: str | None = None,
     use_hugin: bool = False,
     matcher: str = DEFAULT_CONTROL_POINT_MATCHER,
-    lens_calibration: Optional[LensCalibrationPair] = None,
-) -> Dict[str, torch.Tensor]:
+    lens_calibration: LensCalibrationPair | None = None,
+    control_point_resolution: str | None = None,
+    control_point_filtering=None,
+) -> dict[str, torch.Tensor]:
     """Populate or update control points in a Hugin PTO project.
 
     If existing control points are present and ``use_hugin`` is true,
@@ -174,7 +172,7 @@ def configure_control_points(
     if use_hugin and hugin_ctrl_points is not None:
         m_kpts0 = hugin_ctrl_points[0]
         m_kpts1 = hugin_ctrl_points[1]
-        control_points = dict(m_kpts0=m_kpts0, m_kpts1=m_kpts1)
+        control_points = {"m_kpts0": m_kpts0, "m_kpts1": m_kpts1}
 
     if not control_points:
         start = time.time()
@@ -185,6 +183,8 @@ def configure_control_points(
             max_control_points=max_control_points,
             matcher=matcher,
             lens_calibration=lens_calibration,
+            control_point_resolution=control_point_resolution,
+            control_point_filtering=control_point_filtering,
         )
         print(f"Calculated control points in {time.time() - start} seconds")
 
@@ -196,7 +196,7 @@ def configure_control_points(
     return control_points
 
 
-def write_control_points(project_file_path: str, control_points: Dict[str, torch.Tensor]) -> None:
+def write_control_points(project_file_path: str, control_points: dict[str, torch.Tensor]) -> None:
     """Install precomputed paired points, replacing points from earlier candidates."""
     pto_file = load_pto_file(project_file_path)
     pts0 = control_points["m_kpts0"]
@@ -223,11 +223,11 @@ def write_control_points(project_file_path: str, control_points: Dict[str, torch
     get_logger(__name__).info("Done with control points")
 
 
-def parse_pto_transformations(lines: List[str]) -> List[Dict[str, Any]]:
-    image_params: List[Dict[str, Any]] = []
+def parse_pto_transformations(lines: list[str]) -> list[dict[str, Any]]:
+    image_params: list[dict[str, Any]] = []
     for line in lines:
         if line.startswith("i "):  # Image transformation line
-            params: Dict[str, Any] = {}
+            params: dict[str, Any] = {}
 
             # Euler angles (fallback if quaternion missing)
             params["yaw"] = float(re.search(r"y(-?\d+\.?\d*)", line).group(1))  # type: ignore
@@ -286,7 +286,7 @@ def euler_to_rotation_matrix(yaw: float, pitch: float, roll: float) -> np.ndarra
     return Rz @ Ry @ Rx  # Combined rotation matrix
 
 
-def compute_homography(params: Dict[str, Any]) -> np.ndarray:
+def compute_homography(params: dict[str, Any]) -> np.ndarray:
     """Compute an approximate homography matrix from PTO parameters."""
     R: np.ndarray = euler_to_rotation_matrix(params["yaw"], params["pitch"], params["roll"])
 
@@ -429,4 +429,3 @@ if __name__ == "__main__":
     apply_homography(f"{os.environ['HOME']}/Videos/pdp/GX010087.png", H)
     # apply_homography(f"{os.environ['HOME']}/Videos/pdp/GX010087.png", H)
     # apply_homography_with_size_compute(f"{os.environ['HOME']}/Videos/pdp/GX010087.png", H)
-    pass

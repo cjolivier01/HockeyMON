@@ -9,6 +9,7 @@ description = "HockeyMON Python tools and pipeline helpers"
 requires-python = ">=3.10"
 
 [project.scripts]
+hmui = "hmlib.ui.desktop:main"
 hmtrack = "hmlib.cli.hmtrack:main"
 hmstitch = "hmlib.cli.stitch:main"
 hmlevel = "hmlib.cli.level_stitching:main"

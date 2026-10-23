@@ -1,0 +1,97 @@
+feature: action
+inputs:
+- dtype: float32
+  name: skeleton
+  shape:
+  - -1
+  - 2
+  - 100
+  - 17
+  - 3
+labels:
+- drink water
+- eat meal/snack
+- brushing teeth
+- brushing hair
+- drop
+- pickup
+- throw
+- sitting down
+- standing up (from sitting position)
+- clapping
+- reading
+- writing
+- tear up paper
+- wear jacket
+- take off jacket
+- wear a shoe
+- take off a shoe
+- wear on glasses
+- take off glasses
+- put on a hat/cap
+- take off a hat/cap
+- cheer up
+- hand waving
+- kicking something
+- reach into pocket
+- hopping (one foot jumping)
+- jump up
+- make a phone call/answer phone
+- playing with phone/tablet
+- typing on a keyboard
+- pointing to something with finger
+- taking a selfie
+- check time (from watch)
+- rub two hands together
+- nod head/bow
+- shake head
+- wipe face
+- salute
+- put the palms together
+- cross hands in front (say stop)
+- sneeze/cough
+- staggering
+- falling
+- touch head (headache)
+- touch chest (stomachache/heart pain)
+- touch back (backache)
+- touch neck (neckache)
+- nausea or vomiting condition
+- use a fan (with hand or paper)/feeling warm
+- punching/slapping other person
+- kicking other person
+- pushing other person
+- pat on back of other person
+- point finger at the other person
+- hugging other person
+- giving something to other person
+- touch other person's pocket
+- handshaking
+- walking towards each other
+- walking apart from each other
+model_family: stgcnpp
+model_id: stgcnpp-coco2d-joint-ntu60
+onnx:
+  file: model.onnx
+  opset: 17
+  sha256: a69d882572452c6c046d998bd587c39cf614b45844e50d32ec24803ca6a3e9bd
+outputs:
+- dtype: float32
+  name: logits
+  shape:
+  - -1
+  - 60
+preprocessing:
+  coordinate_normalization: full_canvas_minus1_plus1
+  id: stgcnpp-coco17-causal-v1
+  max_gap_ns: 150000000
+  sample_period_ns: 100000000
+  samples: 100
+  second_person: zeros
+schema_version: 1
+source:
+  config_sha256: 31bd05179ebe52ccb9ecb194f2e9e8a804b4765d2172a124b646bdc169fd1c82
+  license: Apache-2.0 (code); retain upstream checkpoint and NTU60 training-data provenance
+  sha256: 86e1e77a7b27dd53c6ccc1600a4cc3c321ec8e04d17f25a41fbbb7896026945a
+  url: https://download.openmmlab.com/mmaction/v1.0/skeleton/stgcnpp/stgcnpp_8xb16-joint-u100-80e_ntu60-xsub-keypoint-2d/stgcnpp_8xb16-joint-u100-80e_ntu60-xsub-keypoint-2d_20221228-86e1e77a.pth
+topology_id: coco17

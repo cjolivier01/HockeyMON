@@ -8,14 +8,18 @@ use clap::Parser;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 
+mod workspace;
+
 #[derive(Debug, Parser)]
 #[command(name = "hm-ui")]
 #[command(about = "HockeyMON runtime operator UI")]
 struct Args {
+    #[arg(long, required_unless_present = "workspace")]
+    spec: Option<PathBuf>,
+    #[arg(long, required_unless_present = "workspace")]
+    state: Option<PathBuf>,
     #[arg(long)]
-    spec: PathBuf,
-    #[arg(long)]
-    state: PathBuf,
+    workspace: Option<PathBuf>,
     #[arg(long, default_value = "HM UI")]
     title: String,
 }
@@ -23,10 +27,12 @@ struct Args {
 /// Highest control-spec version this build understands. Reported back to the
 /// producer so it can tell that a field it wrote was actually rendered; echoing
 /// the spec's own number instead would pass at every future bump.
-const SUPPORTED_SPEC_VERSION: u32 = 2;
+const SUPPORTED_SPEC_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 struct UiSpec {
+    #[serde(default)]
+    session_id: String,
     /// Producer's schema version. Echoed into the state file so the producer can
     /// tell whether the sidecar it is talking to understands the spec it wrote.
     #[serde(default)]
@@ -39,6 +45,8 @@ struct UiSpec {
     preview_path: Option<PathBuf>,
     #[serde(default)]
     action_ack_path: Option<PathBuf>,
+    #[serde(default)]
+    runtime_path: Option<PathBuf>,
     #[serde(default)]
     previews: Vec<PreviewSpec>,
     #[serde(default)]
@@ -60,6 +68,7 @@ struct PreviewDimensions {
 }
 
 fn preview_label(name: &str, dimensions: Option<&PreviewDimensions>) -> String {
+    let name = view_label(name);
     match dimensions {
         Some(size) => format!("{name} ({} × {})", size.width, size.height),
         None => name.to_string(),
@@ -87,6 +96,18 @@ struct ControlSpec {
     name: String,
     max_value: i32,
     value: i32,
+    #[serde(default)]
+    min_value: i32,
+    #[serde(default)]
+    label: String,
+    /// Displayed value = wire value / divisor + offset. Absent metadata retains
+    /// the legacy name-based units for older producers.
+    #[serde(default)]
+    divisor: Option<f64>,
+    #[serde(default)]
+    offset: f64,
+    #[serde(default)]
+    unit: String,
     #[serde(default)]
     default_value: Option<i32>,
     #[serde(default)]
@@ -137,9 +158,65 @@ struct UiAction {
 #[derive(Debug, Clone, Deserialize, Default)]
 struct UiActionAck {
     seq: u64,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct RuntimeStatus {
+    state: String,
+    frame: Option<u64>,
+    fps: Option<f64>,
+    rate: Option<f64>,
+    #[serde(default)]
+    message: String,
+    updated_ms: u128,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+impl RuntimeStatus {
+    fn permits(&self, action: &str) -> bool {
+        self.capabilities.iter().any(|item| item == action)
+            && match action {
+                "pause" => self.state == "running",
+                "resume" | "step" => self.state == "paused",
+                "stop" => matches!(self.state.as_str(), "running" | "paused"),
+                _ => false,
+            }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreviewTransform {
+    zoom: f32,
+    pan: egui::Vec2,
+}
+
+impl Default for PreviewTransform {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+        }
+    }
+}
+
+impl PreviewTransform {
+    fn zoom_at(&mut self, factor: f32, anchor: egui::Vec2) {
+        let next = (self.zoom * factor).clamp(1.0, 16.0);
+        self.pan = anchor + (self.pan - anchor) * (next / self.zoom);
+        self.zoom = next;
+        if self.zoom == 1.0 {
+            self.pan = egui::Vec2::ZERO;
+        }
+    }
 }
 
 struct HmUiApp {
+    workspace: Option<workspace::WorkspaceUi>,
     spec_path: PathBuf,
     state_path: PathBuf,
     spec: UiSpec,
@@ -147,6 +224,13 @@ struct HmUiApp {
     control_revisions: BTreeMap<String, BTreeMap<String, u64>>,
     selected_page: usize,
     selected_preview: usize,
+    preview_maximized: bool,
+    preview_transforms: BTreeMap<String, PreviewTransform>,
+    last_runtime_poll: SystemTime,
+    runtime: Option<RuntimeStatus>,
+    runtime_error: Option<String>,
+    action_feedback: Option<String>,
+    last_ack_seq: u64,
     last_spec_modified: Option<SystemTime>,
     last_spec_poll: SystemTime,
     last_action_ack_poll: SystemTime,
@@ -164,14 +248,17 @@ struct HmUiApp {
 impl HmUiApp {
     fn new(spec_path: PathBuf, state_path: PathBuf, title: String) -> Self {
         let mut app = Self {
+            workspace: None,
             spec_path,
             state_path,
             spec: UiSpec {
+                session_id: String::new(),
                 version: 0,
                 title,
                 subtitle: "Runtime camera controls".to_string(),
                 preview_path: None,
                 action_ack_path: None,
+                runtime_path: None,
                 previews: Vec::new(),
                 windows: Vec::new(),
             },
@@ -179,6 +266,13 @@ impl HmUiApp {
             control_revisions: BTreeMap::new(),
             selected_page: 0,
             selected_preview: 0,
+            preview_maximized: false,
+            preview_transforms: BTreeMap::new(),
+            last_runtime_poll: UNIX_EPOCH,
+            runtime: None,
+            runtime_error: None,
+            action_feedback: None,
+            last_ack_seq: 0,
             last_spec_modified: None,
             last_spec_poll: UNIX_EPOCH,
             last_action_ack_poll: UNIX_EPOCH,
@@ -209,6 +303,7 @@ impl HmUiApp {
         let data = fs::read_to_string(&self.spec_path)
             .with_context(|| format!("read {}", self.spec_path.display()))?;
         let mut spec: UiSpec = serde_json::from_str(&data).context("parse UI spec")?;
+        validate_spec(&spec)?;
         clamp_spec_choices(&mut spec);
         if spec.title.is_empty() {
             spec.title = "HM UI".to_string();
@@ -221,6 +316,21 @@ impl HmUiApp {
                     metadata_path: None,
                 });
             }
+        }
+        if !spec.session_id.is_empty() && spec.session_id != self.spec.session_id {
+            self.values.clear();
+            self.control_revisions.clear();
+            self.actions.clear();
+            self.last_action = None;
+            self.action_seq = 0;
+            self.last_ack_seq = 0;
+            self.action_feedback = None;
+            self.runtime = None;
+            self.runtime_error = None;
+            self.last_runtime_poll = UNIX_EPOCH;
+            self.preview_textures.clear();
+            self.last_preview_modified.clear();
+            self.preview_status.clear();
         }
         for window in &spec.windows {
             let entry = self.values.entry(window.name.clone()).or_default();
@@ -253,7 +363,23 @@ impl HmUiApp {
         self.values.retain(|name, _| valid_windows.contains(name));
         self.control_revisions
             .retain(|name, _| valid_windows.contains(name));
+        let previous_page = control_pages(&self.spec).get(self.selected_page).cloned();
+        let previous_preview = self
+            .spec
+            .previews
+            .get(self.selected_preview)
+            .map(|p| p.name.clone());
         let pages = control_pages(&spec);
+        if let Some(page) = previous_page {
+            self.selected_page = pages.iter().position(|item| item == &page).unwrap_or(0);
+        }
+        if let Some(name) = previous_preview {
+            self.selected_preview = spec
+                .previews
+                .iter()
+                .position(|p| p.name == name)
+                .unwrap_or(0);
+        }
         if self.selected_page >= pages.len() + 2 {
             self.selected_page = 0;
         }
@@ -270,8 +396,18 @@ impl HmUiApp {
             .retain(|name, _| preview_names.contains(name));
         self.preview_dimensions
             .retain(|name, _| preview_names.contains(name));
+        self.preview_transforms
+            .retain(|name, _| preview_names.contains(name));
         self.last_spec_modified = modified;
+        if self.spec.runtime_path != spec.runtime_path {
+            self.runtime = None;
+            self.runtime_error = None;
+            self.last_runtime_poll = UNIX_EPOCH;
+        }
         self.spec = spec;
+        if self.selected_page < pages.len() || self.selected_page == usize::MAX {
+            self.align_page_to_preview();
+        }
         self.status = "Connected".to_string();
         self.write_state()?;
         Ok(())
@@ -288,7 +424,11 @@ impl HmUiApp {
         }
         self.last_spec_poll = now;
         if let Err(err) = self.reload_spec(false) {
-            self.status = format!("Spec error: {err}");
+            self.status = if self.workspace.is_some() && missing_file(&err) {
+                "Preparing pipeline…".into()
+            } else {
+                format!("Spec error: {err}")
+            };
         }
     }
 
@@ -320,6 +460,16 @@ impl HmUiApp {
                 return;
             }
         };
+        if ack.seq > self.last_ack_seq {
+            self.last_ack_seq = ack.seq;
+            self.action_feedback = Some(if let Some(error) = ack.error.filter(|s| !s.is_empty()) {
+                format!("Action failed: {error}")
+            } else if let Some(message) = ack.message.filter(|s| !s.is_empty()) {
+                message
+            } else {
+                format!("Action {} completed", ack.seq)
+            });
+        }
         let previous_len = self.actions.len();
         self.actions.retain(|action| action.seq > ack.seq);
         if self
@@ -425,6 +575,7 @@ impl HmUiApp {
         };
         self.actions.push(action.clone());
         self.last_action = Some(action);
+        self.action_feedback = Some(format!("{} requested…", action_label(kind)));
         if let Err(err) = self.write_state() {
             self.status = format!("State write failed: {err}");
         }
@@ -478,8 +629,157 @@ impl HmUiApp {
         };
         write_json_atomic(&self.state_path, &state)
             .with_context(|| format!("write {}", self.state_path.display()))?;
-        self.status = "Connected".to_string();
         Ok(())
+    }
+
+    fn poll_runtime(&mut self) {
+        let now = SystemTime::now();
+        if now
+            .duration_since(self.last_runtime_poll)
+            .unwrap_or_default()
+            < Duration::from_millis(250)
+        {
+            return;
+        }
+        self.last_runtime_poll = now;
+        let Some(path) = &self.spec.runtime_path else {
+            return;
+        };
+        let result = fs::read_to_string(path)
+            .with_context(|| format!("read {}", path.display()))
+            .and_then(|data| parse_runtime_status(&data));
+        match result {
+            Ok(runtime) => {
+                self.runtime = Some(runtime);
+                self.runtime_error = None;
+            }
+            Err(error) => {
+                // Disable actions while the producer's current capabilities are unknown.
+                self.runtime = None;
+                self.runtime_error = if self.workspace.is_some() && missing_file(&error) {
+                    self.status = "Preparing pipeline…".into();
+                    None
+                } else {
+                    Some(format!("Runtime status unavailable: {error:#}"))
+                };
+            }
+        }
+    }
+
+    fn align_page_to_preview(&mut self) {
+        let Some(preview) = self.spec.previews.get(self.selected_preview) else {
+            return;
+        };
+        let pages = control_pages(&self.spec);
+        if pages
+            .get(self.selected_page)
+            .is_some_and(|page| page.0 == preview.name)
+        {
+            return;
+        }
+        self.selected_page = pages
+            .iter()
+            .position(|page| page.0 == preview.name)
+            .unwrap_or(usize::MAX);
+    }
+
+    fn select_preview(&mut self, index: usize) {
+        if index >= self.spec.previews.len() {
+            return;
+        }
+        self.selected_preview = index;
+        self.align_page_to_preview();
+        self.last_preview_poll = UNIX_EPOCH;
+        if let Err(err) = self.write_state() {
+            self.status = format!("State write failed: {err}");
+        }
+    }
+
+    fn select_page(&mut self, index: usize) {
+        let pages = control_pages(&self.spec);
+        self.selected_page = index;
+        if let Some(page) = pages.get(index) {
+            if let Some(preview) = self.spec.previews.iter().position(|p| p.name == page.0) {
+                self.selected_preview = preview;
+                self.last_preview_poll = UNIX_EPOCH;
+                if let Err(err) = self.write_state() {
+                    self.status = format!("State write failed: {err}");
+                }
+            }
+        }
+    }
+
+    fn draw_runtime(&mut self, ui: &mut egui::Ui) {
+        let Some(runtime) = self.runtime.clone() else {
+            if let Some(error) = &self.runtime_error {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            } else if self.workspace.is_some() {
+                ui.label("Preparing pipeline…");
+            } else if self.spec.runtime_path.is_some() {
+                ui.label("Waiting for runtime status…");
+            }
+            return;
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(display_name(&runtime.state));
+            for (kind, label) in [
+                ("pause", "Pause"),
+                ("resume", "Resume"),
+                ("step", "Step batch"),
+                ("stop", "Stop"),
+            ] {
+                if runtime.capabilities.iter().any(|item| item == kind)
+                    && ui
+                        .add_enabled(runtime.permits(kind), egui::Button::new(label))
+                        .clicked()
+                {
+                    self.set_action(kind);
+                }
+            }
+            if runtime.capabilities.iter().any(|item| item == "rate") {
+                let mut rate = runtime.rate.unwrap_or(1.0);
+                let before = rate;
+                egui::ComboBox::from_id_salt("runtime_speed")
+                    .selected_text(if rate == 0.0 {
+                        "Max".into()
+                    } else {
+                        format!("{rate}×")
+                    })
+                    .show_ui(ui, |ui| {
+                        for value in [0.25, 0.5, 1.0, 2.0, 4.0, 0.0] {
+                            let label = if value == 0.0 {
+                                "Max".into()
+                            } else {
+                                format!("{value}×")
+                            };
+                            ui.selectable_value(&mut rate, value, label);
+                        }
+                    });
+                if rate != before {
+                    self.set_action(&format!("rate:{rate}"));
+                }
+            }
+            if let Some(frame) = runtime.frame {
+                ui.label(format!("Frame {frame}"));
+                if let Some(fps) = runtime.fps {
+                    ui.label(format!(
+                        "{} · {fps:.2} fps",
+                        playback_time(frame as f64 / fps)
+                    ));
+                }
+            }
+            let age = now_ms().saturating_sub(runtime.updated_ms) / 1000;
+            if age >= 10 && matches!(runtime.state.as_str(), "running" | "paused" | "stopping") {
+                ui.weak(format!("Status updated {age}s ago"));
+            }
+            if !runtime.message.is_empty() {
+                if runtime.state == "error" {
+                    ui.colored_label(egui::Color32::LIGHT_RED, &runtime.message);
+                } else {
+                    ui.label(&runtime.message);
+                }
+            }
+        });
     }
 
     fn draw_top_bar(&mut self, ui: &mut egui::Ui) {
@@ -492,8 +792,8 @@ impl HmUiApp {
             ui.separator();
             ui.label(&self.spec.subtitle);
         });
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 if ui.button("Save").clicked() {
                     self.set_action("save");
                 }
@@ -513,25 +813,25 @@ impl HmUiApp {
                 }
             });
         });
+        self.draw_runtime(ui);
     }
 
     fn draw_sidebar(&mut self, ui: &mut egui::Ui) {
         let pages = control_pages(&self.spec);
-        ui.vertical(|ui| {
-            ui.label("Controls");
-            let mut previous_view = String::new();
-            for (idx, (view, group)) in pages.iter().enumerate() {
-                if view != &previous_view {
-                    ui.add_space(7.0);
-                    ui.label(egui::RichText::new(format!("{view} view")).strong());
-                    previous_view = view.clone();
+        ui.horizontal_wrapped(|ui| {
+            let mut views = Vec::new();
+            for (index, (view, _)) in pages.iter().enumerate() {
+                if views.contains(view) {
+                    continue;
                 }
-                let selected = idx == self.selected_page;
-                if ui.selectable_label(selected, group).clicked() {
-                    self.selected_page = idx;
+                views.push(view.clone());
+                let selected = pages
+                    .get(self.selected_page)
+                    .is_some_and(|page| &page.0 == view);
+                if ui.selectable_label(selected, view_label(view)).clicked() {
+                    self.select_page(index);
                 }
             }
-            ui.separator();
             if ui
                 .selectable_label(self.selected_page == pages.len(), "Commands")
                 .clicked()
@@ -540,12 +840,25 @@ impl HmUiApp {
             }
             if ui
                 .selectable_label(self.selected_page == pages.len() + 1, "Status")
-                .on_hover_text("Runtime connection and state file paths")
                 .clicked()
             {
                 self.selected_page = pages.len() + 1;
             }
         });
+        if let Some(current) = pages.get(self.selected_page).cloned() {
+            ui.horizontal_wrapped(|ui| {
+                for (index, (view, group)) in pages.iter().enumerate() {
+                    if view == &current.0
+                        && ui
+                            .selectable_label(index == self.selected_page, group)
+                            .clicked()
+                    {
+                        self.select_page(index);
+                    }
+                }
+            });
+        }
+        ui.separator();
     }
 
     fn draw_controls(&mut self, ui: &mut egui::Ui, page: &(String, String)) {
@@ -565,7 +878,7 @@ impl HmUiApp {
                 })
             })
             .collect();
-        ui.heading(format!("{} · {}", page.0, page.1));
+        ui.heading(format!("{} · {}", view_label(&page.0), page.1));
         ui.add_space(8.0);
         let mut any_changed = false;
         egui::ScrollArea::vertical()
@@ -574,7 +887,7 @@ impl HmUiApp {
                 for (window_name, control) in &controls {
                     let mut control_changed = false;
                     ui.push_id((window_name, &control.name), |ui| {
-                        let max_value = control.max_value.max(1);
+                        let max_value = control.max_value;
                         let value = self
                             .values
                             .entry(window_name.clone())
@@ -586,7 +899,14 @@ impl HmUiApp {
 
                         let choices = control.choices.as_slice();
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(display_name(&control.name)).strong());
+                            let label_width = (ui.available_width() - 65.0).max(80.0);
+                            ui.add_sized(
+                                [label_width, ui.spacing().interact_size.y],
+                                egui::Label::new(
+                                    egui::RichText::new(control_label(control)).strong(),
+                                )
+                                .wrap(),
+                            );
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -597,20 +917,9 @@ impl HmUiApp {
                                         )
                                         .on_hover_text(format!(
                                             "Open-time default: {}",
-                                            format_choice_value(
-                                                &control.name,
-                                                open_default,
-                                                max_value,
-                                                choices,
-                                            )
+                                            format_control_value(control, open_default)
                                         ))
                                         .clicked();
-                                    ui.monospace(format_choice_value(
-                                        &control.name,
-                                        *value,
-                                        max_value,
-                                        choices,
-                                    ));
                                 },
                             );
                         });
@@ -638,7 +947,7 @@ impl HmUiApp {
                             .unwrap_or(false);
                             *value = selected;
                             changed
-                        } else if max_value == 1 {
+                        } else if max_value == 1 && control.min_value == 0 {
                             let mut checked = *value > 0;
                             let changed = ui.checkbox(&mut checked, "Enabled").changed();
                             if changed {
@@ -646,17 +955,21 @@ impl HmUiApp {
                             }
                             changed
                         } else {
-                            let slider_width = ui.available_width();
-                            ui.scope(|ui| {
-                                ui.spacing_mut().slider_width = slider_width;
-                                ui.add(
-                                    egui::Slider::new(value, 0..=max_value)
-                                        .clamping(egui::SliderClamping::Always)
-                                        .show_value(false),
-                                )
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().slider_width =
+                                    (ui.available_width() - 105.0).max(40.0);
+                                let slider_changed = without_value_scroll(ui, |ui| {
+                                    ui.add(
+                                        egui::Slider::new(value, control.min_value..=max_value)
+                                            .clamping(egui::SliderClamping::Always)
+                                            .show_value(false),
+                                    )
+                                })
+                                .changed();
+                                let number_changed = numeric_editor(ui, control, value).changed();
+                                slider_changed || number_changed
                             })
                             .inner
-                            .changed()
                         };
                         if reset {
                             *value = open_default;
@@ -665,8 +978,8 @@ impl HmUiApp {
                         if !control.description.is_empty() {
                             ui.label(egui::RichText::new(&control.description).weak().small());
                         }
-                        control_changed = changed;
-                        any_changed |= changed;
+                        control_changed |= changed;
+                        any_changed |= control_changed;
                         ui.add_space(2.0);
                         ui.separator();
                         ui.add_space(2.0);
@@ -691,77 +1004,84 @@ impl HmUiApp {
 
     fn draw_preview(&mut self, ui: &mut egui::Ui) {
         let previews = self.spec.previews.clone();
-        if previews.len() > 1 {
-            ui.horizontal(|ui| {
-                ui.label("View:");
-                for (idx, preview) in previews.iter().enumerate() {
-                    if ui
-                        .selectable_label(
-                            self.selected_preview == idx,
-                            preview_label(
-                                &preview.name,
-                                self.preview_dimensions.get(&preview.name),
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.selected_preview = idx;
-                        self.last_preview_poll = UNIX_EPOCH;
-                        if let Err(err) = self.write_state() {
-                            self.status = format!("State write failed: {err}");
-                        }
-                    }
+        ui.horizontal_wrapped(|ui| {
+            for (index, preview) in previews.iter().enumerate() {
+                if ui
+                    .selectable_label(
+                        self.selected_preview == index,
+                        preview_label(&preview.name, self.preview_dimensions.get(&preview.name)),
+                    )
+                    .clicked()
+                {
+                    self.select_preview(index);
                 }
-            });
-            ui.add_space(4.0);
-        } else if let Some(preview) = previews.first() {
-            ui.label(preview_label(
-                &preview.name,
-                self.preview_dimensions.get(&preview.name),
-            ));
-            ui.add_space(4.0);
-        }
-        let available = ui.available_size_before_wrap();
-        let height = (available.y * 0.58)
-            .max(160.0)
-            .min((available.y - 100.0).max(160.0));
-        let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(available.x.max(1.0), height),
-            egui::Sense::hover(),
-        );
-        ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
-        if let Some(preview) = previews.get(self.selected_preview) {
-            if let Some(texture) = self.preview_textures.get(&preview.name) {
-                let texture_size = texture.size_vec2();
-                if texture_size.x > 0.0 && texture_size.y > 0.0 {
-                    let scale = (rect.width() / texture_size.x)
-                        .min(rect.height() / texture_size.y)
-                        .max(0.01);
-                    let image_rect =
-                        egui::Rect::from_center_size(rect.center(), texture_size * scale);
-                    ui.painter().image(
-                        texture.id(),
-                        image_rect,
-                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                        egui::Color32::WHITE,
-                    );
-                }
-            } else {
-                let status = self
-                    .preview_status
-                    .get(&preview.name)
-                    .map(String::as_str)
-                    .unwrap_or("Waiting for preview frame");
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    status,
-                    egui::TextStyle::Body.resolve(ui.style()),
-                    egui::Color32::LIGHT_GRAY,
-                );
+            }
+        });
+        let name = previews
+            .get(self.selected_preview)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let transform = self.preview_transforms.entry(name.clone()).or_default();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .button(if self.preview_maximized {
+                    "Restore preview"
+                } else {
+                    "Maximize preview"
+                })
+                .clicked()
+            {
+                self.preview_maximized = !self.preview_maximized;
+            }
+            if ui.button("−").on_hover_text("Zoom out").clicked() {
+                transform.zoom_at(1.0 / 1.25, egui::Vec2::ZERO);
+            }
+            ui.label(format!("{:.0}%", transform.zoom * 100.0));
+            if ui.button("+").on_hover_text("Zoom in").clicked() {
+                transform.zoom_at(1.25, egui::Vec2::ZERO);
+            }
+            if ui
+                .button("Fit")
+                .on_hover_text("Reset zoom and pan")
+                .clicked()
+            {
+                *transform = PreviewTransform::default();
+            }
+        });
+        ui.weak("Wheel to zoom · Drag to pan · Double-click to fit");
+        if let Some(status) = self.preview_status.get(&name) {
+            if status != "Live preview" {
+                ui.colored_label(egui::Color32::LIGHT_RED, status);
             }
         }
-        ui.add_space(10.0);
+        let available = ui.available_size_before_wrap().max(egui::vec2(1.0, 1.0));
+        let response = ui.allocate_response(available, egui::Sense::click_and_drag());
+        let rect = response.rect;
+        interact_preview(ui, &response, transform);
+        let painter = ui.painter().with_clip_rect(rect);
+        painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+        if let Some(texture) = self.preview_textures.get(&name) {
+            let size = texture.size_vec2();
+            let fit = (rect.width() / size.x).min(rect.height() / size.y);
+            let image_rect = egui::Rect::from_center_size(
+                rect.center() + transform.pan,
+                size * fit * transform.zoom,
+            );
+            painter.image(
+                texture.id(),
+                image_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        } else {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Waiting for preview frame",
+                egui::TextStyle::Body.resolve(ui.style()),
+                egui::Color32::LIGHT_GRAY,
+            );
+        }
     }
 
     fn draw_commands(&mut self, ui: &mut egui::Ui) {
@@ -774,7 +1094,7 @@ impl HmUiApp {
         ui.label("Level vertical posts and crop a calibrated NONA panorama in the browser.");
         ui.monospace("bazelisk build //hm-ui:hm-ui");
         ui.add_space(14.0);
-        ui.label("This panel is intentionally a launcher guide for now. The tracking process remains the owner of video, detector, and stitch runtime state.");
+        ui.label("Use Games & Sources to import recordings and Runs & Logs to launch or inspect processing. Setup stores options for the next run; Runtime controls the active preview.");
     }
 
     fn draw_status(&mut self, ui: &mut egui::Ui) {
@@ -790,32 +1110,268 @@ impl HmUiApp {
     }
 }
 
+fn missing_file(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
+impl HmUiApp {
+    fn draw(&mut self, ctx: &egui::Context) {
+        if let Some(workspace) = &mut self.workspace {
+            if !workspace.draw_navigation(ctx) {
+                workspace.draw_content(ctx);
+                return;
+            }
+        }
+        if self.preview_maximized && ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.preview_maximized = false;
+        }
+        egui::TopBottomPanel::top("top").show(ctx, |ui| self.draw_top_bar(ui));
+        egui::TopBottomPanel::bottom("feedback").show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(&self.status);
+                if let Some(feedback) = &self.action_feedback {
+                    ui.separator();
+                    ui.label(feedback);
+                }
+            });
+        });
+        if !self.preview_maximized {
+            let max_width = (ctx.screen_rect().width() * 0.55).max(280.0);
+            egui::SidePanel::right("controls")
+                .default_width(350.0)
+                .min_width(280.0)
+                .max_width(max_width)
+                .resizable(true)
+                .show(ctx, |ui| {
+                    self.draw_sidebar(ui);
+                    let pages = control_pages(&self.spec);
+                    if let Some(page) = pages.get(self.selected_page) {
+                        self.draw_controls(ui, page);
+                    } else if self.selected_page == pages.len() {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.draw_commands(ui));
+                    } else if self.selected_page == pages.len() + 1 {
+                        egui::ScrollArea::vertical().show(ui, |ui| self.draw_status(ui));
+                    } else {
+                        ui.label("No controls for this view");
+                    }
+                });
+        }
+        egui::CentralPanel::default().show(ctx, |ui| self.draw_preview(ui));
+    }
+}
+
 impl eframe::App for HmUiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_spec();
         self.poll_action_ack();
+        self.poll_runtime();
         self.poll_preview(ctx);
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            self.draw_top_bar(ui);
-        });
-        egui::SidePanel::left("sidebar")
-            .min_width(160.0)
-            .resizable(false)
-            .show(ctx, |ui| {
-                self.draw_sidebar(ui);
-            });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            self.draw_preview(ui);
-            let pages = control_pages(&self.spec);
-            if let Some(page) = pages.get(self.selected_page) {
-                self.draw_controls(ui, page);
-            } else if self.selected_page == pages.len() {
-                self.draw_commands(ui);
-            } else {
-                self.draw_status(ui);
-            }
-        });
+        self.draw(ctx);
         ctx.request_repaint_after(Duration::from_millis(100));
+    }
+}
+
+fn view_label(name: &str) -> &str {
+    if name == "Final" {
+        "Program"
+    } else {
+        name
+    }
+}
+
+fn action_label(kind: &str) -> &str {
+    match kind {
+        "save" => "Save",
+        "reset-open" => "Open-time defaults",
+        "reset-system" => "System defaults",
+        "pause" => "Pause",
+        "resume" => "Resume",
+        "step" => "Step batch",
+        "stop" => "Stop",
+        _ => kind,
+    }
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn playback_time(seconds: f64) -> String {
+    let milliseconds = (seconds * 1000.0).round() as u64;
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        milliseconds / 3_600_000,
+        milliseconds / 60_000 % 60,
+        milliseconds / 1000 % 60,
+        milliseconds % 1000
+    )
+}
+
+fn parse_runtime_status(data: &str) -> Result<RuntimeStatus> {
+    let status: RuntimeStatus = serde_json::from_str(data).context("parse runtime status")?;
+    anyhow::ensure!(
+        matches!(
+            status.state.as_str(),
+            "running" | "paused" | "stopping" | "finished" | "error"
+        ),
+        "unknown runtime state: {}",
+        status.state
+    );
+    anyhow::ensure!(
+        status.fps.is_none_or(|fps| fps.is_finite() && fps > 0.0),
+        "runtime fps must be positive"
+    );
+    anyhow::ensure!(
+        status
+            .rate
+            .is_none_or(|rate| rate.is_finite() && rate >= 0.0),
+        "runtime rate must be nonnegative"
+    );
+    Ok(status)
+}
+
+fn validate_spec(spec: &UiSpec) -> Result<()> {
+    for window in &spec.windows {
+        for control in &window.controls {
+            anyhow::ensure!(
+                control.min_value <= control.max_value,
+                "{}: minimum exceeds maximum",
+                control.name
+            );
+            anyhow::ensure!(
+                control
+                    .divisor
+                    .is_none_or(|divisor| divisor.is_finite() && divisor != 0.0)
+                    && control.offset.is_finite(),
+                "{}: invalid numeric units",
+                control.name
+            );
+        }
+    }
+    Ok(())
+}
+
+fn control_label(control: &ControlSpec) -> String {
+    if control.label.is_empty() {
+        display_name(&control.name)
+    } else {
+        control.label.clone()
+    }
+}
+
+fn numeric_units(control: &ControlSpec) -> (f64, f64, String) {
+    if let Some(divisor) = control.divisor {
+        return (divisor, control.offset, control.unit.clone());
+    }
+    let (divisor, offset, unit) = if control.name == "Exposure_EV_x10" {
+        (10.0, -4.0, "EV")
+    } else if control.name.ends_with("_x100") {
+        (100.0, 0.0, "")
+    } else if control.name.ends_with("_x10") {
+        (10.0, 0.0, "")
+    } else if control.name.contains("Kelvin") || control.name.contains("Temperature") {
+        (1.0, 0.0, "K")
+    } else if control.name.ends_with("_Degrees") {
+        (-1.0, 90.0, "deg")
+    } else {
+        (1.0, 0.0, "")
+    };
+    (divisor, offset, unit.to_string())
+}
+
+fn format_control_value(control: &ControlSpec, value: i32) -> String {
+    if !control.choices.is_empty()
+        || control.divisor.is_none()
+        || control.max_value == 1 && control.min_value == 0
+    {
+        return format_choice_value(&control.name, value, control.max_value, &control.choices);
+    }
+    let (divisor, offset, unit) = numeric_units(control);
+    let display = value as f64 / divisor + offset;
+    let decimals = divisor.abs().log10().ceil().max(0.0) as usize;
+    format!("{display:.decimals$} {unit}")
+        .trim_end()
+        .to_string()
+}
+
+/// Value widgets must leave wheel input for their enclosing ScrollArea, even
+/// when a slider has keyboard focus or a DragValue is hovered.
+fn without_value_scroll<R>(ui: &mut egui::Ui, draw: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let scroll = ui.input_mut(|input| {
+        let scroll = (input.raw_scroll_delta, input.smooth_scroll_delta);
+        input.raw_scroll_delta = egui::Vec2::ZERO;
+        input.smooth_scroll_delta = egui::Vec2::ZERO;
+        scroll
+    });
+    let result = draw(ui);
+    ui.input_mut(|input| {
+        input.raw_scroll_delta = scroll.0;
+        input.smooth_scroll_delta = scroll.1;
+    });
+    result
+}
+
+fn numeric_editor(ui: &mut egui::Ui, control: &ControlSpec, value: &mut i32) -> egui::Response {
+    let (divisor, offset, unit) = numeric_units(control);
+    let mut display = *value as f64 / divisor + offset;
+    let first = control.min_value as f64 / divisor + offset;
+    let last = control.max_value as f64 / divisor + offset;
+    let response = without_value_scroll(ui, |ui| {
+        ui.add(
+            egui::DragValue::new(&mut display)
+                .range(first.min(last)..=first.max(last))
+                .speed(1.0 / divisor.abs())
+                .max_decimals(4)
+                .update_while_editing(false)
+                .suffix(if unit.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {unit}")
+                }),
+        )
+    })
+    .on_hover_text("Click to type a value; drag to adjust. Wheel scrolls the controls.");
+    if response.changed() {
+        *value = ((display - offset) * divisor)
+            .round()
+            .clamp(control.min_value as f64, control.max_value as f64) as i32;
+    }
+    response
+}
+
+fn interact_preview(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    transform: &mut PreviewTransform,
+) {
+    if response.double_clicked() {
+        *transform = PreviewTransform::default();
+        return;
+    }
+    if response.hovered() {
+        let scroll = ui.input_mut(|input| {
+            let scroll = input.smooth_scroll_delta.y;
+            input.smooth_scroll_delta = egui::Vec2::ZERO;
+            scroll
+        });
+        if scroll != 0.0 {
+            let anchor =
+                response.hover_pos().unwrap_or(response.rect.center()) - response.rect.center();
+            transform.zoom_at((scroll * 0.004).exp(), anchor);
+        }
+    }
+    if response.dragged() && transform.zoom > 1.0 {
+        transform.pan += response.drag_delta();
+    }
+    let limit = response.rect.size() * transform.zoom;
+    transform.pan = transform.pan.clamp(-limit, limit);
+    if transform.zoom > 1.0 {
+        response.clone().on_hover_cursor(egui::CursorIcon::Grab);
     }
 }
 
@@ -978,11 +1534,21 @@ fn main() -> Result<()> {
         native_options,
         Box::new(move |cc| {
             configure_ui(&cc.egui_ctx);
-            Ok(Box::new(HmUiApp::new(
-                args.spec.clone(),
-                args.state.clone(),
-                title.clone(),
-            )))
+            let spec = args.spec.clone().unwrap_or_else(|| {
+                args.workspace
+                    .as_ref()
+                    .expect("workspace or spec required")
+                    .join("live/spec.json")
+            });
+            let state = args.state.clone().unwrap_or_else(|| {
+                args.workspace
+                    .as_ref()
+                    .expect("workspace or state required")
+                    .join("live/state.json")
+            });
+            let mut app = HmUiApp::new(spec, state, title.clone());
+            app.workspace = args.workspace.clone().map(workspace::WorkspaceUi::new);
+            Ok(Box::new(app))
         }),
     )
     .map_err(|err| anyhow::anyhow!("{err}"))
@@ -999,7 +1565,7 @@ mod tests {
             preview_label("Stitched", Some(&dimensions)),
             "Stitched (8192 × 3052)"
         );
-        assert_eq!(preview_label("Final", None), "Final");
+        assert_eq!(preview_label("Final", None), "Program");
     }
 
     #[test]
@@ -1053,3 +1619,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod input_tests;
