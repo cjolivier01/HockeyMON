@@ -210,32 +210,15 @@ def iou_matrix(a: list[tuple[float, float, float, float]], b: list[tuple[float, 
 
 
 def unmatched_detections(detections, annotated, threshold: float) -> list[int]:
-    """Indices of detections that no annotated box claims, greedily matched.
+    """Indices of detections that do not overlap any authoritative annotation.
 
-    Greedy by descending IoU rather than per-detection best-match: two
-    detections on one annotated person would otherwise both be kept, and the
-    loser would be written out as crowd standing exactly where a player is.
+    Suppress all duplicates on a labelled person. An annotation can claim
+    multiple detections; a one-to-one match would relabel the losers as crowd.
     """
     if not detections or not annotated:
         return list(range(len(detections)))
     ious = iou_matrix([d["xyxy"] for d in detections], [a["xyxy"] for a in annotated])
-    pairs = sorted(
-        (
-            (ious[i][j], i, j)
-            for i in range(len(detections))
-            for j in range(len(annotated))
-            if ious[i][j] >= threshold
-        ),
-        reverse=True,
-    )
-    taken_detection: set[int] = set()
-    taken_annotation: set[int] = set()
-    for _, i, j in pairs:
-        if i in taken_detection or j in taken_annotation:
-            continue
-        taken_detection.add(i)
-        taken_annotation.add(j)
-    return [i for i in range(len(detections)) if i not in taken_detection]
+    return [i for i, row in enumerate(ious) if max(row) < threshold]
 
 
 def build_detector(args):

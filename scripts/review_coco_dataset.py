@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import itertools
 import json
 import subprocess
 import sys
@@ -131,6 +132,20 @@ def draw(frame, record: dict, names: dict[int, str], sequence: str):
     return frame
 
 
+def render(record: dict, images_root: Path, names: dict[int, str], sequence: str, scale: float):
+    """Draw in the annotations' original coordinates, then scale the whole preview."""
+    import cv2
+
+    path = images_root / record["file_name"]
+    frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise SystemExit(f"cannot read {path} (is --images the right root?)")
+    frame = draw(frame, record, names, sequence)
+    if scale != 1.0:
+        frame = cv2.resize(frame, None, fx=scale, fy=scale)
+    return frame
+
+
 def encode(frames, out_path: Path, size: tuple[int, int], fps: int, crf: int):
     """Pipe BGR frames to ffmpeg as H.264.
 
@@ -215,13 +230,7 @@ def main() -> int:
 
         def rendered(records=records, sequence=name):
             for record in records:
-                path = args.images / record["file_name"]
-                frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
-                if frame is None:
-                    raise SystemExit(f"cannot read {path} (is --images the right root?)")
-                if args.scale != 1.0:
-                    frame = cv2.resize(frame, None, fx=args.scale, fy=args.scale)
-                yield draw(frame, record, names, sequence)
+                yield render(record, args.images, names, sequence, args.scale)
 
         if args.stills:
             step = max(1, len(records) // args.stills)
@@ -229,26 +238,20 @@ def main() -> int:
             directory = args.out / name
             directory.mkdir(parents=True, exist_ok=True)
             for record in chosen:
-                frame = cv2.imread(str(args.images / record["file_name"]), cv2.IMREAD_COLOR)
-                if frame is None:
-                    raise SystemExit(f"cannot read {args.images / record['file_name']}")
-                if args.scale != 1.0:
-                    frame = cv2.resize(frame, None, fx=args.scale, fy=args.scale)
                 cv2.imwrite(
                     str(directory / f"{record['frame_index']:06d}.jpg"),
-                    draw(frame, record, names, name),
+                    render(record, args.images, names, name, args.scale),
                 )
             print(f"{name}: {len(chosen)} stills -> {directory}")
             continue
 
-        first = cv2.imread(str(args.images / records[0]["file_name"]), cv2.IMREAD_COLOR)
-        if first is None:
-            raise SystemExit(f"cannot read {args.images / records[0]['file_name']}")
+        frames = rendered()
+        first = next(frames)
         height, width = first.shape[:2]
-        if args.scale != 1.0:
-            height, width = round(height * args.scale), round(width * args.scale)
         out_path = args.out / f"{name}.mp4"
-        written = encode(rendered(), out_path, (width, height), args.fps, args.crf)
+        written = encode(
+            itertools.chain((first,), frames), out_path, (width, height), args.fps, args.crf
+        )
         print(f"{name}: {written} frames -> {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
 
     return 0

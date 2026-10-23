@@ -7,6 +7,36 @@ CUDA_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "cuda" else ["@platforms//:in
 ROCM_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "rocm" else ["@platforms//:incompatible"]
 
 sh_test(
+    name = "test_detector_tooling",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_detector_tooling.py", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//:scripts/compare_detectors.py",
+        "//:scripts/crowdhuman_to_hockey_classes.py",
+        "//:scripts/hockey_tracking_to_coco.py",
+        "//:scripts/slice_detector_head.py",
+        "python_runtime.sh",
+        "test_detector_tooling.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_detector_review",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_detector_review.py", "cv2", "numpy", "pytest"],
+    data = [
+        "//:pyproject.toml",
+        "//:scripts/fiftyone_review.py",
+        "//:scripts/review_coco_dataset.py",
+        "python_runtime.sh",
+        "test_detector_review.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
     name = "test_hockey_pose_contract",
     srcs = ["runtime_pytest.sh"],
     args = ["tests/test_hockey_pose_contract.py", "pytest"],
