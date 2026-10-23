@@ -27,9 +27,9 @@ features:
   residual_scale: 0.1
 
 sampling:
-  # Runtime attention context and independently configurable training horizon.
-  seq_len: 32
-  rollout_len: 128
+  # At 59.94 FPS: 4.27 seconds of attention and an 8.54-second training rollout.
+  seq_len: 256
+  rollout_len: 512
   sample_stride: 1
   # Games are uniform within worker shards; runs are weighted by window count.
   run_sampling: windows
@@ -40,8 +40,9 @@ sampling:
   pin_memory: true
 
 optimization:
-  # Per-rank batch size: two GPUs give an effective batch size of 32.
-  batch_size: 16
+  # Per-GPU batch: long rollouts retain each prediction's graph until backward.
+  # Increase only after measuring a full training step on the target GPU.
+  batch_size: 1
   steps: 100000
   lr: 0.0001
   scheduled_sampling: true
@@ -54,8 +55,8 @@ optimization:
   loss_acc_weight: 0.1
 
 validation:
-  # Longer rollouts expose drift; attention retains the 32-frame runtime context.
-  val_seq_len: 256
+  # About 17.08 seconds at 59.94 FPS, retaining the 256-frame attention context.
+  val_seq_len: 1024
   # Preserve validation sampling if the training batch changes.
   val_batch_size: 16
   val_steps: 16

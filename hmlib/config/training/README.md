@@ -63,10 +63,15 @@ Output/checkpoint paths follow normal CLI working-directory semantics.
 `seq_len` is the runtime attention context stored in checkpoints. `rollout_len`
 controls how many consecutive training frames the model practices with that
 sliding context; it defaults to `seq_len` and cannot be shorter. The official
-recipe uses context 32 and training horizon 128 to expose accumulated feedback
-drift. Longer rollouts retain more autograd activations; reduce training
-`batch_size` if GPU memory requires it. `val_batch_size` defaults to `batch_size`;
-set it explicitly to preserve validation sampling while changing training batches.
+recipe uses a 256-frame context (about 4.27 seconds at 59.94 FPS) and a 512-frame
+training rollout (about 8.54 seconds) to expose accumulated feedback drift.
+These lengths apply when loading the recipe with `--config`; the bare CLI retains
+its separate defaults. The recipe uses `batch_size: 1` per GPU because each
+prediction's graph remains live until the rollout's backward pass. Increase it
+only after measuring peak memory for a full forward/backward training step on the
+target GPU; full-recipe memory and throughput have not been benchmarked.
+The recipe keeps `val_batch_size: 16` independently, since validation runs without
+gradients. Without that explicit setting, `val_batch_size` defaults to `batch_size`.
 Training frame budgets count `rollout_len * batch_size * world_size` per step.
 Changing training horizon/batch size preserves compatible evaluation history when
 validation batch size and the other validation settings remain unchanged.
@@ -184,13 +189,13 @@ use spawn to avoid forking a live CUDA/NCCL process.
 The official target is **mean IoU >= 0.97 for the slow camera box** on held-out
 games. It measures overlap of the final smooth 16:9 view, not classification
 accuracy. Optional `slow_fast_tlwh` runs require both box metrics to meet the target. The default evaluates
-fixed-seed sampled 256-frame autoregressive rollouts, with a sliding 32-frame
+fixed-seed sampled 1024-frame autoregressive rollouts, with a sliding 256-frame
 context matching runtime. Each rollout starts from the recorded previous camera
 state (or a full-frame state at a run boundary); subsequent feedback comes from
 the model with aspect fitting and normalized box clamping. Runtime additionally
 fits boxes to the actual frame/arena bounds; the CSV metric does not reproduce
-those per-game bounds. This evaluates about 8.5 seconds at
-30 FPS; it is not a claim about uninterrupted full-game rollout accuracy.
+those per-game bounds. This evaluates about 17.08 seconds at
+59.94 FPS; it is not a claim about uninterrupted full-game rollout accuracy.
 
 `*.metrics.jsonl` records the dataset/split identity, resolved arguments,
 validation protocol, distributed metrics, and whether the target was met.
@@ -202,6 +207,10 @@ unmet. Increase `--steps` to continue the same run. The newest checkpoint by sto
 step is selected across best and numbered checkpoints; optimizer and validation
 history are restored. Resumption continues stochastic training but does not
 replay the exact pre-interruption data-loader/RNG state.
+
+Changing the attention context or validation rollout changes the evaluation
+protocol and cannot resume an existing run's validation history. Use a separate
+output directory for the new recipe.
 
 ```bash
 bazelisk test //tests:test_camera_gpt //tests:test_drivegpt_training
