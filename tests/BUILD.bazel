@@ -9,7 +9,7 @@ ROCM_TEST_COMPATIBLE_WITH = [] if TORCH_BACKEND == "rocm" else ["@platforms//:in
 sh_test(
     name = "test_detector_tooling",
     srcs = ["runtime_pytest.sh"],
-    args = ["tests/test_detector_tooling.py", "pytest", "torch", "yaml"],
+    args = ["tests/test_detector_tooling.py", "mmengine", "pytest", "torch", "yaml"],
     data = [
         "//:pyproject.toml",
         "//:scripts/compare_detectors.py",

@@ -1,9 +1,11 @@
 """CPU regressions for detector dataset preparation and partial-label evaluation."""
 
 import collections
+import contextlib
 import json
 import sys
 import weakref
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,28 @@ from scripts import compare_detectors as compare
 from scripts import crowdhuman_to_hockey_classes as remap
 from scripts import hockey_tracking_to_coco as convert
 from scripts import slice_detector_head as reshape
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+def should_load_config_on_python310_and_restore_cwd(tmp_path, monkeypatch, invalid):
+    # Remove the 3.11 helper even on newer interpreters. Parse an actual
+    # MMEngine config with a relative file read from its repository root.
+    monkeypatch.delattr(contextlib, "chdir", raising=False)
+    root = tmp_path / "openmm"
+    config = root / "configs/hm/model.py"
+    config.parent.mkdir(parents=True)
+    (root / "marker.txt").write_text("from openmm")
+    config.write_text(
+        "value = open('marker.txt').read()\n"
+        + ("raise ValueError('broken config')\n" if invalid else "")
+    )
+    previous = Path.cwd()
+    if invalid:
+        with pytest.raises(ValueError, match="broken config"):
+            compare.load_model_config(config)
+    else:
+        assert compare.load_model_config(config).value == "from openmm"
+    assert Path.cwd() == previous
 
 
 def should_keep_duplicate_player_predictions_out_of_spectator_labels():

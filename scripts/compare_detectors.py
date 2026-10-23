@@ -34,8 +34,8 @@ from __future__ import annotations
 
 import argparse
 import collections
-import contextlib
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -95,21 +95,31 @@ def build_baseline(graph: str, device: str):
     )
 
 
-def build_finetuned(config_path: Path, checkpoint: Path, device: str, use_ema: bool):
-    import mmdet.models  # noqa: F401
-    import mmyolo.models  # noqa: F401
-    import torch
+def load_model_config(config_path: Path):
+    """Parse relative training data paths without leaving the caller's directory."""
     from mmengine.config import Config
-    from mmengine.registry import MODELS, init_default_scope
 
-    init_default_scope("mmyolo")
     # Parsed from the openmm root. The config resolves `data/crowdhuman/`
     # relative to the cwd, as every config in that tree does, and it reads
     # the file at parse time to size the mix -- so parsing it from anywhere
     # else raises even though only `cfg.model` is wanted here.
     config_path = config_path.resolve()
-    with contextlib.chdir(config_path.parents[2]):
-        cfg = Config.fromfile(str(config_path), import_custom_modules=False)
+    previous = Path.cwd()
+    try:
+        os.chdir(config_path.parents[2])
+        return Config.fromfile(str(config_path), import_custom_modules=False)
+    finally:
+        os.chdir(previous)
+
+
+def build_finetuned(config_path: Path, checkpoint: Path, device: str, use_ema: bool):
+    import mmdet.models  # noqa: F401
+    import mmyolo.models  # noqa: F401
+    import torch
+    from mmengine.registry import MODELS, init_default_scope
+
+    init_default_scope("mmyolo")
+    cfg = load_model_config(config_path)
     # Roles are mutually exclusive. Suppress across roles before collapsing
     # to person, just as the deployed multi-class detector does.
     cfg.model.test_cfg.multi_label = False
