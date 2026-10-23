@@ -261,7 +261,7 @@ def should_concatenate_imported_chapters_without_replacing_originals(workspace, 
         sources.append(source)
     workspace.import_videos({"role": "source", "paths": [str(path) for path in sources]})
     job = workspace.dispatch("games.concatenate", {"role": "source"})
-    record = wait_job(workspace, job["id"])
+    record = wait_job(workspace, job["id"], timeout=30)
     assert record["status"] == "completed", workspace.jobs.log(job["id"])
     joined = Path(record["result"]["path"])
     assert workspace.media.info(joined)["duration_ms"] == pytest.approx(1000, abs=100)
