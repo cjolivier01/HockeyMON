@@ -7,6 +7,12 @@ exports_files(
         "scripts/hm_cuda_container.py",
         "scripts/hockey_data.py",
         "scripts/hockey_pose_contract.py",
+        "scripts/compare_detectors.py",
+        "scripts/crowdhuman_to_hockey_classes.py",
+        "scripts/fiftyone_review.py",
+        "scripts/hockey_tracking_to_coco.py",
+        "scripts/review_coco_dataset.py",
+        "scripts/slice_detector_head.py",
         "scripts/capture_stitching_projection_frames.py",
     ]
 )

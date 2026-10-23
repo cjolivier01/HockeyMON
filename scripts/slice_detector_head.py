@@ -37,7 +37,7 @@ import torch
 #: COCO index the CrowdHuman run trains people into.
 PERSON_ROW = 0
 
-#: Output head width: player, referee.
+#: Default output head width: player, referee.
 NUM_CLASSES = 2
 
 
@@ -46,11 +46,21 @@ def _is_class_layer(key: str) -> bool:
     return "cls_preds" in key and key.endswith((".2.weight", ".2.bias"))
 
 
-def slice_state_dict(state_dict: dict, source_rows: int) -> tuple[dict, int]:
+def slice_state_dict(
+    state_dict: dict, source_rows: int, num_classes: int = NUM_CLASSES
+) -> tuple[dict, int]:
+    """Rewrite every class-shaped layer to ``num_classes`` copies of the person row.
+
+    Works in both directions. Narrowing an 80-class COCO head to two is the
+    original case; widening the 1-class CrowdHuman head to the on-ice roles is
+    the same operation, because the init is a copy of one row either way --
+    every output class starts as the person detector and fine-tuning only has
+    to learn what distinguishes the roles from each other.
+    """
     out, touched = {}, 0
     for key, value in state_dict.items():
         if _is_class_layer(key) and value.shape[0] == source_rows:
-            rows = [PERSON_ROW] * NUM_CLASSES
+            rows = [PERSON_ROW] * num_classes
             out[key] = value[rows].clone()
             touched += 1
         else:
@@ -63,23 +73,32 @@ def main() -> int:
     parser.add_argument("--src", required=True, type=Path)
     parser.add_argument("--dst", required=True, type=Path)
     parser.add_argument("--source-classes", type=int, default=80)
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=NUM_CLASSES,
+        help="output head width; every row is seeded from the source person row",
+    )
     args = parser.parse_args()
+
+    if args.num_classes < 1:
+        raise SystemExit(f"--num-classes must be at least 1, got {args.num_classes}")
 
     checkpoint = torch.load(args.src, map_location="cpu", weights_only=False)
     state_dict = checkpoint.get("state_dict", checkpoint)
 
-    sliced, touched = slice_state_dict(state_dict, args.source_classes)
+    sliced, touched = slice_state_dict(state_dict, args.source_classes, args.num_classes)
     if touched == 0:
         raise SystemExit(
             f"no {args.source_classes}-row cls_preds layers found in {args.src}; "
-            "the checkpoint is not the 80-class CrowdHuman head this expects"
+            f"pass --source-classes to match the head this checkpoint actually has"
         )
 
     # Drop optimizer/EMA state: it is shaped for the old head and for a finished
     # schedule, and carrying it into a fresh fine-tune would fight the new LR.
     out = {"state_dict": sliced, "meta": checkpoint.get("meta", {})}
     torch.save(out, args.dst)
-    print(f"rewrote {touched} class layers {args.source_classes} -> {NUM_CLASSES}")
+    print(f"rewrote {touched} class layers {args.source_classes} -> {args.num_classes}")
     print(f"wrote {args.dst} ({args.dst.stat().st_size / 1e6:.0f} MB)")
     return 0
 
