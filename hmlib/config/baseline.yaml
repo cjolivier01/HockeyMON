@@ -417,15 +417,19 @@ stitching:
     tv-dublin:
       display_name: "TV Dublin"
       rotation_degrees: [0, -23.5, 3.23]
-      rink_mask_frame_time: "-00:00:01"
     fremont:
       display_name: "Sharks Ice Fremont"
       rotation_degrees: [0, -15, 0]
-      rink_mask_frame_time: "-00:00:01"
-  # Final ice-mask frame: null inherits the selected rink; auto uses the current
-  # first stitched frame. A negative [-]HH:MM:SS[.mmm] time is relative to the
-  # synchronized recording end, independently of Playback start and run limits.
+  # Final ice-mask frame: null inherits the selected rink, then
+  # rink_mask_frame_time_default; auto uses the current first stitched frame.
+  # A negative time is relative to the synchronized recording end,
+  # independently of Playback start and run limits. Times are
+  # [-][[HH:]MM:]SS[.mmm], so -1 and -00:00:01 are the same second.
   rink_mask_frame_time: null
+  # Ice-mask frame used when neither the game nor the selected rink names one.
+  # Required: there is no compiled-in default. The last second of the recording
+  # is cleaner ice than the first stitched frame, which is usually warmup.
+  rink_mask_frame_time_default: "-00:00:01"
   # Unselected keeps legacy zero rotation; select a venue in the game config.
   rink_config: null
   pto_project_file: null
