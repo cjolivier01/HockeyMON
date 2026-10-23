@@ -40,8 +40,9 @@ sampling:
   pin_memory: true
 
 optimization:
-  # Per-rank batch size: two GPUs give an effective batch size of 32.
-  batch_size: 16
+  # Per-GPU batch: long rollouts retain each prediction's graph until backward.
+  # Increase only after measuring a full training step on the target GPU.
+  batch_size: 1
   steps: 100000
   lr: 0.0001
   scheduled_sampling: true

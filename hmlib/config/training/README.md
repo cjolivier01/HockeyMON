@@ -66,9 +66,12 @@ sliding context; it defaults to `seq_len` and cannot be shorter. The official
 recipe uses a 256-frame context (about 4.27 seconds at 59.94 FPS) and a 512-frame
 training rollout (about 8.54 seconds) to expose accumulated feedback drift.
 These lengths apply when loading the recipe with `--config`; the bare CLI retains
-its separate defaults. Longer rollouts retain more autograd activations; reduce training
-`batch_size` if GPU memory requires it. `val_batch_size` defaults to `batch_size`;
-set it explicitly to preserve validation sampling while changing training batches.
+its separate defaults. The recipe uses `batch_size: 1` per GPU because each
+prediction's graph remains live until the rollout's backward pass. Increase it
+only after measuring peak memory for a full forward/backward training step on the
+target GPU; full-recipe memory and throughput have not been benchmarked.
+The recipe keeps `val_batch_size: 16` independently, since validation runs without
+gradients. Without that explicit setting, `val_batch_size` defaults to `batch_size`.
 Training frame budgets count `rollout_len * batch_size * world_size` per step.
 Changing training horizon/batch size preserves compatible evaluation history when
 validation batch size and the other validation settings remain unchanged.
