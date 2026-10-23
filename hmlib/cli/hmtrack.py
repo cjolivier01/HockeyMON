@@ -2708,7 +2708,11 @@ def main():
         default_aspen = os.path.join(ROOT_DIR, "config", "aspen", "tracking.yaml")
         if os.path.exists(default_aspen):
             additional_cfg_paths.append(default_aspen)
-    built_in_graph_directory = (Path(ROOT_DIR) / "config" / "aspen").resolve()
+    # Bazel runfiles link each YAML individually, so its resolved parent may
+    # differ from the directory containing the shipped graph entries.
+    built_in_graphs = {
+        path.resolve() for path in (Path(ROOT_DIR) / "config" / "aspen").glob("*.yaml")
+    }
     for config_path in additional_cfg_paths:
         resolved_path = Path(config_path)
         if not resolved_path.is_absolute() and (Path(ROOT_DIR) / resolved_path).exists():
@@ -2716,7 +2720,7 @@ def main():
         merged_extra = load_yaml_files_ordered([config_path])
         if merged_extra:
             game_config = recursive_update(game_config, merged_extra)
-        if resolved_path.resolve().parent == built_in_graph_directory:
+        if resolved_path.resolve() in built_in_graphs:
             # Shipped graphs supply execution defaults. Saved operator choices
             # and preceding custom overlays take precedence over those defaults.
             apply_pipeline_preferences(game_config, saved_pipeline)
