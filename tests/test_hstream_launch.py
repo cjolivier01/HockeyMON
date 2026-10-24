@@ -473,3 +473,132 @@ def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_
     assert "--stitch-frame-time=00:00:03" in command
     assert "--stitch-frame-time=00:00:09" not in command
     assert (game / "config.yaml").read_bytes() == before
+
+
+def should_bind_shared_model_menu_arguments_to_exact_python_stages(game):
+    from hmlib.aspen.plugins.reid_plugin import configure_reid
+    from hmlib.ui.analytics_graph import NATIVE_POSE_CONFIG
+
+    arguments = ["-g", game.name, "--enable-sinks=FAKE"]
+    for feature, model in (
+        ("pose", "rtmpose-m-coco17-256x192"),
+        ("jersey", "parseq-hockey-cvprw2024"),
+        ("action", "stgcnpp-coco2d-joint-ntu60"),
+        ("team", "reidentificationnet-deployable-v1.2"),
+    ):
+        arguments += [
+            f"--options=pipeline.player-analytics.{feature}.enable=true",
+            f"--options=pipeline.player-analytics.{feature}.model={model}",
+        ]
+    arguments += [
+        "--options=pipeline.tracker.reid-enable=true",
+        "--options=pipeline.tracker.reid-model=deepstream",
+    ]
+    plan = make_plan(parser().parse_args(arguments))
+    nodes = plan.config["aspen"]["plugins"]
+    assert nodes["pose_factory"]["params"]["pose_config"] == NATIVE_POSE_CONFIG
+    assert nodes["pose_factory"]["params"]["shared_model"]["model"] == "rtmpose-m-coco17-256x192"
+    assert nodes["jersey_numbers"]["class"].endswith("ParseqJerseyPlugin")
+    assert nodes["actions"]["class"].endswith("TemporalActionPlugin")
+    assert plan.config["team"]["backend"] == "reidentificationnet"
+    assert set(plan.config["hm_ui"]["shared_analytics"]) == {
+        "pose",
+        "jersey",
+        "action",
+        "team",
+        "reid",
+    }
+    configure_reid(plan.config, game, validate_weights=False)
+    assert nodes["player_reid"]["params"]["tracker_config"].endswith("tracker.yaml")
+
+
+def should_preserve_shared_custom_bundles_and_rebind_them_after_seek(game, tmp_path):
+    from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+
+    bundle = tmp_path / "custom-pose"
+    bundle.mkdir()
+    plan = make_plan(
+        parser().parse_args(
+            [
+                "-g",
+                game.name,
+                "--options=pipeline.player-analytics.pose.enable=true",
+                "--options=pipeline.player-analytics.pose.model=custom",
+                f"--options=pipeline.player-analytics.pose.bundle={bundle}",
+            ]
+        )
+    )
+    prepared = {
+        "pipeline": {"player-analytics": {"pose": {"model": "custom", "bundle": str(bundle)}}}
+    }
+    apply_prepared_shared_analytics(plan.config, prepared)
+    assert plan.config["aspen"]["plugins"]["pose_factory"]["params"]["shared_model"] == {
+        "model": "custom",
+        "bundle": str(bundle),
+    }
+    prepared["pipeline"]["player-analytics"]["pose"]["bundle"] = str(tmp_path / "other")
+    with pytest.raises(ValueError, match="changed during the run"):
+        apply_prepared_shared_analytics(plan.config, prepared)
+
+
+def should_replace_legacy_analysis_preset_with_shared_independent_toggles(game):
+    config = yaml.safe_load((game / "config.yaml").read_text())
+    config["hm_ui"] = {"run": {"analytics": "tracking", "pose_model": "harpet"}}
+    (game / "config.yaml").write_text(yaml.safe_dump(config))
+    plan = make_plan(
+        parser().parse_args(
+            [
+                "-g",
+                game.name,
+                "--options=pipeline.player-analytics.pose.enable=true",
+                "--options=pipeline.player-analytics.pose.model=rtmpose-m-coco17-256x192",
+            ]
+        )
+    )
+    assert plan.config["hm_ui"]["run"]["analytics"] == "custom"
+    assert plan.config["hm_ui"]["run"]["pose_model"] == "shared"
+    assert "pose_factory" in plan.config["aspen"]["plugins"]
+
+
+@pytest.mark.parametrize("team", [{"backend": "prtreid"}, {"enabled": False}])
+def should_keep_initial_python_models_over_shared_menu_defaults(game, tmp_path, team):
+    from hmlib.aspen.plugins.reid_plugin import configure_reid
+
+    appearance = game / "operator-appearance.onnx"
+    appearance.touch()
+    initial_config = tmp_path / "initial-models.yaml"
+    initial_config.write_text(
+        yaml.safe_dump({"hm_ui": {"run": {"reid_onnx": str(appearance)}}, "team": team})
+    )
+    initial = tmp_path / "initial-models.json"
+    initial.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": ["--game-id", game.name, "--config", str(initial_config)],
+            }
+        )
+    )
+    plan = make_plan(
+        parser().parse_args(
+            [
+                "-g",
+                game.name,
+                "--options=pipeline.tracker.reid-enable=true",
+                "--options=pipeline.tracker.reid-model=deepstream",
+                "--options=pipeline.player-analytics.team.enable=true",
+                "--options=pipeline.player-analytics.team.model=reidentificationnet-deployable-v1.2",
+            ]
+        ),
+        initial=initial,
+    )
+    assert "reid" not in plan.config["hm_ui"]["shared_analytics"]
+    assert "team" not in plan.config["hm_ui"]["shared_analytics"]
+    assert all(plan.config["team"][key] == value for key, value in team.items())
+    configure_reid(plan.config, game)
+    assert plan.config["aspen"]["plugins"]["player_reid"]["params"] == {
+        "onnx_path": str(appearance)
+    }

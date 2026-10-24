@@ -6,11 +6,13 @@ separate Rust desktop. The default `hstream-ui` invocation still selects the
 native HStream Program pipeline.
 
 Install matching HStream `hstream-ui`, `hstream-cli` and
-`hstream-calibration-export` binaries alongside HockeyMON's `hm-cli`. See
+`hstream-calibration-export`, `hstream-model-prepare` and `hstream-model-infer`
+binaries alongside HockeyMON's `hm-cli`. See
 [the launcher README](../hm-ui/README.md) for source-checkout commands. A desktop
 started from a Bazel build selects its matching native runner; it does not
 silently use an unrelated installed executable. `HSTREAM_UI_BIN`, `HM_CLI_BIN`,
-`HSTREAM_NATIVE_RUNNER` and `HM_HSTREAM_CALIBRATION_EXPORT` provide explicit
+`HSTREAM_NATIVE_RUNNER`, `HM_HSTREAM_CALIBRATION_EXPORT`, `HM_HSTREAM_MODEL_PREPARE`
+and `HM_HSTREAM_MODEL_INFER` provide explicit
 overrides. `HM_CONFIG_ROOT` selects the matching native configuration directory.
 
 ## Ownership
@@ -109,6 +111,28 @@ uses the native recording sampler, Python model export/quantization and an
 immutable manifest containing the model identity and artifact digest. Selecting
 INT8 validates exactly the accepted engine and manifest; it does not guess a
 cache or start another export.
+
+The shared pose, jersey, action, team and appearance selections use their canonical
+`pipeline.player-analytics` and `pipeline.tracker` settings. Before Python starts,
+the supervised `hstream-model-prepare` helper uses HStream's model cache and
+publishes the resolved asset paths. Python validates model identities, bundle
+hashes and inference contracts. ONNX analytics execute the selected native model;
+the default DeepStream appearance option executes the prepared ETLT-derived
+TensorRT engine through `hstream-model-infer`, using the same native TensorRT
+runtime that built it. Its binary pipe carries batches of at most 32 preprocessed
+player crops and returns embeddings; full video frames never enter that pipe.
+This bounded host transfer isolates native engine compatibility from the Python
+environment's TensorRT version. Custom bundles retain their selected paths. Explicit initial
+Python model overrides remain authoritative for that launch. A seek retains the
+accepted assets; selecting a different model requires a new run. Stop cancels
+preparation before any Python worker starts.
+
+ONNX analytics use the installed ONNX Runtime providers. Automatic provider
+selection reports when CUDA is unavailable and uses CPU; explicitly requesting
+CUDA fails if that provider is unavailable. The native appearance helper still
+executes its prepared TensorRT engine on the GPU. Shared pose bundles produce
+COCO17 SimCC predictions directly; MMPose supplies crop preprocessing and
+coordinate decoding, while the selected ONNX replaces network execution.
 
 Python writes a publication receipt only after its publication transaction
 commits. The supervisor reports the exact successful artifacts; it never scans

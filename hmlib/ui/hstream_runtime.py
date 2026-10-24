@@ -766,6 +766,15 @@ class RuntimeProtocol:
             self.emit(f"runtime status failed: {error}")
             return
         if self._active_channel == "none":
+            # Qt needs transport readiness before it may activate a view. A
+            # render-off launch has no image to announce, but its frame owner
+            # and authenticated command mailbox are already available.
+            identity = (self._session_id, self._preview_generation, "none")
+            if self._session_id and identity != self._preview_ready_identity:
+                self._preview_ready_identity = identity
+                self.emit(
+                    f"HSTREAM_PREVIEW_RUNTIME status=ready channel=none generation={self._preview_generation}"
+                )
             return
         try:
             path = self._preview_path(self._active_channel)

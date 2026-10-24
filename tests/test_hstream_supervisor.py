@@ -433,6 +433,36 @@ def should_export_the_exact_native_canvas_cap(supervisor, monkeypatch, cap, refr
     assert supervisor.protocol.frame_offset == 300
 
 
+@pytest.mark.parametrize("start", [1.0, 120.0])
+@pytest.mark.parametrize("reference", [None, "00:00:02"])
+def should_calibrate_at_the_resolved_python_playback_origin(
+    supervisor, monkeypatch, start, reference
+):
+    from hmlib.stitching import native_calibration
+
+    supervisor.plan.start_seconds = start
+    supervisor.arguments = ["--start-time=00:00:00"]
+    if reference:
+        supervisor.plan.initial_settings = {"stitching": {"stitch_frame_time": reference}}
+    supervisor.native = "/unused/native"
+    supervisor.args.config = ["native.yaml"]
+    captured = []
+    monkeypatch.setattr(supervisor, "_spawn", lambda command, **kw: captured.append(command))
+    monkeypatch.setattr(supervisor, "_pump", lambda: 0)
+    monkeypatch.setattr(
+        native_calibration,
+        "prepare_native_calibration",
+        lambda *a, **kw: SimpleNamespace(directory=supervisor.session, frame_offsets=(0, 0)),
+    )
+    supervisor._prepare()
+    command = captured[0]
+    assert [token for token in command if token.startswith("--start-time=")] == [
+        f"--start-time={start:.9f}"
+    ]
+    if reference:
+        assert "--stitch-frame-time=" + reference in command
+
+
 @pytest.mark.parametrize("cap", [-1, True, 1.5, "4096", []])
 def should_reject_invalid_native_canvas_caps(cap):
     from hmlib.cli.hstream_backend import _native_max_output_width
@@ -598,3 +628,80 @@ def should_resolve_frame_bounds_in_delivered_time_for_mixed_camera_rates(supervi
         instance.selector.close()
         for kind, handler in instance._old_handlers.items():
             signal.signal(kind, handler)
+
+
+def should_prepare_shared_models_before_single_camera_processing(supervisor, monkeypatch):
+    from hmlib.ui import shared_analytics
+
+    supervisor.plan.sources = {"source": [supervisor.plan.game / "one.mp4"]}
+    supervisor.plan.config.update(
+        hm_ui={"shared_analytics": {"pose": "coco"}},
+        pipeline={"player-analytics": {"pose": {"enable": True, "model": "coco"}}},
+    )
+    application = supervisor.session / "ds_hockey_app_config.yaml"
+    application.write_text("tracker:\n  ll-config-file: /native/tracker.yaml\n  gpu-id: 0\n")
+    supervisor.args.config = [str(application)]
+    supervisor.native = "/matching/hstream-cli"
+    supervisor.environment["HM_HSTREAM_MODEL_PREPARE"] = "/bin/true"
+    calls = []
+    accepted = []
+
+    def spawn(command, *, phase):
+        calls.append((command, phase))
+        input_config = yaml.safe_load((supervisor.session / "models-input.yaml").read_text())
+        assert input_config["pipeline"]["tracker"]["ll-config-file"] == "/native/tracker.yaml"
+        assert input_config["pipeline"]["tracker"]["reid-enable"] is False
+        assert input_config["pipeline"]["player-analytics"]["pose"]["enable"] is True
+        assert input_config["pipeline"]["player-analytics"]["jersey"]["enable"] is False
+        output = supervisor.session / "models-resolved.yaml"
+        input_config["pipeline"]["player-analytics"]["pose"]["bundle"] = "/prepared/exact-pose"
+        output.write_text(yaml.safe_dump(input_config))
+        (supervisor.session / "models-receipt.json").write_text(
+            json.dumps({"version": 1, "status": "complete", "output": str(output)})
+        )
+
+    monkeypatch.setattr(supervisor, "_spawn", spawn)
+    monkeypatch.setattr(supervisor, "_pump", lambda: 0)
+    monkeypatch.setattr(
+        shared_analytics,
+        "apply_prepared_shared_analytics",
+        lambda config, prepared: accepted.append(prepared),
+    )
+    supervisor._prepare()
+    assert len(calls) == 1 and calls[0][1] == "models"
+    assert accepted == [supervisor.prepared_analytics]
+    assert accepted[0]["pipeline"]["player-analytics"]["pose"]["bundle"] == "/prepared/exact-pose"
+
+
+def should_not_start_calibration_after_model_preparation_is_cancelled(supervisor, monkeypatch):
+    def prepare():
+        supervisor.stop_requested = True
+
+    monkeypatch.setattr(supervisor, "_prepare_models", prepare)
+    monkeypatch.setattr(
+        supervisor, "_native_runner", lambda: pytest.fail("Calibration must not start after Stop")
+    )
+    supervisor._prepare()
+    assert supervisor.child is None
+
+
+def should_reapply_accepted_models_when_native_edits_refresh(supervisor, monkeypatch):
+    from hmlib.stitching import native_calibration
+    from hmlib.ui import shared_analytics
+
+    supervisor.prepared_analytics = {
+        "pipeline": {"player-analytics": {"pose": {"bundle": "/accepted"}}}
+    }
+    accepted = []
+    monkeypatch.setattr(
+        shared_analytics,
+        "apply_prepared_shared_analytics",
+        lambda config, prepared: accepted.append(prepared),
+    )
+    monkeypatch.setattr(
+        native_calibration,
+        "prepare_native_calibration",
+        lambda game, output, **kwargs: SimpleNamespace(directory=output, frame_offsets=(0, 0)),
+    )
+    supervisor._refresh_calibration()
+    assert accepted == [supervisor.prepared_analytics]

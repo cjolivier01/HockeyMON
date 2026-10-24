@@ -122,3 +122,98 @@ def should_enable_nvidia_team_embeddings_without_changing_tracker(tmp_path):
     configure_reid(config, tmp_path)
     assert config["aspen"]["plugins"]["tracker"]["params"] == {}
     assert config["aspen"]["plugins"]["team"]["params"]["reid_onnx_path"] == str(path)
+
+
+def should_exchange_bounded_native_appearance_batches_and_reap_helper(tmp_path, monkeypatch):
+    import os
+    import sys
+
+    from hmlib.models.appearance import TensorRtAppearanceSession
+
+    helper = tmp_path / "native-infer"
+    helper.write_text(f"#!{sys.executable}\n" + """import os, struct, sys
+import numpy as np
+assert os.environ['HSTREAM_UI_PARENT_PID'] == str(os.getppid())
+def read(n):
+    out=b''
+    while len(out)<n:
+        part=sys.stdin.buffer.read(n-len(out))
+        if not part: raise RuntimeError('partial input')
+        out+=part
+    return out
+while header := sys.stdin.buffer.read(4):
+    n=struct.unpack('<I',header)[0]
+    if n==0: break
+    assert 0<n<=32
+    crops=np.frombuffer(read(n*3*256*128*4),dtype='<f4').reshape(n,-1)
+    values=np.repeat(crops.mean(axis=1)[:,None],256,axis=1).astype('<f4')
+    sys.stdout.buffer.write(struct.pack('<I',n)+values.tobytes())
+    sys.stdout.buffer.flush()
+""")
+    helper.chmod(0o755)
+    monkeypatch.setenv("HM_HSTREAM_MODEL_INFER", str(helper))
+    runner = TensorRtAppearanceSession(tmp_path / "exact-model.engine")
+    pid = runner.process.pid
+    # Model initialization can precede video-reader forks. An inherited writer
+    # must not keep the helper alive after the owning pipeline finalizes.
+    inherited_writer = os.dup(runner.process.stdin.fileno())
+    try:
+        for count in (1, 32):
+            result = runner.run(None, {"images": np.full((count, 3, 256, 128), 7.0, np.float32)})[0]
+            assert result.shape == (count, 256)
+            np.testing.assert_array_equal(result, 7.0)
+        with pytest.raises(ValueError, match="at most 32"):
+            runner.run(None, {"images": np.zeros((33, 3, 256, 128), np.float32)})
+    finally:
+        try:
+            runner.close()
+        finally:
+            os.close(inherited_writer)
+    assert runner.process.returncode == 0
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def should_surface_native_appearance_runtime_errors_without_substitution(tmp_path, monkeypatch):
+    import sys
+
+    from hmlib.models.appearance import TensorRtAppearanceSession
+
+    helper = tmp_path / "failed-infer"
+    helper.write_text(
+        f'#!{sys.executable}\nimport sys\nprint("exact engine runtime failure", file=sys.stderr)\nsys.exit(7)\n'
+    )
+    helper.chmod(0o755)
+    monkeypatch.setenv("HM_HSTREAM_MODEL_INFER", str(helper))
+    runner = TensorRtAppearanceSession(tmp_path / "selected.engine")
+    try:
+        with pytest.raises(RuntimeError, match="exact engine runtime failure"):
+            runner.run(None, {"images": np.zeros((1, 3, 256, 128), np.float32)})
+    finally:
+        with pytest.raises(RuntimeError, match="exact engine runtime failure"):
+            runner.close()
+
+
+def should_use_native_custom_normalization_defaults_consistently(tmp_path):
+    import yaml
+
+    from hmlib.models.appearance import read_tracker_model
+
+    (tmp_path / "model.engine").write_bytes(b"prepared-engine")
+    config = tmp_path / "tracker.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "ReID": {
+                    "inferDims": [3, 256, 128],
+                    "reidFeatureSize": 256,
+                    "modelEngineFile": "model.engine",
+                }
+            }
+        )
+    )
+    engine, settings = read_tracker_model(config)
+    assert engine == tmp_path / "model.engine"
+    pixels = torch.full((3, 10, 10), 7.0)
+    actual = player_crops(pixels, torch.tensor([[0.0, 0.0, 10.0, 10.0]]), settings=settings)
+    torch.testing.assert_close(actual, torch.full_like(actual, 7.0))

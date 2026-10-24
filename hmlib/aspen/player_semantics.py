@@ -190,7 +190,9 @@ def parseq_input(image_bgr: np.ndarray, roi) -> np.ndarray:
     return np.asarray(crop, dtype=np.float32).transpose(2, 0, 1) / 127.5 - 1
 
 
-def decode_parseq(logits: np.ndarray) -> tuple[str, float] | None:
+def decode_parseq(
+    logits: np.ndarray, *, charset: list[str] | None = None, eos_index: int = 0
+) -> tuple[str, float] | None:
     if logits.shape != (3, 95) or not np.isfinite(logits).all():
         raise ValueError("Hockey PARSeq requires finite [3,95] token logits")
     distribution = np.exp(logits - logits.max(axis=-1, keepdims=True))
@@ -198,9 +200,12 @@ def decode_parseq(logits: np.ndarray) -> tuple[str, float] | None:
     text, confidence = "", 1.0
     for position, token in enumerate(distribution.argmax(axis=-1)):
         confidence *= float(distribution[position, token])
-        if token == 0:
+        if token == eos_index:
             return (text, confidence) if text else None
-        if position == 2 or not 1 <= token <= 10:
+        character = (
+            charset[token] if charset is not None else str(token - 1) if 1 <= token <= 10 else ""
+        )
+        if position == 2 or len(character) != 1 or character not in "0123456789":
             return None
-        text += str(token - 1)
+        text += character
     return None

@@ -10,6 +10,93 @@ from hmlib.aspen.plugins import detector_factory_plugin as detector
 from hmlib.aspen.plugins import pose_factory_plugin as pose
 
 
+@pytest.mark.parametrize("segmentation", ["ice", "landmarks"])
+@pytest.mark.parametrize("pose_fails", [False, True])
+def should_isolate_concurrent_pose_and_cold_rink_registry_scopes(
+    monkeypatch, segmentation, pose_fails
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    import mmdet.apis
+    import mmpose.apis.inferencers
+    import numpy as np
+    from mmengine.registry import DefaultScope, Registry, init_default_scope
+
+    from hmlib.segm import ice_rink, rink_landmarks
+
+    root = Registry("cold-rink-test", scope="cold_rink_test")
+    datasets = Registry("dataset", parent=root, scope="mmdet")
+    # The sibling scope reproduces the real missing-dataset failure when
+    # MMPose changes DefaultScope during MMDetection checkpoint loading.
+    Registry("dataset", parent=root, scope="mmpose")
+
+    @datasets.register_module()
+    class CocoIceRink2Dataset:
+        pass
+
+    rink_entered, pose_attempted, pose_entered, rink_done = (Event() for _ in range(4))
+    previous = DefaultScope.get_current_instance()
+    previous_scope = previous.scope_name if previous else None
+    observed = []
+
+    def init_rink(*args, **kwargs):
+        init_default_scope("mmdet")
+        rink_entered.set()
+        try:
+            assert pose_attempted.wait(5)
+            # Without the shared guard the contender enters here and selects
+            # mmpose before the late dataset lookup, deterministically failing.
+            pose_entered.wait(0.2)
+            observed.append(type(datasets.build({"type": "CocoIceRink2Dataset"})))
+        finally:
+            rink_done.set()
+        return SimpleNamespace(dataset_meta={"classes": ["ice rink"]})
+
+    def init_pose(**kwargs):
+        init_default_scope("mmpose")
+        pose_entered.set()
+        assert rink_done.wait(5)
+        assert DefaultScope.get_current_instance().scope_name == "mmpose"
+        if pose_fails:
+            raise RuntimeError("pose checkpoint fixture failed")
+        return SimpleNamespace()
+
+    def infer_rink(*args, **kwargs):
+        # This helper constructs Compose lazily, after initialization returns.
+        assert DefaultScope.get_current_instance().scope_name == "mmdet"
+        observed.append(type(datasets.build({"type": "CocoIceRink2Dataset"})))
+        return SimpleNamespace(pred_instances=SimpleNamespace(scores=torch.empty(0)))
+
+    monkeypatch.setattr(mmdet.apis, "init_detector", init_rink)
+    monkeypatch.setattr(mmdet.apis, "inference_detector", infer_rink)
+    monkeypatch.setattr(mmpose.apis.inferencers, "MMPoseInferencer", init_pose)
+    monkeypatch.setattr(ice_rink, "result_to_polygons", lambda **kwargs: None)
+    find_rink = (
+        ice_rink.find_ice_rink_masks
+        if segmentation == "ice"
+        else rink_landmarks.find_rink_landmarks
+    )
+
+    def run_pose():
+        pose_attempted.set()
+        return pose.PoseInferencerFactoryPlugin().forward({})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        rink_job = pool.submit(find_rink, np.zeros((16, 16, 3), np.uint8), "rink.py", "rink.pth")
+        assert rink_entered.wait(5)
+        pose_job = pool.submit(run_pose)
+        assert rink_job.result(timeout=10) is None
+        if pose_fails:
+            with pytest.raises(RuntimeError, match="pose checkpoint fixture failed"):
+                pose_job.result(timeout=10)
+        else:
+            assert "pose_inferencer" in pose_job.result(timeout=10)
+    assert observed == [CocoIceRink2Dataset, CocoIceRink2Dataset]
+    current = DefaultScope.get_current_instance()
+    assert (current.scope_name if current else None) == previous_scope
+
+
 @pytest.mark.parametrize("backend", ["ONNX", "TensorRT"])
 def should_surface_detector_initialization_failure(monkeypatch, backend):
     def fail(**_kwargs):

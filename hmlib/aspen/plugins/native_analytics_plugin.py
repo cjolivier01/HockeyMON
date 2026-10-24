@@ -150,9 +150,9 @@ def _frames(context):
 class _NativeAnalytics(Plugin):
     feature = ""
 
-    def __init__(self, model_path, provider, enabled):
+    def __init__(self, model_path, provider, enabled, model_bundle=None):
         super().__init__(enabled=enabled)
-        self.model = PlayerModel(self.feature, model_path, provider)
+        self.model = PlayerModel(self.feature, model_path, provider, model_bundle)
         self._reset()
 
     def _reset(self):
@@ -232,8 +232,9 @@ class TemporalActionPlugin(_NativeAnalytics):
         enabled: bool = True,
         top_k: int = 3,
         score_threshold: float = 0.5,
+        model_bundle: str | None = None,
     ):
-        super().__init__(model_path, provider, enabled)
+        super().__init__(model_path, provider, enabled, model_bundle)
         if not 1 <= top_k <= 60:
             raise ValueError("Action top_k must be between 1 and 60")
         self.top_k = top_k
@@ -327,12 +328,15 @@ class ParseqJerseyPlugin(_NativeAnalytics):
         enabled: bool = True,
         roi_mode: str = "bbox",
         min_confidence: float = 0.8,
+        model_bundle: str | None = None,
     ):
-        super().__init__(model_path, provider, enabled)
+        super().__init__(model_path, provider, enabled, model_bundle)
         if roi_mode not in {"bbox", "pose"}:
             raise ValueError("Jersey ROI mode must be bbox or pose")
         self.roi_mode = roi_mode
         self.min_confidence = min_confidence
+        self.charset = self.model.contract["preprocessing"]["charset"]
+        self.eos_index = self.model.contract["preprocessing"]["eos_index"]
 
     def forward(self, context):
         if not self.enabled:
@@ -367,7 +371,11 @@ class ParseqJerseyPlugin(_NativeAnalytics):
                     break
             if crops:
                 for track_id, logits in zip(identifiers, self.model(np.stack(crops)), strict=True):
-                    observation = decode_parseq(logits)
+                    observation = decode_parseq(
+                        logits,
+                        charset=self.charset,
+                        eos_index=self.eos_index,
+                    )
                     if observation is not None and observation[1] >= minimum:
                         state = self.states.setdefault(track_id, JerseyConsensus())
                         state.observe(timestamp, *observation)

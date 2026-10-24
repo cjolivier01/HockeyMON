@@ -311,3 +311,75 @@ def should_reject_incompatible_custom_models_and_explicit_cuda_failures(tmp_path
     monkeypatch.setattr(ort, "InferenceSession", lambda *args, **kwargs: session)
     with pytest.raises(ValueError, match="native|float32"):
         PlayerModel("action", str(path), "cpu").ensure_session()
+
+
+@pytest.mark.parametrize("feature", ["jersey", "action"])
+def should_execute_custom_native_bundle_bytes_and_its_output_semantics(tmp_path, feature):
+    import copy
+    import hashlib
+
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    from hmlib.models.player_analytics import load_model_bundle
+
+    contract = copy.deepcopy(model_contract(feature))
+    contract["model_id"] = f"custom-{feature}-fixture"
+    input_spec, output_spec = contract["inputs"][0], contract["outputs"][0]
+    output = np.zeros((1, *output_spec["shape"][1:]), np.float32)
+    if feature == "action":
+        output[0, 3] = 9
+        contract["labels"][3] = "custom recorded activity"
+    else:
+        vocabulary = contract["preprocessing"]["charset"]
+        vocabulary[1], vocabulary[10] = vocabulary[10], vocabulary[1]
+        output[0, 0, 1] = 9
+        output[0, 1:, 0] = 9
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "Constant", [], [output_spec["name"]], value=numpy_helper.from_array(output)
+                )
+            ],
+            "actual-custom-model",
+            [
+                helper.make_tensor_value_info(
+                    input_spec["name"], TensorProto.FLOAT, [1, *input_spec["shape"][1:]]
+                )
+            ],
+            [
+                helper.make_tensor_value_info(
+                    output_spec["name"], TensorProto.FLOAT, list(output.shape)
+                )
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    path = tmp_path / "model.onnx"
+    onnx.save(model, path)
+    contract["onnx"]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = tmp_path / "manifest.json"
+    import yaml
+
+    manifest.write_text(yaml.safe_dump(contract))
+    runner = PlayerModel(feature, provider="cpu", model_bundle=str(tmp_path))
+    actual = runner(np.zeros((1, *input_spec["shape"][1:]), np.float32))
+    np.testing.assert_array_equal(actual, output)
+    if feature == "action":
+        plugin = TemporalActionPlugin(provider="cpu", model_bundle=str(tmp_path))
+        assert plugin.labels[3] == "custom recorded activity"
+    else:
+        plugin = ParseqJerseyPlugin(provider="cpu", model_bundle=str(tmp_path))
+        decoded = decode_parseq(actual[0], charset=plugin.charset, eos_index=plugin.eos_index)
+        assert decoded[0] == "9"
+    contract["preprocessing"]["id"] = "different-preprocessing"
+    manifest.write_text(yaml.safe_dump(contract))
+    with pytest.raises(ValueError, match="preprocessing"):
+        load_model_bundle(feature, tmp_path)
+    contract["preprocessing"]["id"] = model_contract(feature)["preprocessing"]["id"]
+    contract["onnx"]["sha256"] = "0" * 64
+    manifest.write_text(yaml.safe_dump(contract))
+    with pytest.raises(ValueError, match="checksum"):
+        load_model_bundle(feature, tmp_path)

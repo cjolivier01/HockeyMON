@@ -13,7 +13,8 @@ second desktop implementation.
 ## Build and launch
 
 Install matching HStream tools, including `hstream-ui`, `hstream-cli` and
-`hstream-calibration-export`. A source checkout can build the desktop with its
+`hstream-calibration-export`, `hstream-model-prepare` and `hstream-model-infer`.
+A source checkout can build the desktop with its
 normal platform configuration:
 
 ```bash
@@ -61,7 +62,7 @@ export HM_CLI_BIN=/absolute/HockeyMON/hm-ui/hm-cli
 selection fails with an error. Otherwise the launcher searches `PATH`, then
 `/opt/hstream/bin/hstream-ui` for the desktop and the source `hm-ui/hm-cli` for
 the backend. The desktop verifies the backend protocol before opening a game.
-Its matching native runner and calibration exporter are passed to the Python
+Its matching native runner, calibration exporter and model preparer are passed to the Python
 backend. Installing HockeyMON's wheel alone does not install HStream or Qt.
 
 Original `hmtrack` and `hmstitch` arguments travel in a private launch document,

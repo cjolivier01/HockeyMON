@@ -422,6 +422,10 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
         )
         hm_opts.apply_config_overrides(explicit_settings, initial_args.config_overrides)
         initial_settings = merge(initial_settings, explicit_settings)
+        # These hmtrack-only model flags are consumed directly by its worker,
+        # rather than the generic argparse-to-config mapping.
+        if {"pose_config", "pose_checkpoint"} & explicit_names:
+            set_path(initial_settings, "aspen.plugins.pose_factory", {})
         _initial_output_routes(explicit_settings, sinks)
         if initial_args.output_video or initial_args.output_file:
             sinks.add("ENCODE_FILE")
@@ -465,6 +469,16 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
             set_path(config, "video_out." + key, sink in sinks)
         if not sinks:
             sinks.add("FAKE")
+    from hmlib.ui.shared_analytics import translate_shared_analytics
+
+    config_directory = (
+        Path(args.config[-1]).resolve().parent
+        if args.config
+        else Path(os.environ["HM_CONFIG_ROOT"]) if os.environ.get("HM_CONFIG_ROOT") else None
+    )
+    translate_shared_analytics(
+        config, game, initial_settings=initial_settings, config_directory=config_directory
+    )
     paths = graph_paths(selected_analysis(config))
     graph_config = {}
     for path in paths:

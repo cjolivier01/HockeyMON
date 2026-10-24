@@ -16,13 +16,13 @@ import argparse
 import gc
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from hmlib.config import prepend_root_dir
 from hmlib.log import logger
@@ -35,6 +35,7 @@ from hmlib.utils.image import (
     make_channels_first,
     make_channels_last,
 )
+from hmlib.utils.model_registry import model_registry_scope
 
 if TYPE_CHECKING:
     from mmdet.models.detectors.base import BaseDetector
@@ -69,10 +70,10 @@ class OverlayLayer(NamedTuple):
 
     color: torch.Tensor  # uint8 [3, h, w]
     alpha: torch.Tensor  # float32 [1, h, w]
-    box: Tuple[int, int, int, int]
+    box: tuple[int, int, int, int]
 
 
-def parse_class_list(classes: Union[str, Sequence[str], None]) -> Optional[List[str]]:
+def parse_class_list(classes: str | Sequence[str] | None) -> list[str] | None:
     """Normalize a class allow-list from a CLI string, YAML string, or sequence.
 
     A ``str`` is a ``Sequence[str]``, so ``list("Blue Line")`` would silently
@@ -98,7 +99,7 @@ def parse_class_list(classes: Union[str, Sequence[str], None]) -> Optional[List[
 DEFAULT_MAX_INFERENCE_EDGE = 2048
 
 
-def _auto_inference_scale(width: int, height: int) -> Optional[float]:
+def _auto_inference_scale(width: int, height: int) -> float | None:
     """Scale that brings the longest edge down to ``DEFAULT_MAX_INFERENCE_EDGE``."""
     longest = max(int(width), int(height))
     if longest <= DEFAULT_MAX_INFERENCE_EDGE:
@@ -106,7 +107,7 @@ def _auto_inference_scale(width: int, height: int) -> Optional[float]:
     return DEFAULT_MAX_INFERENCE_EDGE / float(longest)
 
 
-def landmark_metadata(model: "BaseDetector") -> Tuple[Tuple[str, ...], List[Tuple[int, int, int]]]:
+def landmark_metadata(model: "BaseDetector") -> tuple[tuple[str, ...], list[tuple[int, int, int]]]:
     """Return ``(classes, palette)`` from a detector's ``dataset_meta``."""
     meta = getattr(model, "dataset_meta", None) or {}
     classes = tuple(meta.get("classes") or ())
@@ -132,7 +133,7 @@ def landmark_metadata(model: "BaseDetector") -> Tuple[Tuple[str, ...], List[Tupl
     return classes, palette
 
 
-def _hsv_color(index: int, total: int) -> Tuple[int, int, int]:
+def _hsv_color(index: int, total: int) -> tuple[int, int, int]:
     """Evenly spaced fallback color. RGB, because palettes here are RGB."""
     hue = int(179 * index / max(1, total))
     pixel = np.uint8([[[hue, 255, 255]]])
@@ -158,7 +159,7 @@ def _resolve_model_path(path: str) -> str:
     return from_cwd if os.path.exists(from_cwd) else from_root
 
 
-def _as_numpy_image(image: Union[torch.Tensor, np.ndarray, StreamTensorBase]) -> np.ndarray:
+def _as_numpy_image(image: torch.Tensor | np.ndarray | StreamTensorBase) -> np.ndarray:
     if isinstance(image, StreamTensorBase):
         image = image.get()
     if isinstance(image, torch.Tensor):
@@ -176,15 +177,16 @@ def _as_numpy_image(image: Union[torch.Tensor, np.ndarray, StreamTensorBase]) ->
 
 
 def detect_rink_landmarks(
-    image: Union[torch.Tensor, np.ndarray],
+    image: torch.Tensor | np.ndarray,
     model: "BaseDetector",
     score_thr: float = DEFAULT_SCORE_THRESH,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Run the landmark detector on one frame and return its instance masks."""
     from mmdet.apis import inference_detector
 
     frame = _as_numpy_image(image)
-    result: "DetDataSample" = inference_detector(model, frame)
+    with model_registry_scope("mmdet"):
+        result: DetDataSample = inference_detector(model, frame)
 
     instances = result.pred_instances
     scores = instances.scores
@@ -211,8 +213,8 @@ def detect_rink_landmarks(
 
 
 def _rescale_landmarks(
-    landmarks: Dict[str, Any], inference_scale: float, target_hw: Tuple[int, int]
-) -> Dict[str, Any]:
+    landmarks: dict[str, Any], inference_scale: float, target_hw: tuple[int, int]
+) -> dict[str, Any]:
     """Map masks and boxes produced at ``inference_scale`` back to full resolution.
 
     One mask at a time, through the sibling module's _resize_mask: upsampling
@@ -235,14 +237,14 @@ def _rescale_landmarks(
 
 
 def find_rink_landmarks(
-    image: Union[torch.Tensor, np.ndarray],
+    image: torch.Tensor | np.ndarray,
     config_file: str,
     checkpoint: str,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
     score_thr: float = DEFAULT_SCORE_THRESH,
-    inference_scale: Optional[float] = None,
-    include: Optional[Sequence[str]] = None,
-) -> Optional[Dict[str, Any]]:
+    inference_scale: float | None = None,
+    include: Sequence[str] | None = None,
+) -> dict[str, Any] | None:
     """Load the landmark detector, run it on one frame, and free it again.
 
     ``include`` is applied before the masks are rescaled, so a discarded class
@@ -285,14 +287,15 @@ def find_rink_landmarks(
         )
 
     if inference_scale and inference_scale != 1.0:
-        new_width = max(1, int(round(orig_width * inference_scale)))
-        new_height = max(1, int(round(orig_height * inference_scale)))
+        new_width = max(1, round(orig_width * inference_scale))
+        new_height = max(1, round(orig_height * inference_scale))
         interpolation = cv2.INTER_AREA if inference_scale < 1.0 else cv2.INTER_LINEAR
         infer_image = cv2.resize(infer_image, (new_width, new_height), interpolation=interpolation)
 
     if device.type == "cpu":
         logger.info("Looking for the painted rink landmarks, this may take awhile...")
-    model = init_detector(config_file, checkpoint, device=device)
+    with model_registry_scope("mmdet"):
+        model = init_detector(config_file, checkpoint, device=device)
     try:
         landmarks = detect_rink_landmarks(infer_image, model=model, score_thr=score_thr)
     finally:
@@ -313,14 +316,14 @@ def find_rink_landmarks(
 
 def configure_rink_landmarks(
     game_id: str,
-    image: Union[torch.Tensor, np.ndarray],
-    device: Optional[torch.device] = None,
+    image: torch.Tensor | np.ndarray,
+    device: torch.device | None = None,
     score_thr: float = DEFAULT_SCORE_THRESH,
-    inference_scale: Optional[float] = None,
-    checkpoint: Optional[str] = None,
-    model_config: Optional[str] = None,
-    include: Optional[Sequence[str]] = None,
-) -> Optional[Dict[str, Any]]:
+    inference_scale: float | None = None,
+    checkpoint: str | None = None,
+    model_config: str | None = None,
+    include: Sequence[str] | None = None,
+) -> dict[str, Any] | None:
     """Resolve the landmark model from the game config and run it on ``image``."""
     model_config_file, model_checkpoint = model_config, checkpoint
     if not (model_config_file and model_checkpoint):
@@ -360,10 +363,10 @@ def configure_rink_landmarks(
 
 
 def filter_landmarks(
-    landmarks: Dict[str, Any],
-    include: Optional[Sequence[str]] = None,
+    landmarks: dict[str, Any],
+    include: Sequence[str] | None = None,
     exclude: Sequence[str] = DEFAULT_EXCLUDED_CLASSES,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Keep only the named classes (case-insensitive). ``include`` wins over ``exclude``."""
     classes = landmarks["classes"]
     labels = landmarks["labels"]
@@ -408,16 +411,16 @@ def _mask_outline(mask_np: np.ndarray, thickness: int) -> np.ndarray:
 def build_overlay_layer(
     height: int,
     width: int,
-    landmarks: Optional[Dict[str, Any]] = None,
-    rink_mask: Optional[torch.Tensor] = None,
-    rink_mask_color: Tuple[int, int, int] = DEFAULT_RINK_MASK_COLOR,
+    landmarks: dict[str, Any] | None = None,
+    rink_mask: torch.Tensor | None = None,
+    rink_mask_color: tuple[int, int, int] = DEFAULT_RINK_MASK_COLOR,
     rink_mask_alpha: float = DEFAULT_RINK_MASK_ALPHA,
     fill_alpha: float = DEFAULT_FILL_ALPHA,
     outline_alpha: float = DEFAULT_OUTLINE_ALPHA,
     outline_thickness: int = DEFAULT_OUTLINE_THICKNESS,
     label_text: bool = False,
     bgr: bool = True,
-) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor] | None:
     """Bake masks into one ``(color[3,H,W] uint8, alpha[1,H,W] float32)`` pair.
 
     Later marks win: the rink tint goes down first, then landmark fills, then
@@ -431,7 +434,7 @@ def build_overlay_layer(
     alpha = np.zeros((height, width), dtype=np.float32)
     drew_anything = False
 
-    def channel_order(rgb: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    def channel_order(rgb: tuple[int, int, int]) -> tuple[int, int, int]:
         return (rgb[2], rgb[1], rgb[0]) if bgr else rgb
 
     if rink_mask is not None and rink_mask_alpha > 0:
@@ -518,16 +521,16 @@ def build_overlay_layer(
 def _draw_labels(
     color: np.ndarray,
     alpha: np.ndarray,
-    landmarks: Dict[str, Any],
+    landmarks: dict[str, Any],
     classes: Sequence[str],
-    palette: Sequence[Tuple[int, int, int]],
+    palette: Sequence[tuple[int, int, int]],
     labels: torch.Tensor,
     scores: torch.Tensor,
     channel_order,
 ) -> None:
     # Scale text with the panorama so it stays readable on a 5k-wide frame.
     font_scale = max(0.5, color.shape[1] / 2400.0)
-    thickness = max(1, int(round(font_scale * 2)))
+    thickness = max(1, round(font_scale * 2))
     for bbox, label, score in zip(landmarks["bboxes"], labels, scores):
         index = int(label)
         name = classes[index] if index < len(classes) else str(index)
@@ -615,12 +618,12 @@ def composite_overlay(img: torch.Tensor, layer: OverlayLayer) -> torch.Tensor:
     return out if was_channels_first else make_channels_last(out)
 
 
-def summarize_landmarks(landmarks: Optional[Dict[str, Any]]) -> str:
+def summarize_landmarks(landmarks: dict[str, Any] | None) -> str:
     """One-line human-readable census of what was detected."""
     if landmarks is None or not len(landmarks["labels"]):
         return "no rink landmarks detected"
     classes = landmarks["classes"]
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for label in landmarks["labels"]:
         index = int(label)
         name = classes[index] if index < len(classes) else str(index)
@@ -629,7 +632,7 @@ def summarize_landmarks(landmarks: Optional[Dict[str, Any]]) -> str:
     return f"{len(landmarks['labels'])} landmarks: " + ", ".join(parts)
 
 
-def main(args: argparse.Namespace = None) -> int:
+def main(args: argparse.Namespace | None = None) -> int:
     """Render the rink mask and landmarks onto one stitched frame and save it."""
     from hmlib.config import get_game_dir
     from hmlib.segm.ice_rink import configure_ice_rink_mask

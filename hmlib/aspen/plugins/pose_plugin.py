@@ -464,6 +464,7 @@ class PosePlugin(Plugin):
 
             use_pose_cudagraph = (
                 self._cuda_graph_enabled
+                and getattr(pose_inferencer, "_hm_pose_runner", None) is None
                 and torch.cuda.is_available()
                 and isinstance(inputs, torch.Tensor)
                 and inputs.is_cuda

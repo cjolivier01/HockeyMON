@@ -2050,6 +2050,7 @@ def _main(args, num_gpu):
                 args.game_config["initial_args"] = args.initial_args
 
         postprocessor = None
+        native_calibration = None
         synchronized_audio_offsets = None
         shared_source_chapters = None
         if args.input_video:

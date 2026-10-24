@@ -90,7 +90,12 @@ def apply_analytics_preferences(config: dict) -> None:
     ) and selection == "saved":
         selection = "native"
     if pose is not None and selection != "saved":
-        if selection == "native":
+        if selection == "shared":
+            from hmlib.ui.shared_analytics import shared_pose_parameters
+
+            pose.setdefault("params", {}).update(shared_pose_parameters(config))
+            values = None
+        elif selection == "native":
             values = (NATIVE_POSE_CONFIG, NATIVE_POSE_CHECKPOINT)
         elif selection in {"harpet", "coco"}:
             model = config["model"][f"pose_{selection}"]
@@ -101,10 +106,11 @@ def apply_analytics_preferences(config: dict) -> None:
                 raise ValueError("Custom pose requires a model config and checkpoint")
         else:
             raise ValueError(f"Unknown pose model: {selection}")
-        pose.setdefault("params", {}).update(pose_config=values[0], pose_checkpoint=values[1])
-        pose["params"]["pose_checkpoint_sha256"] = (
-            NATIVE_POSE_SHA256 if selection == "native" else None
-        )
+        if values is not None:
+            pose.setdefault("params", {}).update(pose_config=values[0], pose_checkpoint=values[1])
+            pose["params"]["pose_checkpoint_sha256"] = (
+                NATIVE_POSE_SHA256 if selection == "native" else None
+            )
     jerseys = plugins.get("jersey_numbers")
     if jerseys is not None:
         mode = (
@@ -126,13 +132,17 @@ def apply_analytics_preferences(config: dict) -> None:
         if node is None:
             continue
         selection = run.get(f"{target}_model", "native")
-        if selection not in {"native", "custom"}:
+        if selection not in {"native", "custom", "shared"}:
             raise ValueError(f"Unknown {target} model: {selection}")
         path = run.get(f"{target}_model_path") if selection == "custom" else None
         if selection == "custom" and not path:
             raise ValueError(f"Custom {target} requires a compatible ONNX model path")
         node["class"] = f"hmlib.aspen.plugins.native_analytics_plugin.{class_name}"
         node.setdefault("params", {})["model_path"] = path
+        if selection == "shared":
+            node["params"]["model_bundle"] = config["pipeline"]["player-analytics"][target].get(
+                "bundle"
+            )
 
     # Telemetry snapshots tracks at SaveTrackingPlugin, so it must wait for
     # every enabled label producer even in a threaded graph.

@@ -177,6 +177,24 @@ def should_report_initial_selected_preview_at_the_native_first_generation(
     assert not protocol.handle_line(f"@set-preview-active {channel} 1")
 
 
+def should_activate_rendering_after_starting_without_preview_images(runtime, tmp_path):
+    ui, _, messages = runtime
+    protocol = RuntimeProtocol(tmp_path, messages.append, initial_preview="none")
+    ui.publish_runtime(frame=1, fps=15)
+    protocol.poll()
+    protocol.poll()
+    assert messages.count("HSTREAM_PREVIEW_RUNTIME status=ready channel=none generation=1") == 1
+    assert not any("message=frame-ready" in line for line in messages)
+    assert protocol.handle_line("@set-preview-active program 2")
+    ui.apply_runtime_requests(lambda: True)
+    path = ui.preview_paths["Final"]
+    Image.new("RGB", (32, 20), "blue").save(path)
+    write_document(path.with_suffix(".json"), {"width": 32, "height": 20})
+    protocol.poll()
+    assert ui._selected_preview_name == "Final"
+    assert any("channel=program status=ready generation=2" in line for line in messages)
+
+
 def should_report_native_seek_errors_and_absolute_frame_progress(runtime):
     ui, protocol, messages = runtime
     assert not protocol.handle_line("@seek 123 7")

@@ -5,6 +5,7 @@ import torch
 
 from hmlib.config import prepend_root_dir
 from hmlib.log import get_logger
+from hmlib.utils.model_registry import model_registry_scope
 from hmlib.utils.numpy_pickle_compat import numpy2_pickle_compat
 from hmlib.utils.torch_tensorrt_runtime import compile_torch_tensorrt
 
@@ -47,11 +48,13 @@ class PoseInferencerFactoryPlugin(Plugin):
         onnx: dict[str, Any] | None = None,
         trt: dict[str, Any] | None = None,
         pose_checkpoint_sha256: str | None = None,
+        shared_model: dict[str, Any] | None = None,
     ):
         super().__init__(enabled=enabled)
         self._pose_config = pose_config
         self._pose_checkpoint = pose_checkpoint
         self._pose_checkpoint_sha256 = pose_checkpoint_sha256
+        self._shared_model = shared_model
         self._device = device
         self._show_progress = bool(show_progress)
         self._filter_args = dict(filter_args or {})
@@ -117,6 +120,18 @@ class PoseInferencerFactoryPlugin(Plugin):
             ):
                 cfg = prepend_root_dir(cfg)
             ckpt = self._pose_checkpoint
+            if self._shared_model is not None:
+                from hmlib.models.player_analytics import load_model_bundle, prepare_player_model
+
+                bundle = self._shared_model.get("bundle")
+                if bundle:
+                    path, _ = load_model_bundle("pose", bundle)
+                elif self._shared_model.get("model") == "rtmpose-m-coco17-256x192":
+                    path = prepare_player_model("pose")
+                else:
+                    raise ValueError("A custom shared pose model requires its prepared bundle")
+                self._onnx_cfg = {"enable": True, "path": str(path)}
+                self._trt_cfg = {"enable": False}
             if isinstance(ckpt, str) and ckpt and "://" not in ckpt and not ckpt.startswith("/"):
                 ckpt = prepend_root_dir(ckpt)
             if self._pose_checkpoint_sha256:
@@ -142,7 +157,7 @@ class PoseInferencerFactoryPlugin(Plugin):
             ):
                 det_model = "whole_image"
 
-            with numpy2_pickle_compat():
+            with model_registry_scope("mmpose"), numpy2_pickle_compat():
                 inferencer = MMPoseInferencer(
                     pose2d=cfg,
                     pose2d_weights=ckpt,
@@ -185,11 +200,18 @@ class PoseInferencerFactoryPlugin(Plugin):
                             force_export=bool(self._onnx_cfg.get("force_export", False)),
                             quantize_int8=bool(self._onnx_cfg.get("quantize_int8", False)),
                             calib_frames=int(self._onnx_cfg.get("calib_frames", 0)),
+                            native_simcc=self._shared_model is not None,
                         )
                         inferencer._hm_onnx_runner = self._onnx_runner
                         runner = self._onnx_runner
                     self._wrap_model_test_step(pose_impl.model, runner)
                     inferencer._hm_pose_runner = runner
+                    if self._shared_model is not None:
+                        logger.info(
+                            "Shared pose executes prepared SimCC ONNX %s; MMPose supplies "
+                            "preprocessing and coordinate decoding only",
+                            self._onnx_runner.onnx_path,
+                        )
                 except Exception as exc:
                     raise RuntimeError(
                         f"Failed to initialize requested {backend} pose backend"
@@ -238,8 +260,10 @@ class _OnnxPoseRunner:
         force_export: bool = False,
         quantize_int8: bool = False,
         calib_frames: int = 0,
+        native_simcc: bool = False,
     ):
         self.model = model
+        self.native_simcc = native_simcc
         self.onnx_path = onnx_path
         self.force_export = force_export
         self.quantize_int8 = bool(quantize_int8)
@@ -391,7 +415,28 @@ class _OnnxPoseRunner:
         else:
             self._providers = ["CPUExecutionProvider"]
             self._use_cuda = False
+            if self.native_simcc:
+                logger.warning("Shared pose CUDA provider unavailable; inference runs on CPU")
         self._ort_sess = ort.InferenceSession(self.onnx_path, sess_options=so, providers=self._providers)  # type: ignore
+        if self.native_simcc:
+            if self._use_cuda and "CUDAExecutionProvider" not in self._ort_sess.get_providers():
+                raise RuntimeError(
+                    "Shared pose CUDA initialization failed; refusing provider substitution"
+                )
+            inputs, outputs = self._ort_sess.get_inputs(), self._ort_sess.get_outputs()
+            if (
+                len(inputs) != 1
+                or inputs[0].type != "tensor(float)"
+                or inputs[0].shape[1:] != [3, 256, 192]
+                or len(outputs) != 2
+                or any(
+                    len(node.shape) != 3 or isinstance(node.shape[1], int) and node.shape[1] != 17
+                    for node in outputs
+                )
+                or [node.shape[-1] for node in outputs] != [384, 512]
+                or any(node.type != "tensor(float)" for node in outputs)
+            ):
+                raise ValueError("Shared pose requires the native COCO17 SimCC ONNX tensors")
 
     def _run_feats(
         self, x: torch.Tensor, *, preprocessed: bool = False, collect_calibration: bool = True
@@ -515,6 +560,18 @@ class _OnnxPoseRunner:
             inputs = processed["inputs"]
             datas = processed["data_samples"]
             feats = self._run_feats(inputs, preprocessed=True)
+            if self.native_simcc:
+                if (
+                    not isinstance(feats, (list, tuple))
+                    or len(feats) != 2
+                    or tuple(feats[0].shape) != (len(inputs), 17, 384)
+                    or tuple(feats[1].shape) != (len(inputs), 17, 512)
+                    or any(not torch.isfinite(value).all() for value in feats)
+                ):
+                    raise ValueError("Shared pose returned invalid COCO17 SimCC predictions")
+                with torch.no_grad():
+                    instances = self.model.head.decode(tuple(feats))
+                    return self.model.add_pred_to_datasample(instances, None, datas)
             if self.model.test_cfg.get("flip_test", False):
                 flipped = self._run_feats(
                     inputs.flip(-1), preprocessed=True, collect_calibration=False

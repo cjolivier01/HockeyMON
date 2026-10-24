@@ -1,0 +1,67 @@
+{
+  "feature": "pose",
+  "inputs": [
+    {
+      "dtype": "float32",
+      "name": "image",
+      "shape": [
+        -1,
+        3,
+        256,
+        192
+      ]
+    }
+  ],
+  "model_family": "rtmpose",
+  "model_id": "rtmpose-m-coco17-256x192",
+  "onnx": {
+    "file": "model.onnx",
+    "opset": 17,
+    "sha256": "5449a830cd12195430c2ac66d93854b47ae8be0cfea0f6ffbe2422d9d28983a0"
+  },
+  "outputs": [
+    {
+      "dtype": "float32",
+      "name": "simcc_x",
+      "shape": [
+        -1,
+        17,
+        384
+      ]
+    },
+    {
+      "dtype": "float32",
+      "name": "simcc_y",
+      "shape": [
+        -1,
+        17,
+        512
+      ]
+    }
+  ],
+  "preprocessing": {
+    "color": "rgb",
+    "flip_test": false,
+    "id": "rtmpose-coco17-affine-v1",
+    "mean": [
+      123.675,
+      116.28,
+      103.53
+    ],
+    "padding": 1.25,
+    "simcc_split_ratio": 2.0,
+    "std": [
+      58.395,
+      57.12,
+      57.375
+    ]
+  },
+  "schema_version": 1,
+  "source": {
+    "config_sha256": "532dc32cd9c6ba4ea3300fdc0e0a1da622dd9f53510a1998968f7958e08b2a6b",
+    "license": "Apache-2.0 (code); retain upstream checkpoint and training-data provenance",
+    "sha256": "5e55be2a03f6e5dcd14d088afc4ae5afe94a4f9de93c22e5deb725ad0eee899d",
+    "url": "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/rtmpose-m_simcc-aic-coco_pt-aic-coco_420e-256x192-63eb25f7_20230126.pth"
+  },
+  "topology_id": "coco17"
+}

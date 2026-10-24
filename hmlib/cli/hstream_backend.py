@@ -185,6 +185,7 @@ class Supervisor:
         self.audio_paused = False
         self.audio_seeking = False
         self.snapshot = None
+        self.prepared_analytics = None
         self.audio_muted = (
             self.environment.get("HSTREAM_RENDER_AUDIO_MUTED", "0") == "1"
             or "RENDER" not in self.plan.sinks
@@ -215,9 +216,12 @@ class Supervisor:
 
     def _spawn(self, command: list[str], *, phase: str, cwd: Path | None = None) -> None:
         self.phase = phase
-        emit(
-            f"HSTREAM_STARTUP stage={phase} message=Starting {'shared native calibration' if phase == 'calibration' else 'HockeyMON Python pipeline'}"
-        )
+        label = {
+            "calibration": "shared native calibration",
+            "models": "shared model preparation",
+            "python": "HockeyMON Python pipeline",
+        }[phase]
+        emit(f"HSTREAM_STARTUP stage={phase} message=Starting {label}")
         from hmlib.ui.process_guard import guarded_command
 
         self.child = subprocess.Popen(
@@ -255,9 +259,7 @@ class Supervisor:
                 self.child.stdout.close()
             self.child.stdin.close()
 
-    def _prepare(self) -> None:
-        if set(self.plan.sources) != {"left", "right"}:
-            return
+    def _native_runner(self) -> Path:
         if not self.native:
             from hmlib.ui.desktop import executable
 
@@ -265,6 +267,93 @@ class Supervisor:
                 executable(None, "hstream-cli", (Path("/opt/hstream/bin/hstream-cli"),))
             )
             self.environment["HSTREAM_NATIVE_RUNNER"] = self.native
+        return Path(self.native)
+
+    def _prepare_models(self) -> None:
+        selected = self.plan.config.get("hm_ui", {}).get("shared_analytics", {})
+        if not selected or self.stop_requested:
+            return
+        import yaml
+
+        from hmlib.ui.hstream_launch import merge, native_application_config, read_mapping
+        from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+
+        runner = self._native_runner()
+        application = (
+            Path(self.args.config[-1]).resolve()
+            if self.args.config
+            else native_application_config(runner)
+        )
+        # Native application files contain structural nodes at their root;
+        # the resolved full configuration stores those nodes under pipeline.
+        config = merge({}, self.plan.config)
+        config["pipeline"] = merge(read_mapping(application), config.get("pipeline", {}))
+        for feature in ("pose", "jersey", "action", "team"):
+            if feature not in selected:
+                config["pipeline"].setdefault("player-analytics", {}).setdefault(feature, {})[
+                    "enable"
+                ] = False
+        if "reid" not in selected:
+            config["pipeline"].setdefault("tracker", {})["reid-enable"] = False
+        explicit = self.environment.get("HM_HSTREAM_MODEL_PREPARE")
+        candidates = (
+            [Path(explicit)]
+            if explicit
+            else [
+                runner.parent / "hstream-model-prepare",
+                runner.parent.parent / "hstream-model-prepare" / "hstream-model-prepare",
+                Path(str(runner) + ".runfiles")
+                / "kstream/src/apps/hstream-model-prepare/hstream-model-prepare",
+            ]
+        )
+        helper = next(
+            (path for path in candidates if path.is_file() and os.access(path, os.X_OK)), None
+        )
+        if helper is None:
+            raise FileNotFoundError(
+                "Matching native model preparation helper is unavailable; set HM_HSTREAM_MODEL_PREPARE"
+            )
+        source = self.session / "models-input.yaml"
+        output = self.session / "models-resolved.yaml"
+        receipt = self.session / "models-receipt.json"
+        source.write_text(yaml.safe_dump(config, sort_keys=False))
+        self._spawn(
+            [
+                str(helper),
+                "--config",
+                str(source),
+                "--config-directory",
+                str(application.parent),
+                "--output",
+                str(output),
+                "--receipt",
+                str(receipt),
+            ],
+            phase="models",
+        )
+        code = self._pump()
+        if self.stop_requested:
+            return
+        if code != 0:
+            raise RuntimeError(f"Shared model preparation stopped with status {code}")
+        result = json.loads(receipt.read_text())
+        if (
+            result.get("version") != 1
+            or result.get("status") != "complete"
+            or Path(result.get("output", "")).resolve() != output.resolve()
+        ):
+            raise ValueError("Shared model preparation did not commit the requested output")
+        prepared = read_mapping(output)
+        apply_prepared_shared_analytics(self.plan.config, prepared)
+        self.prepared_analytics = prepared
+        self.plan.graph = self.plan.config.get("aspen", {})
+        self.protocol.graph = self.plan.graph
+
+    def _prepare(self) -> None:
+        self._prepare_models()
+        if self.stop_requested or set(self.plan.sources) != {"left", "right"}:
+            return
+        self._native_runner()
         # Native owns validity, recovery, synchronization and all editor dialogs.
         # One decoded pair is sufficient after the calibration transaction commits.
         import yaml
@@ -282,6 +371,8 @@ class Supervisor:
                 "--ui-preview-active",
                 "--time-limit",
                 "-t",
+                "--start-time",
+                "-s",
                 "--show-scaled",
             },
         )
@@ -295,6 +386,7 @@ class Supervisor:
             "--stitching-calibration-with-ice-mask",
             "--enable-sinks=FAKE",
             "--time-limit=1",
+            f"--start-time={self.plan.start_seconds:.9f}",
         ]
         from hmlib.ui.hstream_initial import prefer_initial_settings
 
@@ -421,6 +513,11 @@ class Supervisor:
         from hmlib.ui.hstream_launch import make_plan, set_path
 
         plan = make_plan(self.args, initial=self.initial)
+        if self.prepared_analytics is not None:
+            from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+
+            apply_prepared_shared_analytics(plan.config, self.prepared_analytics)
+            plan.graph = plan.config.get("aspen", {})
         if plan.sources != self.plan.sources:
             raise ValueError("Recording sources changed during playback; start a new run")
         plan.start_seconds = self.plan.start_seconds
