@@ -93,6 +93,30 @@ runtime:
   # Valid values: nvvideoconvert, dsxvideoconvert.
   video_converter: "nvvideoconvert"
 
+  # Native HStream AMD Program limits and geometric association. These values
+  # do not select a backend or change NVIDIA/Aspen behavior.
+  amd:
+    gpu_id: 0
+    reader_queue_frames: 2
+    output_pool_frames: 8
+    operation_timeout_ms: 30000
+    cancellation_poll_ms: 10
+    maximum_inference_io_bytes: 268435456
+    maximum_encoded_packet_bytes: 67108864
+    compact_stitch_workspace: true
+    tracker:
+      low_score: 0.25
+      high_score: 0.6
+      new_track_score: 0.7
+      high_match_cost: 0.8
+      low_match_cost: 0.5
+      tentative_match_cost: 0.7
+      weight_high_matches_by_score: true
+      keep_lost_frames: 30
+      confirmation_frames: 2
+      maximum_tracks: 512
+      maximum_cost_matrix_bytes: 8388608
+
 hstream_ui:
   # Program detector models offered in the Detection tab. config_prefix names a
   # configs/config_infer_*.yaml family: the bare prefix is FP32 and the selected
