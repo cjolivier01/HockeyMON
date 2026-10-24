@@ -105,6 +105,11 @@ runtime:
     maximum_encoded_packet_bytes: 67108864
     compact_stitch_workspace: true
     playback_start_seconds: 0
+    audio:
+      maximum_packet_bytes: 1048576
+      maximum_frame_samples: 4096
+      queue_samples: 8192
+      bitrate: 192000
     output:
       width: 3840
       height: 2160
