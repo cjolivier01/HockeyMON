@@ -115,7 +115,30 @@ commits. The supervisor reports the exact successful artifacts; it never scans
 an output directory to infer success. Qt checks the launch's requested outputs,
 game identity and actual files. Explicit destinations outside the game directory
 are supported. Video and telemetry companions share the positive publication
-version, as described in [output publication](output-publication.md).
+version, as described in [output publication](output-publication.md). The supervisor
+validates every published companion outside its unique working directory, closes
+worker/audio owners, and removes that directory before reporting success. Failure
+or incomplete publication retains the working recordings for recovery. Telemetry
+geometry, masks and camera replay inputs are stored within the published database.
+
+Playback progress and audio share the synchronized recording clock: the left
+source synchronization offset is removed from delivered frame IDs, and delivered
+FPS accounts for any source frame stepping. Playlist starts and seeks resolve a
+global source frame to its chapter-local position without resetting frame IDs.
+Mixed camera rates require an integer ratio (for example, 60/30 or 59.94/29.97);
+unsupported ratios such as 60/24 fail explicitly. The loader samples each output
+frame at the chosen cadence even for multi-frame batches, and passes original
+source PTS into telemetry separately from its legacy frame identifiers. Those
+identifiers count delivered samples and retain the integer left-source offset;
+`fps` describes delivered cadence, while `pts_ns` identifies the sampled original
+source frame. Initial frame-based start/limits also use the delivered cadence.
+
+CUDA stitched archives follow the native HEVC encoder's queried raster limits:
+only the archive pixels are scaled on the GPU to proportional, even dimensions
+within its width, height and macroblock budget. The stitching canvas, source
+previews and telemetry keep their original geometry. For example, the RTX 5090
+fits a 20415×5256 canvas into an 8192×2108 archive. A failed capability query or
+an aspect ratio that cannot fit without upscaling is an explicit error.
 
 Recorded telemetry includes native replay inputs, camera checkpoints and the
 actual source start, plus the immutable geometry/mask used by each sample.
@@ -125,6 +148,11 @@ recordings, including empty input frames and live camera-policy changes.
 Job export consumes the UI's saved recipe and produces a quoted executable
 `hm-cli` shell script, retaining its start time and settings. It selects file
 outputs, removes local previews/network routes and records scheduler directives.
+Shared output selections disable legacy spare RTMP publishers; an explicit
+initial CLI configuration can enable one, and the resolved network route then
+prevents seeking. Exported scripts request one node, one task and one GPU by
+default, with operator SBATCH directives following those defaults. They retain
+the selected `HM_OUTPUT_WORK_DIR` and clear private desktop session variables.
 The exported script resolves `${HM_CLI_BIN:-hm-cli}` on the destination host;
 that host needs the matching native workflows and the same source/game paths.
 

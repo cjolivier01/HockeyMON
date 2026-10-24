@@ -74,7 +74,9 @@ closes. Only the initial launch envelope is temporary.
 
 Python working outputs use a unique
 `${HM_OUTPUT_WORK_DIR:-$HOME/hstream_output}/<game>/runs/hockeymon-*` directory.
-Failed runs retain that directory for recovery. Default desktop workers start
+Successful runs remove their working directory only after all requested archives
+and telemetry have been published and validated. Failed or incomplete runs retain
+it for recovery. Default desktop workers start
 there; an original CLI launch retains its working directory for relative
 arguments while writing its processing outputs to the durable run directory.
 

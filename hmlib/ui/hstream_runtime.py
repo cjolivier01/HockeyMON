@@ -117,6 +117,20 @@ class _Pending:
     payload: dict
 
 
+def shared_playback_fps(left_fps: float, right_fps: float) -> float:
+    """Resolve the delivered rate supported by integer source-frame decimation."""
+    low, high = sorted((float(left_fps), float(right_fps)))
+    if low <= 0 or not all(math.isfinite(rate) for rate in (low, high)):
+        raise ValueError("Shared camera frame rates must be finite and positive")
+    ratio = high / low
+    if not math.isclose(ratio, round(ratio)):
+        raise ValueError(
+            "Shared HockeyMON camera frame rates must match or have an integer ratio; "
+            f"received {left_fps} and {right_fps} FPS"
+        )
+    return low
+
+
 class RuntimeProtocol:
     """Translate native desktop messages and report acknowledged Python state.
 
@@ -156,6 +170,7 @@ class RuntimeProtocol:
         self.graph = graph or {}
         self.total_ns = total_ns
         self.start_ns = start_ns
+        self.frame_offset = 0
         self.request_timeout = request_timeout
         self._pending: dict[str, _Pending] = {}
         self._session_id = ""
@@ -654,6 +669,25 @@ class RuntimeProtocol:
         except (OSError, ValueError, TypeError, KeyError, binascii.Error) as error:
             self._inspect_emit(kind, request_id, status="error", message=str(error))
 
+    def timeline_seconds(self, runtime: dict) -> float | None:
+        """Map delivered frame IDs to the synchronized recording's time origin.
+
+        The native dual-input loader retains the left synchronization offset in
+        frame IDs. Its reported FPS already accounts for source frame stepping.
+        Both desktop progress and the audio monitor must consume this clock.
+        """
+        frame, fps = runtime.get("frame"), runtime.get("fps")
+        if frame is None or fps is None:
+            return None
+        rate = float(fps)
+        if not math.isfinite(rate) or rate <= 0:
+            raise ValueError("Runtime frame rate must be finite and positive")
+        # The legacy loader labels a zero start as frame 1, but nonzero
+        # starts retain their exact integer frame ID. Reset this bias on seeks.
+        offset = int(self.frame_offset)
+        zero_start_bias = int(offset == 0 and self.start_ns + self._child_offset_ns == 0)
+        return max(0.0, (int(frame) - offset - zero_start_bias) / rate)
+
     def poll(self) -> None:
         """Drain receipts, then expose the last completed frame and preview."""
         now = time.monotonic()
@@ -694,9 +728,10 @@ class RuntimeProtocol:
                 runtime = read_document(runtime_path)
                 self._runtime_mtime = modified
                 self._spec()
-                frame, fps = runtime.get("frame"), runtime.get("fps")
-                if frame is not None and fps is not None and float(fps) > 0:
-                    position = max(0, round(int(frame) * 1e9 / float(fps)) - self.start_ns)
+                fps = runtime.get("fps")
+                timeline = self.timeline_seconds(runtime)
+                if timeline is not None:
+                    position = max(0, round(timeline * 1e9) - self.start_ns)
                     self._last_position_ns = position
                     speed = (
                         (position - self._clock_position_ns)

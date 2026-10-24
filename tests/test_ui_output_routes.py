@@ -16,6 +16,80 @@ import pytest
 
 from hmlib.ui.output_routes import OutputRoutes
 from hmlib.ui.workspace.files import read_json, write_json
+from hmlib.video.encoder_dimensions import fit_encoder_dimensions
+
+
+@pytest.mark.parametrize(
+    ("size", "budget", "expected"),
+    [
+        ((20415, 5256), 262144, (8192, 2108)),
+        ((3000, 10000), 262144, (2456, 8192)),
+        ((161, 97), 262144, (160, 96)),
+        ((8192, 8192), 65536, (4096, 4096)),
+        ((1920, 1080), 262144, (1920, 1080)),
+    ],
+)
+def should_fit_stitched_encoder_dimensions_without_upscaling(size, budget, expected):
+    limits = {
+        "width_min": 129,
+        "height_min": 33,
+        "width_max": 8192,
+        "height_max": 8192,
+        "mb_num_max": budget,
+    }
+    assert fit_encoder_dimensions(*size, limits) == expected
+    with pytest.raises(ValueError, match="without upscaling"):
+        fit_encoder_dimensions(100000, 64, limits)
+    with pytest.raises(ValueError, match="positive source and hardware limits"):
+        fit_encoder_dimensions(*size, {**limits, "width_max": 0})
+
+
+def should_resize_only_stitched_archive_pixels_to_encoder_limits(tmp_path, monkeypatch):
+    import torch
+
+    import hmlib.aspen.plugins.video_out_plugin as module
+
+    requested = []
+
+    def fit(width, height, device):
+        requested.append((width, height, device))
+        return 160, 96
+
+    monkeypatch.setattr(module, "stitched_archive_dimensions", fit)
+    plugin = module.VideoOutPlugin(
+        output_video_path=str(tmp_path / "program.mkv"),
+        preview_via_sink=False,
+        video_out_device="cpu",
+    )
+    originals = torch.full((3, 195, 321, 3), 120, dtype=torch.uint8)
+    context = {
+        "shared": {"game_config": {"video_out": {"archive_stitched": True}}, "fps": 30},
+        "fps": 30,
+        "img": torch.full((3, 96, 160, 3), 80, dtype=torch.uint8),
+        "original_images": originals,
+        "frame_ids": torch.arange(1, 4),
+        "video_frame_cfg": {
+            "output_frame_width": 160,
+            "output_frame_height": 96,
+            "output_aspect_ratio": 160 / 96,
+        },
+    }
+    try:
+        plugin.forward(context)
+    finally:
+        plugin.finalize()
+    assert requested == [(321, 195, torch.device("cpu"))]
+    assert context["original_images"] is originals
+    assert originals.shape == (3, 195, 321, 3) and torch.all(originals == 120)
+    assert context["video_frame_cfg"]["output_frame_width"] == 160
+    archive = next(path for path in plugin.output_paths() if "stitched" in path.name)
+    decoded = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(archive), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"],
+        check=True,
+        capture_output=True,
+    )
+    pixels = np.frombuffer(decoded.stdout, dtype=np.uint8).reshape(3, 96, 160, 3)
+    assert abs(float(pixels.mean()) - 120) < 5
 
 
 def free_port():

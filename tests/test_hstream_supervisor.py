@@ -175,8 +175,9 @@ def should_keep_resolved_frame_origin_precision_and_effective_config_during_nati
 
     captured = []
 
-    def export(game, output, *, effective_config):
+    def export(game, output, *, effective_config, max_output_width):
         captured.append(yaml.safe_load(effective_config.read_text()))
+        assert max_output_width == 0
         return SimpleNamespace(directory=output, frame_offsets=(0, 0))
 
     monkeypatch.setattr(native_calibration, "prepare_native_calibration", export)
@@ -378,6 +379,8 @@ def should_report_producer_output_kinds_without_interpreting_filenames(
     supervisor, monkeypatch, capsys, game_id
 ):
     supervisor.plan.game = supervisor.session / game_id
+    supervisor.plan.game.mkdir()
+    (supervisor.plan.game / "stitched-4k-custom-1.mkv").write_bytes(b"published media")
     records = [
         {
             "name": "stitched-4k-custom.mkv",
@@ -401,3 +404,197 @@ def should_report_producer_output_kinds_without_interpreting_filenames(
         if line.startswith("HM_BACKEND_PUBLICATION ")
     )
     assert json.loads(line.split(" ", 1)[1])["artifacts"] == records
+
+
+@pytest.mark.parametrize("cap", [None, 0, 4096, 16000])
+@pytest.mark.parametrize("refresh", [False, True])
+def should_export_the_exact_native_canvas_cap(supervisor, monkeypatch, cap, refresh):
+    from hmlib.stitching import native_calibration
+    from hmlib.ui import hstream_launch
+
+    supervisor.plan.config["stitching"]["max_output_width"] = cap
+    monkeypatch.setattr(
+        hstream_launch, "make_plan", lambda *a, **kw: copy.deepcopy(supervisor.plan)
+    )
+    captured = []
+
+    def export(game, output, *, effective_config, max_output_width):
+        captured.append(max_output_width)
+        assert yaml.safe_load(effective_config.read_text())["stitching"]["max_output_width"] == cap
+        return SimpleNamespace(directory=output, frame_offsets=(300, 0))
+
+    monkeypatch.setattr(native_calibration, "prepare_native_calibration", export)
+    supervisor.native = "/unused/native"
+    supervisor.args.config = ["native.yaml"]
+    monkeypatch.setattr(supervisor, "_spawn", lambda *a, **kw: None)
+    monkeypatch.setattr(supervisor, "_pump", lambda: 0)
+    (supervisor._refresh_calibration if refresh else supervisor._prepare)()
+    assert captured == [cap or 0]
+    assert supervisor.protocol.frame_offset == 300
+
+
+@pytest.mark.parametrize("cap", [-1, True, 1.5, "4096", []])
+def should_reject_invalid_native_canvas_caps(cap):
+    from hmlib.cli.hstream_backend import _native_max_output_width
+
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        _native_max_output_width({"stitching": {"max_output_width": cap}})
+
+
+def completed_worker(supervisor, monkeypatch, records):
+    monkeypatch.setattr(supervisor, "_prepare", lambda: None)
+    monkeypatch.setattr(supervisor, "_prepare_audio", lambda: None)
+    monkeypatch.setattr(
+        supervisor,
+        "_python",
+        lambda: (supervisor.session / "publication.json").write_text(json.dumps(records)),
+    )
+    monkeypatch.setattr(supervisor, "_pump", lambda: 0)
+
+
+def should_remove_only_owned_working_storage_after_all_publications_exist(
+    supervisor, monkeypatch, capsys
+):
+    supervisor.plan.sinks = {
+        "ENCODE_FILE",
+        "ENCODE_STITCHED_FILE",
+        "ENCODE_PROGRAM_4K_FILE",
+        "RTMP",
+    }
+    supervisor.environment["HM_SHARED_TELEMETRY"] = "1"
+    outside = supervisor.plan.cwd / "original-user-file"
+    outside.write_bytes(b"retain original working directory")
+    (supervisor.working_directory / "outside-link").symlink_to(
+        supervisor.plan.game, target_is_directory=True
+    )
+    (supervisor.working_directory / "working.mkv").write_bytes(b"copied recording")
+    records = []
+    for kind, suffix in [
+        ("program", "mkv"),
+        ("stitched", "mkv"),
+        ("program-4k", "mkv"),
+        ("telemetry", "db"),
+        (None, "png"),
+    ]:
+        path = supervisor.plan.game / f"artifact-{kind}.{suffix}"
+        path.write_bytes(b"published companion")
+        records.append({"path": str(path), **({"kind": kind} if kind else {})})
+    completed_worker(supervisor, monkeypatch, records)
+    assert supervisor.run() == 0
+    assert not supervisor.working_directory.exists()
+    assert outside.is_file()
+    assert all(Path(record["path"]).is_file() for record in records)
+    assert '"status": "complete"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("problem", ["missing", "empty", "working", "auxiliary"])
+def should_preserve_working_recordings_when_publication_validation_fails(
+    supervisor, monkeypatch, capsys, problem
+):
+    supervisor.plan.sinks = {"ENCODE_FILE"}
+    work = supervisor.working_directory / "recoverable.mkv"
+    work.write_bytes(b"working recording")
+    output = supervisor.plan.game / "recording.mkv"
+    output.write_bytes(b"published recording")
+    records = [{"path": str(output), "kind": "program"}]
+    if problem == "missing":
+        records.clear()
+    elif problem == "empty":
+        output.write_bytes(b"")
+    elif problem == "working":
+        records[0]["path"] = str(work)
+    else:
+        records.append({"path": str(supervisor.plan.game / "missing-mask.png")})
+    completed_worker(supervisor, monkeypatch, records)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        supervisor.run()
+    assert work.is_file()
+    assert '"status": "complete"' not in capsys.readouterr().out
+
+
+def should_fail_visibly_without_success_receipt_when_workdir_cleanup_fails(
+    supervisor, monkeypatch, capsys
+):
+    from hmlib.cli import hstream_backend
+
+    completed_worker(supervisor, monkeypatch, [])
+
+    def fail(path):
+        raise PermissionError("cannot remove completed working directory")
+
+    monkeypatch.setattr(hstream_backend.shutil, "rmtree", fail)
+    with pytest.raises(PermissionError, match="cannot remove"):
+        supervisor.run()
+    assert supervisor.working_directory.is_dir()
+    assert '"status": "complete"' not in capsys.readouterr().out
+
+
+def should_allow_network_only_completion_without_file_artifacts(supervisor, monkeypatch):
+    supervisor.plan.sinks = {"RTMP", "RTSP"}
+    completed_worker(supervisor, monkeypatch, [])
+    assert supervisor.run() == 0
+    assert not supervisor.working_directory.exists()
+
+
+def should_feed_the_synchronized_runtime_clock_to_the_audio_monitor(supervisor):
+    updates = []
+    supervisor.protocol.frame_offset = 300
+    supervisor.audio = SimpleNamespace(update=lambda value, **kwargs: updates.append(value))
+    (supervisor.session / "runtime.json").write_text(
+        json.dumps({"frame": 390, "fps": 30, "state": "running"})
+    )
+    supervisor._spawn([sys.executable, "-c", "import time; time.sleep(.1)"], phase="python")
+    assert supervisor._pump() == 0
+    assert updates and all(value == 3 for value in updates)
+
+
+def should_keep_audio_start_seconds_independent_of_selected_camera_rate(monkeypatch):
+    from hmlib.cli.hmtrack import _resolve_mux_audio_source
+    from hmlib.video import ffmpeg
+
+    monkeypatch.setattr(ffmpeg, "BasicVideoInfo", lambda _: SimpleNamespace(fps=60))
+    monkeypatch.setattr(
+        "hmlib.ui.output_audio.prepare_chapter_audio",
+        lambda paths, work_dir, **kw: (str(paths[0]), None),
+    )
+    source, temporary, offset = _resolve_mux_audio_source(
+        ["left.mp4", "right.mp4"], frame_offsets=(60, 120), start_frame=90, start_seconds=3
+    )
+    assert source == "left.mp4" and temporary is None
+    assert offset == -4
+
+
+@pytest.mark.parametrize(
+    "rates, expected", [((60, 30), 30), ((30, 60), 30), ((59.94, 29.97), 29.97), ((25, 25), 25)]
+)
+def should_resolve_only_representable_shared_camera_cadences(rates, expected):
+    from hmlib.cli.hmtrack import _shared_playback_fps
+
+    assert _shared_playback_fps(*rates) == expected
+
+
+@pytest.mark.parametrize("rates", [(60, 24), (60, 29.97), (0, 30), (float("nan"), 30)])
+def should_refuse_shared_camera_cadences_that_cannot_stay_synchronized(rates):
+    from hmlib.cli.hmtrack import _shared_playback_fps
+
+    with pytest.raises(ValueError, match="frame rates"):
+        _shared_playback_fps(*rates)
+
+
+def should_resolve_frame_bounds_in_delivered_time_for_mixed_camera_rates(supervisor, monkeypatch):
+    from hmlib.cli import hstream_backend
+
+    monkeypatch.setattr(
+        hstream_backend,
+        "_media_info",
+        lambda paths: (20, 60 if paths[0].name == "left.mp4" else 30, False, [8], [20]),
+    )
+    instance = Supervisor(supervisor.args, [], supervisor.session)
+    try:
+        assert instance.fps == 30
+        assert instance.plan.start_seconds == 1
+        assert instance.duration == 4
+    finally:
+        instance.selector.close()
+        for kind, handler in instance._old_handlers.items():
+            signal.signal(kind, handler)

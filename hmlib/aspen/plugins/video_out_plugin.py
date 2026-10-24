@@ -9,11 +9,13 @@ import torch
 
 from hmlib.builder import HM
 from hmlib.config import get_nested_value, normalize_runtime_config
+from hmlib.log import logger
 from hmlib.ui.output_cadence import OutputCadence, recording_fps
 from hmlib.utils.gpu import unwrap_tensor
-from hmlib.utils.image import make_channels_last
+from hmlib.utils.image import make_channels_last, resize_image, to_uint8_image
 from hmlib.utils.path import add_prefix_to_filename
 from hmlib.video.bitrate import select_source_bitrate_density
+from hmlib.video.encoder_dimensions import stitched_archive_dimensions
 from hmlib.video.video_out import VideoOutput
 
 from .base import Plugin
@@ -120,6 +122,7 @@ class VideoOutPlugin(Plugin):
         self._primary_path: Path | None = None
         self._main_options: dict = {}
         self._archive_options: dict = {}
+        self._archive_sizes: dict[tuple[int, int, str], tuple[int, int]] = {}
         self._segment_counts: dict[str, int] = {}
         self._segments: list[dict] = []
         self._path_audio: dict[Path, dict] = {}
@@ -657,6 +660,24 @@ class VideoOutPlugin(Plugin):
                 frames = frames.unsqueeze(0)
             frames = frames[indices].contiguous()
             height, width = frames.shape[-3:-1]
+            if source == "original_images":
+                device = torch.device(self._archive_options["device"] or frames.device)
+                key = (width, height, str(device))
+                if key not in self._archive_sizes:
+                    self._archive_sizes[key] = stitched_archive_dimensions(width, height, device)
+                    if self._archive_sizes[key] != (width, height):
+                        logger.info(
+                            "Stitched archive encoder: scaling %dx%d to %dx%d; tracking canvas is unchanged",
+                            width,
+                            height,
+                            *self._archive_sizes[key],
+                        )
+                output_width, output_height = self._archive_sizes[key]
+                if (output_width, output_height) != (width, height):
+                    frames = to_uint8_image(
+                        resize_image(frames, new_width=output_width, new_height=output_height)
+                    ).contiguous()
+                    width, height = output_width, output_height
             archive = dict(context)
             archive.update(
                 img=frames,

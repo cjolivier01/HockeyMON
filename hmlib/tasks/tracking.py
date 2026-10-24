@@ -588,6 +588,9 @@ def run_mmtrack(
                             )
                             if fps:
                                 iter_context["fps"] = float(fps)
+                        timing_source = stitch_inputs[0] if stitch_inputs is not None else data_item
+                        if timing_source is not None and "pts_ns" in timing_source:
+                            iter_context["pts_ns"] = timing_source["pts_ns"]
                         if frame_id is not None and "frame_id" not in iter_context:
                             iter_context["frame_id"] = int(frame_id)
                         # Merge shared into context for plugins convenience

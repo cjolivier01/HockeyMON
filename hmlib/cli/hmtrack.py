@@ -996,6 +996,7 @@ def _resolve_mux_audio_source(
     frame_offsets: tuple[float, float] | None = None,
     single_playlist: bool = False,
     start_frame: int = 0,
+    start_seconds: float | None = None,
     work_dir: Path | None = None,
     stream: int = 0,
 ) -> tuple[str | None, Any | None, float]:
@@ -1054,13 +1055,14 @@ def _resolve_mux_audio_source(
         raise RuntimeError("Could not resolve an audio source for muxing.")
     original_video = chosen[0]
     offset_seconds = 0.0
-    if source_frame_offset or start_frame:
+    if source_frame_offset or start_frame or start_seconds:
         from hmlib.video.ffmpeg import BasicVideoInfo
 
         source_fps = float(BasicVideoInfo(original_video).fps)
         if not math.isfinite(source_fps) or source_fps <= 0:
             raise ValueError(f"Cannot align audio: invalid source frame rate {source_fps}")
-        offset_seconds = -(source_frame_offset + start_frame) / source_fps
+        playback_start = start_frame / source_fps if start_seconds is None else start_seconds
+        offset_seconds = -(source_frame_offset / source_fps + playback_start)
     audio_source, temporary = prepare_chapter_audio(
         [Path(path) for path in chosen], work_dir or Path(tempfile.gettempdir()), stream=stream
     )
@@ -1527,6 +1529,12 @@ def is_stitching(input_video: str) -> bool:
         raise AttributeError("No valid input video specified")
     input_video_files = input_video.split(",")
     return len(input_video_files) == 2 or os.path.isdir(input_video)
+
+
+def _shared_playback_fps(left_fps: float, right_fps: float) -> float:
+    from hmlib.ui.hstream_runtime import shared_playback_fps
+
+    return shared_playback_fps(left_fps, right_fps)
 
 
 def _stitching_input_directory(input_files: list[str], game_directory, native_calibration) -> str:
@@ -2121,15 +2129,20 @@ def _main(args, num_gpu):
                         time_str=stitch_frame_time, fps=left_vid.fps
                     )
 
+                playback_fps = (
+                    _shared_playback_fps(left_vid.fps, right_vid.fps)
+                    if native_calibration is not None
+                    else left_vid.fps
+                )
                 assert not args.start_frame or not args.start_frame_time
                 if not args.start_frame and args.start_frame_time:
                     args.start_frame = time_to_frame(
-                        time_str=args.start_frame_time, fps=left_vid.fps
+                        time_str=args.start_frame_time, fps=playback_fps
                     )
 
                 assert not args.max_frames or not args.max_time
                 if not args.max_frames and args.max_time:
-                    args.max_frames = time_to_frame(time_str=args.max_time, fps=left_vid.fps)
+                    args.max_frames = time_to_frame(time_str=args.max_time, fps=playback_fps)
 
                 if native_calibration is not None:
                     native_calibration.verify_sources(Path(dir_name), game_videos)
@@ -2197,7 +2210,8 @@ def _main(args, num_gpu):
                         game_id=game_id,
                         max_frames=args.max_frames,
                         batch_size=args.batch_size,
-                        start_frame_number=args.start_frame + lfo,
+                        start_frame_number=args.start_frame + (0 if native_calibration else lfo),
+                        source_frame_offset=lfo if native_calibration else 0,
                         original_image_only=True,
                         dtype=torch.uint8,
                         device=gpus["stitching"],
@@ -2215,7 +2229,8 @@ def _main(args, num_gpu):
                         game_id=game_id,
                         max_frames=args.max_frames,
                         batch_size=args.batch_size,
-                        start_frame_number=args.start_frame + rfo,
+                        start_frame_number=args.start_frame + (0 if native_calibration else rfo),
+                        source_frame_offset=rfo if native_calibration else 0,
                         original_image_only=True,
                         dtype=torch.uint8,
                         device=gpus["stitching"],
@@ -2487,6 +2502,11 @@ def _main(args, num_gpu):
                     frame_offsets=synchronized_audio_offsets,
                     single_playlist=shared_source_chapters is not None,
                     start_frame=args.start_frame or 0,
+                    start_seconds=(
+                        args.start_frame / dataloader.fps
+                        if native_calibration is not None
+                        else None
+                    ),
                     work_dir=Path(results_folder),
                     stream=args.mux_audio_stream,
                 )

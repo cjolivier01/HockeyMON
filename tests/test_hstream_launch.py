@@ -215,7 +215,44 @@ def should_honor_initial_archive_config_and_freeze_resolved_routes(game, tmp_pat
     assert "--no-save-video" not in plan.arguments
 
 
-def should_export_saved_recipe_and_execute_the_selected_backend(game, tmp_path):
+@pytest.mark.parametrize("sinks", ["RENDER", "ENCODE_FILE", "RTMP"])
+def should_not_start_saved_spare_stream_from_shared_output_selection(game, sinks):
+    config = yaml.safe_load((game / "config.yaml").read_text())
+    config["video_out"] = {"spare_rtmp_enabled": True, "spare_rtmp_url": "rtmp://saved/spare"}
+    (game / "config.yaml").write_text(yaml.safe_dump(config))
+    plan = make_plan(parser().parse_args(["-g", game.name, "--enable-sinks=" + sinks]))
+    assert plan.config["video_out"]["spare_rtmp_enabled"] is False
+    assert plan.config["video_out"]["show_youtube"] is (sinks == "RTMP")
+    assert plan.sinks == {sinks}
+
+
+def should_include_explicit_initial_spare_stream_in_network_admission(game, tmp_path):
+    overlay = tmp_path / "spare.yaml"
+    overlay.write_text(
+        "video_out: {show_youtube: false, spare_rtmp_enabled: true, spare_rtmp_url: 'rtmp://explicit/spare'}\n"
+    )
+    initial = tmp_path / "initial-spare.json"
+    initial.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": ["--config", overlay.name],
+            }
+        )
+    )
+    plan = make_plan(parser().parse_args(["-g", game.name]), initial=initial)
+    assert plan.config["video_out"]["spare_rtmp_enabled"] is True
+    assert plan.config["video_out"]["show_youtube"] is False
+    assert plan.sinks == {"RENDER", "RTMP"}
+    assert "RTMP" in plan.launch_receipt()["sinks"]
+
+
+def should_export_saved_recipe_and_execute_the_selected_backend(game, tmp_path, monkeypatch):
+    output_root = tmp_path / "working output"
+    monkeypatch.setenv("HM_OUTPUT_WORK_DIR", str(output_root))
     config = yaml.safe_load((game / "config.yaml").read_text())
     config["hstream_ui"] = {
         "job": {
@@ -243,6 +280,8 @@ def should_export_saved_recipe_and_execute_the_selected_backend(game, tmp_path):
         )
     )
     content = script.read_text()
+    for directive in ("--nodes=1", "--ntasks=1", "--gres=gpu:1"):
+        assert "#SBATCH " + directive in content
     assert "#SBATCH --time=01:00:00" in content
     assert "--enable-sinks=ENCODE_STITCHED_FILE" in content
     assert "--start-time=00:00:12" in content
@@ -253,6 +292,25 @@ def should_export_saved_recipe_and_execute_the_selected_backend(game, tmp_path):
         [str(script)], env={"HM_CLI_BIN": "/bin/echo"}, capture_output=True, text=True, check=True
     )
     assert "--game-id match" in result.stdout
+    environment_runner = tmp_path / "environment.sh"
+    environment_runner.write_text("#!/bin/sh\nprintf '%s\\n' \"$HM_OUTPUT_WORK_DIR\"\nenv\n")
+    environment_runner.chmod(0o755)
+    result = subprocess.run(
+        [str(script)],
+        env={
+            "HM_CLI_BIN": str(environment_runner),
+            "HSTREAM_UI_PARENT_PID": "1",
+            "HSTREAM_UI_BACKEND_SESSION": "/stale/session",
+            "HM_UI_INITIAL_LAUNCH": "/stale/launch",
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.splitlines()[0] == str(output_root)
+    assert "HSTREAM_UI_PARENT_PID=" not in result.stdout
+    assert "HSTREAM_UI_BACKEND_SESSION=" not in result.stdout
+    assert "HM_UI_INITIAL_LAUNCH=" not in result.stdout
     with pytest.raises(FileExistsError):
         export_job(
             parser().parse_args(["--export-job", "--game-dir", str(game), "--output", str(script)])

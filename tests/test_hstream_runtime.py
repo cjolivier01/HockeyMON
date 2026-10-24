@@ -366,3 +366,28 @@ def should_report_recoverable_operation_errors_without_stopping_pipeline(runtime
     ui.apply_runtime_requests(lambda: True)
     protocol.poll()
     assert messages[-1] == "runtime property playcropper0 exposure=0.31"
+
+
+@pytest.mark.parametrize("offset, fps", [(300, 30), (600, 30), (0, 15)])
+def should_normalize_sync_offsets_before_progress_and_relative_seeks(runtime, offset, fps):
+    ui, protocol, messages = runtime
+    protocol.frame_offset = offset
+    protocol.start_ns = 2_000_000_000
+    seeks = []
+    protocol.seek = lambda target, generation: seeks.append((target, generation))
+    ui.publish_runtime(frame=offset + 3 * fps, fps=fps)
+    protocol.poll()
+    assert any("processed_ns=1000000000" in line for line in messages)
+    assert protocol.handle_line("@seek-relative 1000000000 2")
+    assert seeks == [(2_000_000_000, 2)]
+    assert protocol.timeline_seconds({"frame": offset, "fps": fps}) == 0
+
+
+@pytest.mark.parametrize("offset", [0, 0.885511])
+def should_use_the_actual_zero_start_frame_convention_after_seek(runtime, offset):
+    _, protocol, _ = runtime
+    protocol.frame_offset = offset
+    assert protocol.timeline_seconds({"frame": 1, "fps": 30}) == 0
+    assert protocol.timeline_seconds({"frame": 31, "fps": 30}) == 1
+    protocol.reset_child(2_000_000_000)
+    assert protocol.timeline_seconds({"frame": 60, "fps": 30}) == 2

@@ -7,7 +7,9 @@ import json
 import os
 import re
 import selectors
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -67,12 +69,25 @@ def _media_info(paths: list[Path]) -> tuple[float, float, bool, list[int | None]
     return duration, fps, audio, depths, durations
 
 
+def _native_max_output_width(config: dict) -> int:
+    from hmlib.ui.hstream_launch import get_path
+
+    # The complete effective config is a native settings overlay. Its canonical
+    # key takes precedence over legacy property aliases at the same layer.
+    value = get_path(config, "stitching.max_output_width", None)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("stitching.max_output_width must be null or a nonnegative integer")
+    return value
+
+
 class Supervisor:
     """Keep native preparation and Python processing within the UI-owned group."""
 
     def __init__(self, args, arguments: list[str], session: Path) -> None:
         from hmlib.ui.hstream_launch import make_plan
-        from hmlib.ui.hstream_runtime import RuntimeProtocol
+        from hmlib.ui.hstream_runtime import RuntimeProtocol, shared_playback_fps
 
         self.args, self.arguments, self.session = args, arguments, session
         launch = os.environ.get("HM_UI_INITIAL_LAUNCH")
@@ -98,6 +113,8 @@ class Supervisor:
         self.environment["HM_OUTPUT_WORK_DIR"] = str(output_root.resolve())
         runs.mkdir(parents=True, exist_ok=True)
         self.working_directory = Path(tempfile.mkdtemp(prefix="hockeymon-", dir=runs))
+        identity = self.working_directory.stat()
+        self._working_identity = (identity.st_dev, identity.st_ino)
         self.worker_cwd = self.plan.cwd if self.initial else self.working_directory
         self.environment["HM_SHARED_WORK_DIR"] = str(self.working_directory)
         source_info = [_media_info(paths) for paths in self.plan.sources.values()]
@@ -122,7 +139,11 @@ class Supervisor:
             emit(
                 "HSTREAM_STARTUP stage=decoder message=High-bit-depth grading uses FFmpeg BGR48 software decode and floating processing"
             )
-        self.fps = source_info[0][1]
+        self.fps = (
+            shared_playback_fps(self.source_info["left"][1], self.source_info["right"][1])
+            if set(self.plan.sources) == {"left", "right"}
+            else source_info[0][1]
+        )
         if self.plan.start_frame:
             self.plan.start_seconds = self.plan.start_frame / self.fps
         self.duration = max(0.0, min(info[0] for info in source_info) - self.plan.start_seconds)
@@ -287,9 +308,13 @@ class Supervisor:
         from hmlib.stitching.native_calibration import prepare_native_calibration
 
         self.snapshot = prepare_native_calibration(
-            self.plan.game, self.session / "calibration", effective_config=effective_config
+            self.plan.game,
+            self.session / "calibration",
+            effective_config=effective_config,
+            max_output_width=_native_max_output_width(self.plan.config),
         )
         self.environment["HM_SHARED_NATIVE_CALIBRATION"] = str(self.snapshot.directory)
+        self.protocol.frame_offset = self.snapshot.frame_offsets[0]
         available = (
             min(
                 self.source_info[name][0] - offset / self.source_info[name][1]
@@ -405,9 +430,13 @@ class Supervisor:
         effective_config = self.session / "native-launch.yaml"
         effective_config.write_text(yaml.safe_dump(plan.config, sort_keys=False))
         self.snapshot = prepare_native_calibration(
-            plan.game, self.session / "calibration", effective_config=effective_config
+            plan.game,
+            self.session / "calibration",
+            effective_config=effective_config,
+            max_output_width=_native_max_output_width(plan.config),
         )
         self.environment["HM_SHARED_NATIVE_CALIBRATION"] = str(self.snapshot.directory)
+        self.protocol.frame_offset = self.snapshot.frame_offsets[0]
         self.plan = plan
         self.protocol.graph = plan.graph
 
@@ -453,9 +482,10 @@ class Supervisor:
                 self.protocol.poll()
                 if self.audio is not None and (self.session / "runtime.json").is_file():
                     state = json.loads((self.session / "runtime.json").read_text())
-                    if state.get("frame") is not None and state.get("fps"):
+                    timeline = self.protocol.timeline_seconds(state)
+                    if timeline is not None:
                         self.audio.update(
-                            float(state["frame"]) / float(state["fps"]),
+                            timeline,
                             playing=state.get("state") == "running",
                         )
                 if self.seek_generation is not None:
@@ -483,7 +513,68 @@ class Supervisor:
                 self.child.stdin.close()
                 return code
 
+    def _published_artifacts(self) -> list[dict]:
+        receipt = self.session / "publication.json"
+        records = json.loads(receipt.read_text()) if receipt.is_file() else []
+        if not isinstance(records, list):
+            raise TypeError("Publication receipt must contain an artifact list")
+        required = {
+            kind
+            for sink, kind in (
+                ("ENCODE_FILE", "program"),
+                ("ENCODE_STITCHED_FILE", "stitched"),
+                ("ENCODE_PROGRAM_4K_FILE", "program-4k"),
+            )
+            if sink in self.plan.sinks
+        }
+        if self.environment["HM_SHARED_TELEMETRY"] == "1":
+            required.add("telemetry")
+        artifacts = []
+        for record in records:
+            if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+                raise TypeError("Published artifact must identify its durable file")
+            path = Path(record["path"])
+            if not path.is_absolute() or path.resolve().is_relative_to(self.working_directory):
+                raise ValueError(f"Published artifact is not outside working storage: {path}")
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+                raise ValueError(f"Published artifact is empty or not a regular file: {path}")
+            kind = record.get("kind")
+            if kind is None:
+                if path.suffix.lower() in {".mp4", ".mkv", ".mov", ".db"}:
+                    raise ValueError("Published media artifact has no logical kind")
+                continue
+            if kind not in {"program", "stitched", "program-4k", "telemetry"}:
+                raise ValueError(f"Unknown published artifact kind: {kind}")
+            required.discard(kind)
+            artifacts.append(record)
+        if required:
+            raise ValueError(
+                "Required publication artifacts are missing: " + ", ".join(sorted(required))
+            )
+        return artifacts
+
+    def _cleanup_working_directory(self) -> None:
+        info = self.working_directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != self._working_identity:
+            raise RuntimeError("Working directory ownership changed; refusing cleanup")
+        # rmtree does not traverse symlinks; only this supervisor's unique run
+        # directory is owned. Original CLI cwd and published files remain intact.
+        shutil.rmtree(self.working_directory)
+
+    def _close_resources(self) -> None:
+        # Every resource gets cleanup even if an earlier owner raises.
+        with ExitStack() as cleanup:
+            for kind, handler in self._old_handlers.items():
+                cleanup.callback(signal.signal, kind, handler)
+            cleanup.callback(self.selector.close)
+            cleanup.callback(self.protocol.stopped)
+            if self.audio is not None:
+                cleanup.callback(self.audio.close)
+            cleanup.callback(self._terminate_child)
+
     def run(self) -> int:
+        closed = False
         try:
             (self.session / "publication.json").unlink(missing_ok=True)
             emit("HM_BACKEND_LAUNCH " + json.dumps(self.plan.launch_receipt()))
@@ -529,18 +620,10 @@ class Supervisor:
                     )
                 )
                 return code
-            receipt = self.session / "publication.json"
-            records = json.loads(receipt.read_text()) if receipt.is_file() else []
-            artifacts = []
-            for record in records:
-                kind = record.get("kind")
-                if kind is None:
-                    if Path(record["path"]).suffix.lower() in {".mp4", ".mkv", ".mov", ".db"}:
-                        raise ValueError("Published media artifact has no logical kind")
-                    continue
-                if kind not in {"program", "stitched", "program-4k", "telemetry"}:
-                    raise ValueError(f"Unknown published artifact kind: {kind}")
-                artifacts.append(record)
+            artifacts = self._published_artifacts()
+            closed = True
+            self._close_resources()
+            self._cleanup_working_directory()
             emit(
                 "HM_BACKEND_PUBLICATION "
                 + json.dumps(
@@ -554,16 +637,8 @@ class Supervisor:
             )
             return 0
         finally:
-            # Execute every cleanup even when a worker, audio device or helper
-            # fails during shutdown. ExitStack preserves visible failures.
-            with ExitStack() as cleanup:
-                for kind, handler in self._old_handlers.items():
-                    cleanup.callback(signal.signal, kind, handler)
-                cleanup.callback(self.selector.close)
-                cleanup.callback(self.protocol.stopped)
-                if self.audio is not None:
-                    cleanup.callback(self.audio.close)
-                cleanup.callback(self._terminate_child)
+            if not closed:
+                self._close_resources()
 
 
 def main(arguments: list[str] | None = None) -> int:
@@ -627,7 +702,7 @@ def main(arguments: list[str] | None = None) -> int:
             return Supervisor(args, arguments, session).run()
         with tempfile.TemporaryDirectory(prefix="hm-cli-") as temporary:
             return Supervisor(args, arguments, Path(temporary)).run()
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         emit(f"HSTREAM_BACKEND_ERROR {type(error).__name__}: {error}")
         return 1
 

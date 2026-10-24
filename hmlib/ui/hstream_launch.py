@@ -259,7 +259,6 @@ def _initial_output_routes(settings: dict, sinks: set[str]) -> None:
         ("video_out.archive_program", "ENCODE_FILE"),
         ("video_out.archive_stitched", "ENCODE_STITCHED_FILE"),
         ("video_out.archive_program_4k", "ENCODE_PROGRAM_4K_FILE"),
-        ("video_out.show_youtube", "RTMP"),
         ("video_out.rtsp_enabled", "RTSP"),
     ):
         value = get_path(settings, key, missing)
@@ -395,6 +394,10 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
     set_path(config, "video_out.archive_stitched", "ENCODE_STITCHED_FILE" in sinks)
     set_path(config, "video_out.archive_program_4k", "ENCODE_PROGRAM_4K_FILE" in sinks)
     set_path(config, "video_out.show_youtube", "RTMP" in sinks)
+    # The shared desktop has one RTMP choice. A legacy spare publisher must
+    # never bypass that selection; an explicit initial CLI config can request
+    # it below, where it participates in the same network/seek receipt.
+    set_path(config, "video_out.spare_rtmp_enabled", False)
     set_path(config, "video_out.rtsp_enabled", "RTSP" in sinks)
     initial_settings = {}
     if initial_args is not None:
@@ -427,6 +430,19 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
         if initial_args.no_audio:
             set_path(config, "pipeline.hmaudio.enable", False)
             set_path(initial_settings, "pipeline.hmaudio.enable", False)
+        rtmp_enabled = False
+        for key in ("show_youtube", "spare_rtmp_enabled"):
+            value = get_path(config, "video_out." + key, False)
+            if value is None:
+                value = key == "show_youtube" and "RTMP" in sinks
+            if not isinstance(value, (bool, int)) or value not in (False, True, 0, 1):
+                raise ValueError(f"Initial output setting video_out.{key} must be boolean")
+            set_path(config, "video_out." + key, bool(value))
+            rtmp_enabled |= bool(value)
+        if rtmp_enabled:
+            sinks.add("RTMP")
+        else:
+            sinks.discard("RTMP")
         if {"lfo", "rfo"} & explicit_names:
             if initial_args.lfo is None or initial_args.rfo is None:
                 raise ValueError("Manual synchronization requires both --lfo and --rfo")
@@ -444,7 +460,6 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
             ("archive_program", "ENCODE_FILE"),
             ("archive_stitched", "ENCODE_STITCHED_FILE"),
             ("archive_program_4k", "ENCODE_PROGRAM_4K_FILE"),
-            ("show_youtube", "RTMP"),
             ("rtsp_enabled", "RTSP"),
         ):
             set_path(config, "video_out." + key, sink in sinks)
@@ -678,11 +693,17 @@ def export_job(args: argparse.Namespace) -> Path:
         ]
     lines = [
         "#!/bin/sh",
+        "#SBATCH --nodes=1",
+        "#SBATCH --ntasks=1",
+        "#SBATCH --gres=gpu:1",
         *(f"#SBATCH {line}" for line in args.sbatch),
         "set -eu",
+        "unset HSTREAM_UI_PARENT_PID HSTREAM_UI_BACKEND_SESSION HM_UI_INITIAL_LAUNCH",
         f"export HM_GAME_DIR={shlex.quote(str(game.parent))}",
-        'exec "${HM_CLI_BIN:-hm-cli}" ' + shlex.join(command),
     ]
+    if output_root := os.environ.get("HM_OUTPUT_WORK_DIR"):
+        lines.append(f"export HM_OUTPUT_WORK_DIR={shlex.quote(output_root)}")
+    lines.append('exec "${HM_CLI_BIN:-hm-cli}" ' + shlex.join(command))
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w" if args.force else "x", encoding="utf-8") as stream:
         stream.write("\n".join(lines) + "\n")
