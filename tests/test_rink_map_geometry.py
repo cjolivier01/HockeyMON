@@ -288,3 +288,32 @@ def should_skip_unlocatable_players_above_horizon_without_hiding_invalid_map():
     with pytest.raises(ValueError, match="intersect"):
         project_rink_points([[500, 250]], mapping)
     assert np.isnan(project_rink_points([[500, 250]], mapping, allow_missing=True)).all()
+
+
+def should_apply_native_grid_bounds_and_rounded_rink_edges():
+    mapping = planar_test_mapping()
+    mapping.update(native=True, layout=dict(DEFAULT_LAYOUT))
+    mapping["projection"]["native_bounds"] = True
+    points = [[30.48, 12.954], [10, 12.954], [50, 12.954]]
+    for angle in (0, -5, 5):
+        mapping["projection"]["rotation_degrees"] = angle
+        pixels = unproject_rink_points(points, mapping)
+        np.testing.assert_allclose(project_rink_points(pixels, mapping), points, atol=0.002)
+    outside = project_rink_points([[-50, 250], [0, 0]], mapping, allow_missing=True)
+    assert np.isnan(outside).all()
+    invisible = unproject_rink_points([[1000, 1000]], mapping)
+    assert np.isnan(invisible).all()
+
+
+def should_reject_native_projection_cells_with_missing_viewing_rays():
+    mapping = planar_test_mapping()
+    mapping["projection"]["native_bounds"] = True
+    encoded = io.BytesIO(base64.b64decode(mapping["projection"]["data"]))
+    rays = np.load(encoded)["rays"]
+    rays[:2, :2] = 0
+    replacement = io.BytesIO()
+    np.savez_compressed(replacement, rays=rays)
+    mapping["projection"]["data"] = base64.b64encode(replacement.getvalue()).decode()
+    result = project_rink_points([[0, 0], [500, 250]], mapping, allow_missing=True)
+    assert np.isnan(result[0]).all()
+    assert np.isfinite(result[1]).all()

@@ -566,3 +566,42 @@ def should_reject_changed_mask_in_a_single_published_run(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="Rink mask changed"):
         plugin.forward(context)
     assert (tmp_path / "rink_mask_0.png").read_bytes() == original
+
+
+@requires_torch
+def should_keep_first_frame_sidecar_when_authorized_native_epoch_changes_mask(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def configure(**kwargs):
+        calls.append(kwargs)
+        return {
+            "combined_mask": torch.full(kwargs["expected_shape"], len(calls) == 1, dtype=torch.bool)
+        }
+
+    monkeypatch.setattr("hmlib.segm.ice_rink.configure_ice_rink_mask", configure)
+    monkeypatch.setattr(
+        "hmlib.stitching.native_calibration.shared_native_calibration",
+        lambda: SimpleNamespace(post_stitch_rotate_degrees=99.0),
+    )
+    plugin = IceRinkSegmConfigPlugin(require_geometry_provenance=True)
+    context = {
+        "data_samples": make_track_data_sample(num_frames=1, ori_shape=(20, 30)),
+        "original_images": torch.zeros(1, 3, 20, 30),
+        "camera_input_geometry": {"stitched_geometry_revision": "first"},
+        "shared": {"game_id": "snapshot-game", "work_dir": str(tmp_path)},
+    }
+    plugin.forward(context)
+    original = (tmp_path / "rink_mask_0.png").read_bytes()
+    context["camera_input_geometry"] = {
+        "stitched_geometry_revision": "second",
+        "post_stitch_rotate_degrees": 5,
+        "native_output_authorization_id": "accepted-epoch",
+    }
+    result = plugin.forward(context)
+    assert not result["rink_profile"]["combined_mask"].any()
+    assert (tmp_path / "rink_mask_0.png").read_bytes() == original
+    assert all(call["force"] and not call["persist"] for call in calls)

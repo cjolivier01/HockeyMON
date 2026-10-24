@@ -1,14 +1,16 @@
 import copy
-import json
 import shutil
 import subprocess
-import sys
 
 import pytest
 import yaml
 
-from hmlib.ui.desktop import WorkspaceEditors
-from hmlib.ui.runtime_setup import OperatorWorkspace, apply_engine_preferences, launch_arguments
+from hmlib.ui.runtime_setup import (
+    OperatorWorkspace,
+    apply_engine_preferences,
+    inspect_pipeline,
+    launch_arguments,
+)
 from hmlib.ui.workspace import Workspace
 
 
@@ -17,15 +19,12 @@ def desktop(tmp_path):
     root = tmp_path / "games"
     with Workspace(root, tmp_path / "session") as workspace:
         workspace.dispatch("games.create", {"game_id": "operator-test"})
-        editors = WorkspaceEditors(workspace)
-        try:
-            yield workspace
-        finally:
-            editors.close()
+        yield workspace
 
 
-def should_persist_operator_settings_through_durable_commands_and_launch(desktop):
-    snapshot = desktop.dispatch("calibration.snapshot", {})
+def should_persist_operator_settings_and_translate_them_for_python_launch(desktop):
+    editor = OperatorWorkspace(desktop.game())
+    snapshot = editor.snapshot()
     changes = {
         "hm_ui.run.detector": "hockeyref",
         "hm_ui.run.precision": "trt-fp32",
@@ -36,18 +35,7 @@ def should_persist_operator_settings_through_durable_commands_and_launch(desktop
         "team.backend": "lab",
         "team.enabled": True,
     }
-    (desktop.commands / "setup-1.json").write_text(
-        json.dumps(
-            {
-                "id": "setup-1",
-                "operation": "calibration.update",
-                "args": {"changes": changes, "expected_revision": snapshot["revision"]},
-            }
-        )
-    )
-    desktop.poll()
-    result = json.loads((desktop.results / "setup-1.json").read_text())
-    assert result["ok"], result
+    editor.update_settings(changes, expected_revision=snapshot["revision"])
     private = yaml.safe_load((desktop.game() / "config.yaml").read_text())
     assert private["video_out"]["output_width"] == 1920
     assert "stitching" not in private
@@ -65,19 +53,12 @@ def should_persist_operator_settings_through_durable_commands_and_launch(desktop
     assert (desktop.game() / "config.yaml").read_bytes() == before
 
 
-def should_fence_stale_operator_edits_and_running_game_changes(desktop):
-    snapshot = desktop.dispatch("calibration.snapshot", {})
-    desktop.dispatch("calibration.update", {"changes": {"team.backend": "lab"}})
+def should_fence_stale_operator_edits(desktop):
+    editor = OperatorWorkspace(desktop.game())
+    snapshot = editor.snapshot()
+    editor.update_settings({"team.backend": "lab"})
     with pytest.raises(ValueError, match="changed"):
-        desktop.dispatch(
-            "calibration.update",
-            {"changes": {"team.enabled": True}, "expected_revision": snapshot["revision"]},
-        )
-    desktop.start_command(
-        [sys.executable, "-c", "import time; time.sleep(30)"], desktop.game().name
-    )
-    with pytest.raises(RuntimeError, match="Stop job"):
-        desktop.dispatch("calibration.update", {"changes": {"team.enabled": True}})
+        editor.update_settings({"team.enabled": True}, expected_revision=snapshot["revision"])
 
 
 @pytest.mark.parametrize(
@@ -95,7 +76,7 @@ def should_reject_invalid_run_settings_without_mutation(desktop, change):
     path = desktop.game() / "config.yaml"
     before = path.read_bytes()
     with pytest.raises(ValueError):
-        desktop.dispatch("calibration.update", {"changes": change})
+        OperatorWorkspace(desktop.game()).update_settings(change)
     assert path.read_bytes() == before
 
 
@@ -142,17 +123,14 @@ def should_preserve_automatic_dimensions_after_reloading(desktop):
 
 
 def should_inspect_unprepared_engines_without_loading_weights(desktop):
-    desktop.dispatch(
-        "calibration.update",
+    OperatorWorkspace(desktop.game()).update_settings(
         {
-            "changes": {
-                "hm_ui.run.precision": "onnx-int8",
-                "hm_ui.run.pose_precision": "trt-fp32",
-                "hm_ui.run.analytics": "pose",
-            }
+            "hm_ui.run.precision": "onnx-int8",
+            "hm_ui.run.pose_precision": "trt-fp32",
+            "hm_ui.run.analytics": "pose",
         },
     )
-    graph = desktop.dispatch("pipeline.inspect", {})
+    graph = inspect_pipeline(desktop.game())
     nodes = {node["name"]: node for node in graph["nodes"]}
     detector = nodes["detector_factory"]["params"]
     assert detector["onnx"]["enable"] is True
@@ -171,10 +149,10 @@ def should_keep_complete_output_graph_for_each_analysis_preset(
 
     from hmlib.aspen import AspenNet
 
-    desktop.dispatch("calibration.update", {"changes": {"hm_ui.run.analytics": analysis}})
+    OperatorWorkspace(desktop.game()).update_settings({"hm_ui.run.analytics": analysis})
     arguments = launch_arguments(desktop.game(), "track")
     paths = [arguments[index + 1] for index, value in enumerate(arguments) if value == "--config"]
-    graph = desktop.dispatch("pipeline.inspect", {})
+    graph = inspect_pipeline(desktop.game())
     assert graph["graph"] == " + ".join(paths)
     nodes = {node["name"]: node for node in graph["nodes"]}
     order = list(
@@ -204,7 +182,7 @@ def should_validate_custom_analysis_dependencies_and_apply_pose_model(desktop):
     editor.update_settings(
         {"hm_ui.run.analytics": "custom", "pipeline.player-analytics.jersey.enable": True}
     )
-    graph = desktop.dispatch("pipeline.inspect", {})
+    graph = inspect_pipeline(desktop.game())
     nodes = {node["name"]: node for node in graph["nodes"]}
     assert "pose" not in nodes
     assert nodes["jersey_numbers"]["params"]["roi_mode"] == "bbox"
@@ -228,7 +206,7 @@ def should_validate_custom_analysis_dependencies_and_apply_pose_model(desktop):
             "hm_ui.run.pose_model": "coco",
         }
     )
-    nodes = {node["name"]: node for node in desktop.dispatch("pipeline.inspect", {})["nodes"]}
+    nodes = {node["name"]: node for node in inspect_pipeline(desktop.game())["nodes"]}
     assert "coco" in nodes["pose_factory"]["params"]["pose_config"]
     assert "actions" in nodes
 
@@ -245,13 +223,13 @@ def should_toggle_individual_analysis_from_the_current_preset_and_resolve_custom
     editor.update_settings(
         {"hm_ui.run.jersey_model": "custom", "hm_ui.run.jersey_model_path": "models/jersey.onnx"}
     )
-    nodes = {node["name"]: node for node in desktop.dispatch("pipeline.inspect", {})["nodes"]}
+    nodes = {node["name"]: node for node in inspect_pipeline(desktop.game())["nodes"]}
     assert nodes["jersey_numbers"]["class"].endswith("ParseqJerseyPlugin")
     assert nodes["jersey_numbers"]["params"]["model_path"] == str(
         desktop.game() / "models/jersey.onnx"
     )
     editor.update_settings({"pipeline.player-analytics.jersey.roi-mode": "pose"})
-    nodes = {node["name"]: node for node in desktop.dispatch("pipeline.inspect", {})["nodes"]}
+    nodes = {node["name"]: node for node in inspect_pipeline(desktop.game())["nodes"]}
     assert "coco" in nodes["pose_factory"]["params"]["pose_config"]
 
 
@@ -282,7 +260,7 @@ def should_inspect_unprepared_appearance_and_exact_native_pose_models(desktop):
     OperatorWorkspace(desktop.game()).update_settings(
         {"hm_ui.run.analytics": "pose-actions", "pipeline.tracker.reid-enable": True}
     )
-    nodes = {node["name"]: node for node in desktop.dispatch("pipeline.inspect", {})["nodes"]}
+    nodes = {node["name"]: node for node in inspect_pipeline(desktop.game())["nodes"]}
     assert nodes["tracker"]["depends"] == ["player_reid"]
     assert nodes["player_reid"]["params"]["onnx_path"].endswith("reid.onnx")
     assert nodes["pose_factory"]["params"]["pose_checkpoint_sha256"] == NATIVE_POSE_SHA256
@@ -400,3 +378,22 @@ def should_handle_silent_chapters_and_reject_inconsistent_audio(tmp_path, partia
             None,
             -0.5,
         )
+
+
+def should_keep_single_source_chapters_distinct_from_stereo_inputs(monkeypatch):
+    from hmlib.cli.hmtrack import _resolve_mux_audio_source
+
+    selected = []
+
+    def prepare(paths, work_dir, **kwargs):
+        selected.extend(str(path) for path in paths)
+        return "joined-audio.m4a", None
+
+    def reject_stereo(*args):
+        pytest.fail("Two single-source chapters must not trigger stereo synchronization")
+
+    monkeypatch.setattr("hmlib.ui.output_audio.prepare_chapter_audio", prepare)
+    monkeypatch.setattr("hmlib.stitching.synchronize.synchronize_by_audio", reject_stereo)
+    result = _resolve_mux_audio_source(["part-1.mp4", "part-2.mp4"], single_playlist=True)
+    assert selected == ["part-1.mp4", "part-2.mp4"]
+    assert result == ("joined-audio.m4a", None, 0.0)

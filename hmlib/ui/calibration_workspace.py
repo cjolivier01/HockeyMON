@@ -1207,8 +1207,14 @@ def _rink_evidence(mapping):
 
 def prepare_rink_map(game_dir: str | Path) -> dict | None:
     """Load calibrated evidence once, before processing video frames."""
+    from hmlib.stitching.native_calibration import (
+        prepare_native_rink_map,
+        shared_native_calibration,
+    )
     from hmlib.stitching.rink_map import fit_rink_map
 
+    if shared_native_calibration() is not None:
+        return prepare_native_rink_map(Path(game_dir))
     workspace = CalibrationWorkspace(game_dir)
     with stitching_lock(workspace.game_dir, blocking=False):
         state = workspace.read_rink_map()
@@ -1257,6 +1263,15 @@ def project_rink_points(
     result[valid] = (
         transformed[valid, :2] / transformed[valid, 2:] + np.asarray(mapping["rink_size"]) / 2
     )
+    if mapping.get("native"):
+        centered = result - np.asarray(mapping["rink_size"]) / 2
+        half = np.asarray(mapping["rink_size"]) / 2
+        radius = float(mapping["layout"]["corner_radius"])
+        corner = np.maximum(0.0, np.abs(centered) - (half - radius))
+        inside = (np.abs(centered) <= half).all(axis=1) & (
+            np.linalg.norm(corner, axis=1) <= radius + 1e-6
+        )
+        result[~inside] = np.nan
     return result.tolist()
 
 

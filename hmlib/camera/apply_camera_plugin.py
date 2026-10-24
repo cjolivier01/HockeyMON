@@ -415,6 +415,12 @@ class ApplyCameraPlugin(Plugin):
                 if key in context:
                     pipeline_inputs[key] = context[key]
             pipeline_inputs["pano_size_wh"] = pano_size_wh
+            if context.get("shared_preview_metadata") is not None:
+                from hmlib.ui.preview_overlays import copy_metadata
+
+                pipeline_inputs["shared_preview_metadata"] = copy_metadata(
+                    context["shared_preview_metadata"]
+                )
 
             pipeline_outputs = self._pipeline(pipeline_inputs)
             img = pipeline_outputs.pop("img")
@@ -441,6 +447,8 @@ class ApplyCameraPlugin(Plugin):
             results["end_zone_img"] = pipeline_outputs["end_zone_img"]
         if context.get("rink_map_overlay") is not None:
             results["rink_map_overlay"] = context["rink_map_overlay"]
+        if pipeline_outputs.get("shared_preview_metadata") is not None:
+            results["shared_preview_metadata"] = pipeline_outputs["shared_preview_metadata"]
         if program_4k is not None:
             results["program_4k_img"] = program_4k
         return results
@@ -458,6 +466,7 @@ class ApplyCameraPlugin(Plugin):
                 "dataset_results",
                 "rink_profile",
                 "rink_map_overlay",
+                "shared_preview_metadata",
                 "game_id",
             }
         return self._input_keys
@@ -466,6 +475,7 @@ class ApplyCameraPlugin(Plugin):
         return {
             "img",
             "rink_map_overlay",
+            "shared_preview_metadata",
             "program_4k_img",
             # "current_box",
             # "frame_ids",

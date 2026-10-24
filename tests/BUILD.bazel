@@ -1461,3 +1461,87 @@ sh_test(
     ],
     env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
+
+sh_test(
+    name = "test_native_calibration",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_native_calibration.py", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_native_calibration.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_hstream_runtime",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_hstream_runtime.py", "cv2", "mmengine", "numpy", "PIL", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_hstream_runtime.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_hstream_scoreboard",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_hstream_scoreboard.py", "cv2", "mmengine", "numpy", "PIL", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_hstream_scoreboard.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_shared_preview_overlays",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_shared_preview_overlays.py", "cv2", "mmengine", "numpy", "PIL", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:hmlib.lib",
+        "python_runtime.sh",
+        "test_shared_preview_overlays.py",
+    ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_hstream_launch",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_hstream_launch.py", "cv2", "numpy", "pytest", "torch", "yaml", "mmengine"],
+    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_hstream_launch.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_hstream_detector",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_hstream_detector.py", "numpy", "PIL", "onnx", "onnxruntime", "pytest", "torch", "yaml"],
+    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_hstream_detector.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_shared_media",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_shared_media.py", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_shared_media.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)
+
+sh_test(
+    name = "test_hstream_supervisor",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_hstream_supervisor.py", "cv2", "numpy", "pytest", "torch", "yaml"],
+    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_hstream_supervisor.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)

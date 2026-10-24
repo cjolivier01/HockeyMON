@@ -14,6 +14,8 @@ from hmlib.utils.gpu import unwrap_tensor
 
 CAPTURE_KEYS = {
     "telemetry_batch",
+    "native_replay",
+    "native_current_box",
     "original_images",
     "rink_profile",
     "camera_input_geometry",
@@ -161,7 +163,11 @@ class TelemetryBatch:
             samples = samples[0]
         boxes = {}
         if kind == "cameras":
-            for role, key in (("program", "current_box"), ("fast", "current_fast_box_list")):
+            for role, key in (
+                ("program", "current_box"),
+                ("fast", "current_fast_box_list"),
+                ("program-native", "native_current_box"),
+            ):
                 if context.get(key) is not None:
                     boxes[role] = _boxes(context[key])
             length = len(next(iter(boxes.values()))) if boxes else len(samples or [])
@@ -210,6 +216,19 @@ class TelemetryBatch:
             sort_keys=True,
             allow_nan=False,
         )
+        native_geometry = context.get("camera_input_geometry", {})
+        if native_geometry.get("native_output_generation") is not None:
+            generation = native_geometry["native_output_generation"]
+            authorization = native_geometry.get("native_output_authorization_id")
+            if (
+                not isinstance(generation, str)
+                or not generation.endswith("\n")
+                or not isinstance(authorization, str)
+            ):
+                raise ValueError(
+                    "Native telemetry requires a complete output generation and authorization"
+                )
+            revision = generation + ":" + authorization
         if context.get("pts_ns") is not None:
             pts = _integer_ids(context["pts_ns"], length)
         else:
@@ -221,6 +240,7 @@ class TelemetryBatch:
         if kind == "cameras":
             stage["boxes"] = boxes
             stage["events"] = _json_copy(context.get("camera_policy_events", []))
+            stage["native_replay"] = _json_copy(context.get("native_replay", []))
         else:
             stage["rows"] = [
                 _observations(sample, kind, context, i) for i, sample in enumerate(samples)

@@ -231,6 +231,7 @@ class VideoPreviewPlugin(Plugin):
                 "fps",
                 "original_images",
                 "rink_map_overlay",
+                "shared_preview_metadata",
             }
         return self._input_keys
 
@@ -262,7 +263,9 @@ class VideoPreviewPlugin(Plugin):
             publish_preview = getattr(hm_ui_process, "publish_preview", None)
             if callable(publish_preview):
                 try:
-                    publish_preview(preview_img, name="Final")
+                    publish_preview(
+                        preview_img, name="Final", metadata=context.get("shared_preview_metadata")
+                    )
                 except (OSError, RuntimeError, TypeError, ValueError) as ex:
                     logger.warning("Failed to publish final hm-ui preview frame: %s", ex)
             if self._shower is None:

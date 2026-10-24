@@ -186,6 +186,12 @@ class StitchingPlugin(Plugin):
         self._right_color_pipeline = _make_pipeline(self._right_color_pipeline_cfg)
 
     def _resolve_dir_name(self, context: dict[str, Any]) -> Path:
+        from hmlib.stitching.native_calibration import shared_native_calibration
+
+        native = shared_native_calibration()
+        if native is not None:
+            self._dir_name = native.directory
+            return self._dir_name
         if self._dir_name is not None:
             return self._dir_name
         if self._pto_project_file:
@@ -209,6 +215,16 @@ class StitchingPlugin(Plugin):
         across runs merely because its dimensions happen to match.
         """
         if self._geometry_source_identity is not None:
+            return self._geometry_source_identity
+
+        from hmlib.stitching.native_calibration import shared_native_calibration
+
+        native = shared_native_calibration()
+        if native is not None:
+            self._geometry_source_identity = {
+                "kind": "native-hugin-generation",
+                "value": native.generation,
+            }
             return self._geometry_source_identity
 
         cfg = self._config_ref
@@ -655,6 +671,13 @@ class StitchingPlugin(Plugin):
         if not self.enabled:
             return {}
 
+        from hmlib.stitching.native_calibration import shared_native_calibration
+
+        native_calibration = shared_native_calibration()
+        # The runtime replaces this mapping atomically after validating an epoch.
+        # Capture it before rendering, so queued frames retain their own geometry.
+        native_epoch = (context.get("shared", {}).get("game_config") or {}).get("hm_shared_runtime")
+
         stitch_inputs = context.get("stitch_inputs")
         if stitch_inputs is None:
             raise RuntimeError("StitchingPlugin requires 'stitch_inputs' in context")
@@ -745,7 +768,14 @@ class StitchingPlugin(Plugin):
 
         blended = self._prepare_frame_for_video(blended, image_roi=None)
 
-        rotate_degrees = self._resolve_rotation_degrees(context)
+        if native_calibration is not None:
+            rotate_degrees = (
+                float(native_epoch["post_stitch_rotate_degrees"])
+                if native_epoch is not None
+                else native_calibration.post_stitch_rotate_degrees
+            )
+        else:
+            rotate_degrees = self._resolve_rotation_degrees(context)
         applied_rotation = 0.0
         if rotate_degrees is not None and abs(rotate_degrees) > 1e-6:
             blended = self._rotate_tensor_keep_size(blended, rotate_degrees)
@@ -860,6 +890,19 @@ class StitchingPlugin(Plugin):
             "debug_rgb_stats": stitched_debug,
             "img": wrap_tensor(stitched_for_output),
         }
+        if native_calibration is not None:
+            out["camera_input_geometry"].update(
+                {
+                    "native_output_generation": (
+                        native_epoch["output_generation"]
+                        if native_epoch is not None
+                        else native_calibration.output_generation
+                    ),
+                    "native_output_authorization_id": (
+                        native_epoch["authorization_id"] if native_epoch is not None else ""
+                    ),
+                }
+            )
         # Only surface model inputs when a stitch_data_pipeline is configured.
         if inputs is not None:
             out["inputs"] = wrap_tensor(tensor=inputs)

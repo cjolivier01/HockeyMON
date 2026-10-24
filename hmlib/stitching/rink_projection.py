@@ -220,7 +220,28 @@ def panorama_rays(points, projection):
     points = rotate_panorama(
         points, projection["image_size"], projection.get("rotation_degrees", 0)
     )
-    return _interpolate(_decode(projection["data"]), points, projection["image_size"])
+    grid = _decode(projection["data"])
+    if projection.get("native_bounds"):
+        size = np.asarray(projection["image_size"])
+        values = np.asarray(points, dtype=float).reshape(-1, 2)
+        position = (values + 0.5) / size
+        valid = (
+            np.isfinite(position).all(axis=1)
+            & (position >= 0).all(axis=1)
+            & (position <= 1).all(axis=1)
+        )
+        grid_size = np.array([grid.shape[1] - 1, grid.shape[0] - 1])
+        indices = np.minimum(
+            np.maximum(np.floor(np.nan_to_num(position) * grid_size).astype(int), 0), grid_size - 1
+        )
+        x, y = indices.T
+        for adjacent in (grid[y, x], grid[y, x + 1], grid[y + 1, x], grid[y + 1, x + 1]):
+            valid &= np.linalg.norm(adjacent, axis=1) > 0.5
+        result = np.full((len(values), 3), np.nan)
+        if valid.any():
+            result[valid] = _interpolate(grid, values[valid], size)
+        return result
+    return _interpolate(grid, points, projection["image_size"])
 
 
 @lru_cache(maxsize=4)
@@ -234,6 +255,21 @@ def rays_to_panorama(rays, projection):
     rays = unit(np.asarray(rays).reshape(-1, 3))
     if not len(rays):
         return np.empty((0, 2))
+    if projection.get("native_bounds"):
+        result = np.full((len(rays), 2), np.nan)
+        size = np.asarray(projection["image_size"])
+        for index, ray in enumerate(rays):
+            try:
+                point = rays_to_panorama([ray], {**projection, "native_bounds": False})[0]
+            except (ValueError, np.linalg.LinAlgError):
+                # Native Project likewise omits anchors outside valid projection.
+                continue
+            if np.any(point < -0.5) or np.any(point > size - 0.5):
+                continue
+            check = panorama_rays([point], projection)[0]
+            if np.isfinite(check).all() and np.linalg.norm(check - ray) <= 1e-5:
+                result[index] = point
+        return result
     rotation = projection.get("rotation_degrees", 0)
     projection = {**projection, "rotation_degrees": 0}
     grid = _decode(projection["data"])

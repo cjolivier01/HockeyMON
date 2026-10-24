@@ -682,7 +682,7 @@ def should_keep_rink_map_drawing_out_of_output_frames():
     from hmlib.aspen.plugins.video_preview_plugin import VideoPreviewPlugin
 
     class Preview:
-        def publish_preview(self, image, *, name):
+        def publish_preview(self, image, *, name, metadata=None):
             self.image = image
             self.name = name
 

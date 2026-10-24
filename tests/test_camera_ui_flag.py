@@ -327,6 +327,10 @@ def should_replay_tracking_ui_action_snapshots_in_click_order(monkeypatch):
             self.acknowledged_seq = None
             self.last_poll_values_changed = False
 
+        def apply_runtime_requests(self, apply_values, apply_operation):
+            # This fixture exercises ordered actions with no pending IPC requests.
+            return None
+
         def apply_playback_action(self, kind):
             return False
 

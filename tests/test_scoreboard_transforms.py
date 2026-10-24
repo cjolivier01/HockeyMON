@@ -19,7 +19,7 @@ def _scoreboard_game_config() -> dict[str, Any]:
     }
 
 
-def should_configure_scoreboard_from_stitched_reference_frame(monkeypatch):
+def should_reuse_saved_polygon_without_opening_interactive_selector(monkeypatch):
     calls: list[dict[str, Any]] = []
 
     def _fake_configure_scoreboard(game_id: str, image=None, **kwargs):
@@ -43,13 +43,11 @@ def should_configure_scoreboard_from_stitched_reference_frame(monkeypatch):
     results = {"img": torch.zeros((1, 4, 4, 3), dtype=torch.uint8)}
     configured = transform(results)
 
-    assert calls == [{"game_id": "test-game", "image": None}]
-    assert configured["scoreboard_cfg"]["scoreboard_points"] == [
-        [10, 20],
-        [30, 20],
-        [30, 40],
-        [10, 40],
-    ]
+    assert calls == []
+    assert (
+        configured["scoreboard_cfg"]["scoreboard_points"]
+        == _scoreboard_game_config()["rink"]["scoreboard"]["perspective_polygon"]
+    )
 
 
 def should_fallback_to_current_frame_when_stitched_reference_is_missing(monkeypatch):
@@ -67,7 +65,7 @@ def should_fallback_to_current_frame_when_stitched_reference_is_missing(monkeypa
     )
     monkeypatch.setattr(
         "hmlib.transforms.scoreboard_transforms.get_config",
-        lambda game_id: _scoreboard_game_config(),
+        lambda game_id: {"rink": {"scoreboard": {"perspective_polygon": None}}},
     )
     monkeypatch.setattr(
         "hmlib.transforms.scoreboard_transforms.get_clip_box",
@@ -88,6 +86,39 @@ def should_fallback_to_current_frame_when_stitched_reference_is_missing(monkeypa
         [3, 4],
         [1, 4],
     ]
+
+
+def should_apply_live_polygon_and_disabled_transitions(monkeypatch):
+    monkeypatch.setattr("hmlib.transforms.scoreboard_transforms.get_clip_box", lambda game_id: None)
+    transform = HmConfigureScoreboard(game_id="test-game", allow_interactive_setup=False)
+    config = _scoreboard_game_config()
+    results = {"game_config": config}
+    first = transform(results)["scoreboard_cfg"]["scoreboard_points"]
+    config["rink"]["scoreboard"]["perspective_polygon"] = [[30, 10], [40, 10], [40, 20], [30, 20]]
+    assert transform(results)["scoreboard_cfg"]["scoreboard_points"] != first
+    config["rink"]["scoreboard"]["enabled"] = False
+    assert "scoreboard_cfg" not in transform(results)
+    config["rink"]["scoreboard"]["enabled"] = True
+    assert transform(results)["scoreboard_cfg"]["scoreboard_points"][0] == [30, 10]
+    config["rink"]["scoreboard"]["perspective_polygon"] = [[0, 0]] * 4
+    assert "scoreboard_cfg" not in transform(results)
+
+
+def should_publish_single_source_selector_canvas_even_when_disabled(tmp_path, monkeypatch):
+    import cv2
+
+    import hmlib.config as configuration
+
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.delenv("HM_SHARED_NATIVE_CALIBRATION", raising=False)
+    monkeypatch.setattr(configuration, "get_game_dir", lambda game_id: str(tmp_path))
+    config = {"rink": {"scoreboard": {"enabled": False}}}
+    transform = HmConfigureScoreboard(game_id="test-game", allow_interactive_setup=False)
+    transform({"game_config": config, "img": torch.full((1, 40, 60, 3), 71, dtype=torch.uint8)})
+    image = cv2.imread(str(tmp_path / "s.png"))
+    assert image.shape == (40, 60, 3) and (image == 71).all()
+    transform({"game_config": config, "img": torch.zeros((1, 40, 60, 3), dtype=torch.uint8)})
+    assert (cv2.imread(str(tmp_path / "s.png")) == 71).all()
 
 
 def should_skip_interactive_scoreboard_setup_when_polygon_is_missing(monkeypatch, caplog):

@@ -734,6 +734,8 @@ class VideoStreamReader:
     ):
         self._filename = filename
         self._type = _normalize_decoder_name(type)
+        if os.environ.get("HM_SHARED_HIGH_BIT_DEPTH") == "1":
+            self._type = "shared-high-bit"
         self._codec = codec
         self._fps = None
         self._width = None
@@ -781,7 +783,20 @@ class VideoStreamReader:
         return self.frame_count
 
     def __iter__(self):
-        if self._type == "torchaudio":
+        if self._type == "shared-high-bit":
+            from hmlib.video.high_bit_reader import HighBitVideoReader
+
+            if self._iter is not None:
+                self._iter.close()
+            self._iter = HighBitVideoReader(
+                self._filename,
+                self.width,
+                self.height,
+                seconds=self._ss,
+                batch_size=self._batch_size,
+            )
+            return self._iter
+        elif self._type == "torchaudio":
             return TAStreamReaderIterator(self._video_in, batch_size=self._batch_size)
         elif self._type == "cv2":
             return CVVideoCaptureIterator(self._video_in, batch_size=self._batch_size)
@@ -893,6 +908,9 @@ class VideoStreamReader:
     def open(self):
         assert self._video_in is None
         self._video_info = BasicVideoInfo(self._filename)
+        if self._type == "shared-high-bit":
+            self._video_in = FFMpegVideoReader()
+            return
         if (self._video_info.width % 2 or self._video_info.height % 2) and self._type != "cv2":
             logger.warning(
                 "Decoding exact odd-sized canvas %sx%s with CPU OpenCV; hardware YUV420 decoders cannot preserve this raster: %s",
@@ -995,7 +1013,9 @@ class VideoStreamReader:
 
     def close(self):
         if self._video_in is not None:
-            if self._torchaudio_stream:
+            if self._type == "shared-high-bit" and self._iter is not None:
+                self._iter.close()
+            elif self._torchaudio_stream:
                 self._video_in.remove_stream(0)
             elif isinstance(self._video_in, cv2.VideoCapture):
                 self._video_in.release()

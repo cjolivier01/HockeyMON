@@ -5,6 +5,7 @@ import csv
 import os
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -350,6 +351,7 @@ class PlayTracker(torch.nn.Module):
         self._ui_action_retry_delay_seconds = 0.0
         self._fixed_edge_rotation_last_sliders: tuple[int, int] = (0, 0)
         self._stitch_rotation_controller = stitch_rotation_controller
+        self._shared_precision_reported = False
         self._force_stitching: bool = bool(force_stitching)
         self._stitch_slider_enabled = False
 
@@ -694,6 +696,11 @@ class PlayTracker(torch.nn.Module):
                 self._breakaway_detection = None
 
                 self._playtracker = CppPlayTracker(BBox(0, 0, play_width, play_height), pt_config)
+                self._native_replay_base = (
+                    self._playtracker.replay_checkpoint()
+                    if os.environ.get("HM_SHARED_UI_BACKEND") == "1"
+                    else None
+                )
                 self._current_roi = None
                 self._current_roi_aspect = None
         else:
@@ -1093,11 +1100,20 @@ class PlayTracker(torch.nn.Module):
         if original_images.device != image_device:
             original_images = original_images.to(device=image_device, non_blocking=True)
 
+        if os.environ.get("HM_SHARED_UI_BACKEND") == "1" and not self._shared_precision_reported:
+            from hmlib.ui.hstream_runtime import publish_precision_status
+
+            publish_precision_status(original_images)
+            self._shared_precision_reported = True
+
         frame_ids_list: list[torch.Tensor] = []
         current_box_list: list[torch.Tensor] = []
         current_fast_box_list: list[torch.Tensor] = []
+        native_current_box_list: list[torch.Tensor] = []
         camera_policy_events: list[dict[str, Any]] = []
+        native_replay = []
         online_images: list[torch.Tensor] = []
+        shared_preview_metadata = [] if os.environ.get("HSTREAM_UI_BACKEND_SESSION") else None
         # Per-frame player footprint centers (bottom of bbox midpoints) and ids
         player_bottom_points_list: list[torch.Tensor] = []
         player_ids_list: list[torch.Tensor] = []
@@ -1124,13 +1140,15 @@ class PlayTracker(torch.nn.Module):
                 frame_id=scalar_frame_id,
             )
 
+            preview_ids = online_ids
+
             self.process_jerseys_info(
                 frame_index=frame_index, frame_id=scalar_frame_id, data=results
             )
 
             # Cache rink_profile once if available in metainfo
             try:
-                if self._rink_profile_cache is None and hasattr(video_data_sample, "metainfo"):
+                if hasattr(video_data_sample, "metainfo"):
                     rp = video_data_sample.metainfo.get("rink_profile", None)
                     if rp is not None:
                         self._rink_profile_cache = rp
@@ -1160,6 +1178,12 @@ class PlayTracker(torch.nn.Module):
 
             # Always sync camera UI controls so sliders affect tracking even without plotting.
             self._apply_ui_controls()
+            if os.environ.get("HM_SHARED_UI_BACKEND") == "1" and self._hm_ui_process is not None:
+                self._hm_ui_process.wait_for_shared_frame(
+                    int(scalar_frame_id),
+                    self._hockey_mon.fps_speed_scale * HockeyMON.BASE_FPS,
+                    self._apply_ui_controls,
+                )
             policy_event = self._record_camera_policy(
                 int(scalar_frame_id),
                 (image_width(online_im), image_height(online_im)),
@@ -1184,6 +1208,36 @@ class PlayTracker(torch.nn.Module):
                             float(bbox[2].item()),
                             float(bbox[3].item()),
                         )
+                    )
+                if self._native_replay_base is not None:
+                    angles = get_nested_value(
+                        self._game_config, "rink.camera.fixed_edge_rotation_angle", 0
+                    )
+                    if not isinstance(angles, (tuple, list)):
+                        angles = [angles, angles]
+                    # Python advances its native tracker even before the first
+                    # detection. Replay's wrapper therefore starts active too.
+                    native_replay.append(
+                        {
+                            "arena": self._playtracker.replay_arena(),
+                            "stepped": True,
+                            "has_received_tracks": True,
+                            "edge_rotation": [float(angle) for angle in angles],
+                            "tracks": [
+                                [tid, box.left, box.top, box.right, box.bottom]
+                                for tid, box in zip(tracking_ids, online_bboxes)
+                            ],
+                            "checkpoint": (
+                                self._playtracker.replay_checkpoint()
+                                if self._frame_counter % 60 == 1 or policy_event is not None
+                                else None
+                            ),
+                            "base_checkpoint": (
+                                self._native_replay_base
+                                if self._frame_counter % 60 == 1 or policy_event is not None
+                                else None
+                            ),
+                        }
                     )
                 playtracker_results = self._playtracker.forward(tracking_ids, online_bboxes)
                 for msg in getattr(playtracker_results, "log_messages", []):
@@ -1664,6 +1718,13 @@ class PlayTracker(torch.nn.Module):
                     unproject_rink_points,
                 )
 
+                rotation_changed = False
+                if self._rink_map.get("native"):
+                    frame_geometry = results["camera_input_geometry"]
+                    rotation = float(frame_geometry["post_stitch_rotate_degrees"])
+                    projection = self._rink_map["projection"]
+                    rotation_changed = projection["rotation_degrees"] != rotation
+                    projection["rotation_degrees"] = rotation
                 boxes = online_tlwhs.detach().cpu().numpy().copy()
                 boxes[:, 2:] += boxes[:, :2]
                 points = np.column_stack(((boxes[:, 0] + boxes[:, 2]) / 2, boxes[:, 3]))
@@ -1674,7 +1735,12 @@ class PlayTracker(torch.nn.Module):
                     )
                 )
                 if self._rink_guide is not None:
-                    if self._rink_guide.image_size != size:
+                    native_current_box_list.append(current_box_list[-1].clone())
+                    if self._rink_guide.image_size != size or rotation_changed:
+                        # Pixel histories and goal anchors belong to the frame's
+                        # projection, which may predate a newly accepted UI epoch.
+                        self._rink_guide.previous_time = None
+                        self._rink_guide.history.clear()
                         self._rink_guide.image_size = size
                         goal_inset = self._rink_map.get("layout", {}).get("goal_inset", 3.3528)
                         self._rink_guide.goals = unproject_rink_points(
@@ -1733,12 +1799,27 @@ class PlayTracker(torch.nn.Module):
                 if online_im.ndim == 4 and online_im.shape[0] == 1:
                     online_im = online_im.squeeze(0)
             assert online_im.device == image_device
+            if shared_preview_metadata is not None:
+                shared_preview_metadata.append(
+                    {
+                        "matrix": np.eye(3),
+                        "boxes": online_bboxes_tlbr.detach().clone(),
+                        "ids": preview_ids.detach().clone(),
+                        "play_box": current_box_list[-1].detach().clone(),
+                        "fast_box": current_fast_box_list[-1].detach().clone(),
+                        "rink_mask": (self._rink_profile_cache or {}).get("combined_mask"),
+                    }
+                )
             online_images.append(make_channels_last(online_im))
 
         results["frame_ids"] = wrap_tensor(torch.stack(frame_ids_list))
         results["current_box"] = wrap_tensor(torch.stack(current_box_list))
         results["current_fast_box_list"] = wrap_tensor(torch.stack(current_fast_box_list))
+        if native_current_box_list:
+            results["native_current_box"] = wrap_tensor(torch.stack(native_current_box_list))
         results["camera_policy_events"] = camera_policy_events
+        if native_replay:
+            results["native_replay"] = native_replay
         # Attach per-frame player bottom points and ids for downstream overlays
         results["player_bottom_points"] = player_bottom_points_list
         results["player_ids"] = player_ids_list
@@ -1768,7 +1849,9 @@ class PlayTracker(torch.nn.Module):
         img = wrap_tensor(img)
         img._verbose = True
         results["img"] = img
-        self._publish_hm_ui_preview(img)
+        if shared_preview_metadata is not None:
+            results["shared_preview_metadata"] = shared_preview_metadata
+        self._publish_hm_ui_preview(img, metadata=shared_preview_metadata)
 
         return results
 
@@ -1860,11 +1943,11 @@ class PlayTracker(torch.nn.Module):
         if self._hm_ui_process.closed:
             raise RuntimeError("hm-ui was closed")
 
-    def _publish_hm_ui_preview(self, img) -> None:
+    def _publish_hm_ui_preview(self, img, *, metadata=None) -> None:
         if not self._camera_ui_enabled or self._hm_ui_process is None:
             return
         try:
-            self._hm_ui_process.publish_preview(img, name="Stitched")
+            self._hm_ui_process.publish_preview(img, name="Stitched", metadata=metadata)
         except (OSError, RuntimeError, ValueError, TypeError) as ex:
             logger.warning("Failed to publish hm-ui preview frame: %s", ex)
 
@@ -1987,8 +2070,10 @@ class PlayTracker(torch.nn.Module):
 
     def _set_stitch_rotation_degrees(self, degrees: float | None) -> None:
         """Apply post-stitch rotation to the controller and keep config in sync."""
-        if self._rink_map is not None and float(degrees or 0) != float(
-            self._current_stitch_rotation_degrees() or 0
+        if (
+            self._rink_map is not None
+            and not self._rink_map.get("native")
+            and float(degrees or 0) != float(self._current_stitch_rotation_degrees() or 0)
         ):
             raise ValueError(
                 "Stop playback and update the rink map before changing stitched rotation"
@@ -2154,7 +2239,14 @@ class PlayTracker(torch.nn.Module):
                 self._set_ui_color_value_at_prefixes(prefixes, "white_balance_temp", _MISSING)
             self._set_ui_color_value_at_prefixes(prefixes, "brightness", max(1, br100) / 100.0)
             self._set_ui_color_value_at_prefixes(
-                prefixes, "exposure_ev", self._slider_to_exposure_ev(ev_x10)
+                prefixes,
+                "exposure_ev",
+                (
+                    self._ui_slider_value(color_win, "HStream_Exposure_x100") / 200.0
+                    if os.environ.get("HSTREAM_UI_BACKEND_SESSION")
+                    and color_win == self._ui_color_window_name
+                    else self._slider_to_exposure_ev(ev_x10)
+                ),
             )
             for key, value in (
                 ("shadow_lift", float(shadow)),
@@ -2304,6 +2396,19 @@ class PlayTracker(torch.nn.Module):
                 tb2("White_Balance_Blue_Gain_x100", 300, 100)
                 tb2("Brightness_Multiplier_x100", 300, 100)
                 tb2("Exposure_EV_x10", _EXPOSURE_EV_X10_SLIDER_MAX, _EXPOSURE_EV_X10_SLIDER_ZERO)
+                if os.environ.get("HSTREAM_UI_BACKEND_SESSION"):
+                    tb2(
+                        "HStream_Exposure_x100",
+                        130,
+                        round(
+                            float(
+                                get_nested_value(
+                                    self._game_config, "rink.camera.color.exposure_ev", 0
+                                )
+                            )
+                            * 200
+                        ),
+                    )
                 tb2("Shadow_Lift_Percent", 100, 0)
                 tb2("Shadow_Lift_Black_Point", 1, 0)
                 tb2("Contrast_Multiplier_x100", 300, 100)
@@ -2591,6 +2696,9 @@ class PlayTracker(torch.nn.Module):
         process = self._hm_ui_process
         if process is None:
             return
+        process.apply_runtime_requests(
+            self._apply_current_ui_control_values, self._apply_shared_runtime_operation
+        )
         controls_changed = self._ui_controls_dirty
         rust_controls_changed = process.last_poll_values_changed
         final_values = process.control_values()
@@ -2671,6 +2779,89 @@ class PlayTracker(torch.nn.Module):
             except (OSError, RuntimeError, TypeError, ValueError, KeyError) as restore_ex:
                 logger.warning("Failed to restore final camera UI values: %s", restore_ex)
 
+    def _apply_shared_runtime_operation(self, request: dict) -> None:
+        if request["kind"] == "preview-overlays":
+            layers = request["layers"]
+            if (
+                not isinstance(layers, list)
+                or len(layers) != 3
+                or any(type(value) is not bool for value in layers)
+            ):
+                raise ValueError("Preview overlays require three booleans")
+            self._hm_ui_process.preview_overlay_layers = tuple(layers)
+            return
+        if request["kind"] == "stitched-output-epoch":
+            from hmlib.config import get_game_dir
+            from hmlib.stitching.native_calibration import validate_live_output_epoch
+
+            epoch = validate_live_output_epoch(
+                Path(get_game_dir(self._game_id)), request["serialized"]
+            )
+            rotation = float(epoch["post_stitch_rotate_degrees"])
+            previous_rotation = self._current_stitch_rotation_degrees()
+            if self._stitch_rotation_controller is None:
+                raise ValueError("Live stitching rotation has no Python runtime owner")
+            if (
+                self._rink_map is not None
+                and not self._rink_map.get("native")
+                and rotation != float(previous_rotation or 0)
+            ):
+                raise ValueError(
+                    "Stop playback and update the rink map before changing stitched rotation"
+                )
+            scoreboard = epoch["scoreboard_property_value"]
+            if scoreboard:
+                coordinates = [int(value) for value in scoreboard.split(",")]
+                if len(coordinates) != 8:
+                    raise ValueError("Native output epoch has an invalid scoreboard polygon")
+                scoreboard = [coordinates[index : index + 2] for index in range(0, 8, 2)]
+            process = self._hm_ui_process
+            previous_values = process.control_values()
+            previous_config = copy.deepcopy(self._game_config)
+            try:
+                process._apply_runtime_controls(
+                    request["values"], self._apply_current_ui_control_values
+                )
+                self._stitch_rotation_controller.set_post_stitch_rotate_degrees(rotation)
+                self._game_config.setdefault("stitching", {})[
+                    "post_stitch_rotate_degrees"
+                ] = rotation
+                if scoreboard:
+                    self._game_config.setdefault("rink", {}).setdefault("scoreboard", {})[
+                        "perspective_polygon"
+                    ] = scoreboard
+                self._game_config["hm_shared_runtime"] = {
+                    "output_generation": epoch["output_generation"],
+                    "authorization_id": epoch["authorization_id"],
+                    "post_stitch_rotate_degrees": rotation,
+                }
+            except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+                from hmlib.camera.hm_ui_bridge import RuntimeRollbackError
+
+                try:
+                    self._game_config.clear()
+                    self._game_config.update(previous_config)
+                    self._stitch_rotation_controller.set_post_stitch_rotate_degrees(
+                        previous_rotation
+                    )
+                    process._apply_runtime_controls(
+                        previous_values, self._apply_current_ui_control_values
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError, KeyError) as rollback_error:
+                    raise RuntimeRollbackError(
+                        "Native output epoch rollback failed; pipeline cannot continue"
+                    ) from rollback_error
+                raise
+            return
+        if request["kind"] == "scoreboard":
+            from hmlib.ui.hstream_scoreboard import apply_scoreboard_selection
+
+            apply_scoreboard_selection(
+                self._game_id, self._game_config, request["points"], request["canvas"]
+            )
+            return
+        raise ValueError(f"Unknown shared runtime operation: {request['kind']}")
+
     def _apply_current_ui_control_values(self) -> bool:
         try:
             self._ui_controls_dirty = False
@@ -2746,7 +2937,7 @@ class PlayTracker(torch.nn.Module):
             )
 
             # Stitch rotation degrees
-            if self._stitch_slider_enabled:
+            if self._stitch_slider_enabled and not os.environ.get("HSTREAM_UI_BACKEND_SESSION"):
                 try:
                     rot_slider = self._ui_slider_value(
                         self._ui_window_name, "Stitch_Rotate_Degrees"

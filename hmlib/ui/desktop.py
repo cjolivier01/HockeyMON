@@ -1,154 +1,32 @@
-"""Own the desktop and its Python pipeline jobs for the whole operator session."""
+"""Launch the shared HStream desktop with HockeyMON's processing backend."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 
 
-class WorkspaceEditors:
-    """Bind game editors to one supervisor, including their temporary previews."""
-
-    def __init__(self, workspace):
-        self.workspace = workspace
-        self.leveling = {}
-        from hmlib.ui.runtime_setup import inspect_pipeline
-
-        workspace.register_operation(
-            "pipeline.inspect", lambda args: inspect_pipeline(workspace.game(args.get("game_id")))
-        )
-        workspace.register_operation("models.status", self._model_status)
-        workspace.register_operation("models.prepare", self._prepare_model)
-        operations = {
-            "snapshot": lambda editor, args: editor.snapshot(),
-            "update": lambda editor, args: editor.update_settings(
-                args["changes"], expected_revision=args.get("expected_revision")
-            ),
-            "crop": lambda editor, args: editor.set_crop(
-                args["crop"],
-                auto_crop=args.get("auto_crop", False),
-                expected_revision=args.get("expected_revision"),
-            ),
-            "leveling": lambda editor, args: editor.set_leveling(
-                args["rotation_degrees"], expected_revision=args.get("expected_revision")
-            ),
-            "scoreboard": lambda editor, args: editor.set_scoreboard(
-                args["points"], expected_revision=args.get("expected_revision")
-            ),
-            "scoreboard-proposal": lambda editor, args: editor.propose_scoreboard(
-                expected_revision=args.get("expected_revision")
-            ),
-            "control-points": lambda editor, args: editor.save_control_points(
-                args["pairs"], expected_revision=args.get("expected_revision")
-            ),
-            "rink-map": lambda editor, args: editor.save_rink_map(
-                args.get("landmarks", []),
-                args.get("goals"),
-                rink_size=args.get("rink_size", [60.96, 25.908]),
-                observations=args.get("observations"),
-                layout=args.get("layout"),
-                allow_partial=args.get("allow_partial", False),
-                expected_revision=args.get("expected_revision"),
-            ),
-            "rink-assist": lambda editor, args: editor.assist_rink_map(
-                args["observations"],
-                detect=args.get("detect", False),
-                use_mask=args.get("use_mask", False),
-                layout=args.get("layout"),
-                expected_revision=args.get("expected_revision"),
-            ),
-            "lens": lambda editor, args: editor.set_lens_calibration(
-                args["calibration"], expected_revision=args.get("expected_revision")
-            ),
-            "reset_sync": lambda editor, args: editor.reset_synchronization(
-                expected_revision=args.get("expected_revision")
-            ),
-        }
-        for name, operation in operations.items():
-            workspace.register_operation(f"calibration.{name}", self._operation(name, operation))
-        for name in ("open", "estimate", "preview", "save", "close"):
-            workspace.register_operation(f"leveling.{name}", self._level_operation(name))
-
-    def _model_status(self, args):
-        from hmlib.ui.model_preparation import readiness
-
-        return readiness(self.workspace.game(args.get("game_id")))
-
-    def _prepare_model(self, args):
-        from hmlib.ui.model_preparation import preparation_command
-
-        game = self.workspace.game(args.get("game_id"))
-        self.workspace.require_idle()
-        target = args["target"]
-        command = preparation_command(game, target, args.get("frames", 200))
-        return self.workspace.start_command(command, game.name, f"prepare-{target}")
-
-    def _operation(self, name, operation):
-        def dispatch(args):
-            from hmlib.ui.runtime_setup import OperatorWorkspace
-
-            game = self.workspace.game(args.get("game_id"))
-            if name != "snapshot":
-                self.workspace.require_idle(game)
-            return operation(OperatorWorkspace(game), args)
-
-        return dispatch
-
-    def _level_operation(self, name):
-        def dispatch(args):
-            from hmlib.ui.runtime_setup import OperatorWorkspace
-
-            game = self.workspace.game(args.get("game_id"))
-            self.workspace.require_idle(game)
-            if name == "open":
-                previous = self.leveling.pop(game, None)
-                if previous:
-                    previous.close()
-                editor = OperatorWorkspace(game).leveling_session()
-                try:
-                    info = editor.info()
-                    for source, path in zip(info["sources"], editor.sources):
-                        source["path"] = str(path)
-                    if args.get("from_rink_map"):
-                        estimate = OperatorWorkspace(game).rink_map_leveling(
-                            yaw=info["rotation_degrees"][0]
-                        )
-                        info["rotation_degrees"] = estimate["rotation_degrees"]
-                        info["rink_leveling"] = estimate
-                    editor.annotate_sources(info)
-                except BaseException:
-                    editor.close()
-                    raise
-                self.leveling[game] = editor
-                return info
-            editor = self.leveling.get(game)
-            if editor is None:
-                raise ValueError("Open the leveling editor first")
-            if name == "estimate":
-                return editor.estimate(args["posts"], args.get("yaw", 0))
-            if name == "preview":
-                result = editor.preview(args["state"])
-                result["image"] = str(editor.directory / "preview.png")
-                return result
-            if name == "save":
-                editor.save(args["state"], args["token"])
-                editor.close()
-                del self.leveling[game]
-                return OperatorWorkspace(game).snapshot()
-            editor.close()
-            del self.leveling[game]
-            return {"closed": True}
-
-        return dispatch
-
-    def close(self):
-        for editor in self.leveling.values():
-            editor.close()
-        self.leveling.clear()
+def executable(explicit: str | None, name: str, candidates: tuple[Path, ...] = ()) -> Path:
+    """Resolve an explicitly selected executable without silently replacing it."""
+    choices = [explicit] if explicit else [shutil.which(name), *candidates]
+    for choice in choices:
+        if choice is None:
+            continue
+        path = Path(choice).expanduser().resolve()
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+    detail = (
+        f"Requested executable is unavailable: {explicit}" if explicit else f"Cannot find {name}"
+    )
+    raise FileNotFoundError(
+        f"{detail}. Install the shared HStream desktop and HockeyMON backend, "
+        "or select their executable paths with HSTREAM_UI_BIN and HM_CLI_BIN."
+    )
 
 
 def launch_desktop(
@@ -158,96 +36,76 @@ def launch_desktop(
     arguments: list[str] | None = None,
     root_dir: str | Path | None = None,
 ) -> int:
-    from hmlib.camera.hm_ui_bridge import HmUiProcess
-    from hmlib.config import GAME_DIR_BASE
-    from hmlib.ui.workspace import Workspace
-
-    command = HmUiProcess._resolve_command()
-    if command is None:
-        raise RuntimeError("Build hm-ui with `bazelisk build //hm-ui:hm-ui` or set HM_UI_BIN")
-    root = Path(root_dir or GAME_DIR_BASE).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    # Keep logs/results after shutdown so failures remain inspectable.
-    session = Path(tempfile.mkdtemp(prefix="hm-workspace-"))
-    live = session / "live"
-    live.mkdir()
-    HmUiProcess._write_json_atomic(
-        live / "spec.json",
-        {
-            "version": 3,
-            "session_id": "workspace-idle",
-            "title": "HockeyMON",
-            "subtitle": "Select a game and start a run",
-            "windows": [],
-            "previews": [],
-            "runtime_path": str(live / "runtime.json"),
-        },
+    source_root = Path(__file__).resolve().parents[2]
+    ui = executable(
+        os.environ.get("HSTREAM_UI_BIN"),
+        "hstream-ui",
+        (Path("/opt/hstream/bin/hstream-ui"),),
     )
-    HmUiProcess._write_json_atomic(
-        live / "runtime.json",
-        {
-            "state": "finished",
-            "frame": None,
-            "fps": None,
-            "message": "Select a game and start a run",
-            "updated_ms": int(time.time() * 1000),
-            "capabilities": [],
-        },
+    runner = executable(
+        os.environ.get("HM_CLI_BIN"),
+        "hm-cli",
+        (source_root / "hm-ui" / "hm-cli",),
     )
-    workspace = Workspace(root, session)
-    editors = WorkspaceEditors(workspace)
-    ui = None
-    try:
-        if game_id:
-            workspace.dispatch("games.select", {"game_id": game_id})
-        workspace.poll()
-        with (session / "desktop.log").open("ab") as log:
-            ui = subprocess.Popen(
-                [
-                    *command,
-                    "--workspace",
-                    str(session),
-                    "--spec",
-                    str(live / "spec.json"),
-                    "--state",
-                    str(live / "state.json"),
-                    "--title",
-                    "HockeyMON",
-                ],
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-            )
+    environment = os.environ.copy()
+    if root_dir is not None:
+        environment["HM_GAME_DIR"] = str(Path(root_dir).expanduser().resolve())
+    command = [str(ui), "--backend=hockeymon", f"--backend-runner={runner}"]
+    if module not in {None, "hmlib.cli.hmtrack", "hmlib.cli.stitch"}:
+        raise ValueError(f"Unsupported desktop launch module: {module}")
+    with tempfile.TemporaryDirectory(prefix="hm-desktop-launch-") as temporary:
+        directory = Path(temporary)
         if module:
-            kind = "stitch" if module.endswith(".stitch") else "track"
-            workspace.start_command(
-                workspace.pipeline_command(
-                    workspace.game(game_id) if game_id else None,
-                    kind,
-                    arguments or [],
-                    initial_launch=True,
-                ),
-                game_id,
-                kind,
-            )
-        while ui.poll() is None:
-            workspace.poll()
-            time.sleep(0.05)
-        if ui.returncode:
-            raise RuntimeError(
-                f"Desktop exited with status {ui.returncode}; see {session / 'desktop.log'}"
-            )
-        return 0
-    finally:
-        workspace.close()
-        editors.close()
-        if ui is not None and ui.poll() is None:
-            ui.terminate()
-            try:
-                ui.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                ui.kill()
-                ui.wait(timeout=5)
+            launch = {
+                "version": 1,
+                "module": module,
+                "arguments": arguments or [],
+                "cwd": str(Path.cwd()),
+                "game_id": game_id,
+            }
+            if not game_id:
+                game_id = _anonymous_game(directory, arguments or [])
+                environment["HM_GAME_DIR"] = str(directory / "games")
+                launch["game_id"] = game_id
+                launch["anonymous"] = True
+            request = directory / "launch.json"
+            request.write_text(json.dumps(launch), encoding="utf-8")
+            command += [f"--backend-launch={request}", "--play"]
+            if module == "hmlib.cli.stitch":
+                command.append("--stitching-calibration-only")
+        if game_id:
+            command.append(f"--game-id={game_id}")
+        # The desktop owns every processing child; closing it waits for shutdown.
+        return subprocess.call(command, env=environment)
+
+
+def _anonymous_game(directory: Path, arguments: list[str]) -> str:
+    import yaml
+
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--input-video", "--input_video", nargs="+")
+    parser.add_argument("--input-videos", "--input_videos", nargs="+")
+    options, _ = parser.parse_known_args(arguments)
+    sources = options.input_video or options.input_videos
+    if not sources:
+        raise ValueError("Launching the desktop without --game-id requires --input-video")
+    sources = [part for source in sources for part in source.split(",")]
+    if len(sources) not in {1, 2}:
+        raise ValueError("Anonymous desktop input requires one source or a left/right pair")
+    paths = [Path(source).expanduser().resolve() for source in sources]
+    for path in paths:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    game_id = "session-input"
+    game = directory / "games" / game_id
+    game.mkdir(parents=True)
+    names = ["source"] if len(paths) == 1 else ["left", "right"]
+    videos = {name: [str(path)] for name, path in zip(names, paths)}
+    (game / "config.yaml").write_text(
+        yaml.safe_dump({"game": {"videos": videos}, "stitching": {"enabled": len(paths) == 2}}),
+        encoding="utf-8",
+    )
+    return game_id
 
 
 def use_desktop(camera_ui: int) -> bool:
@@ -255,7 +113,7 @@ def use_desktop(camera_ui: int) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="HockeyMON operator desktop")
+    parser = argparse.ArgumentParser(description="HockeyMON using the shared HStream desktop")
     parser.add_argument("--game-id")
     parser.add_argument("--root", type=Path)
     args = parser.parse_args()

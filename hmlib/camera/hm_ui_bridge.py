@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -57,6 +58,8 @@ class _PreviewJob:
     img: Any
     show_scaled: float | None
     max_width: int
+    metadata: dict | None = None
+    overlays: tuple[bool, bool, bool] = (False, False, False)
 
 
 @dataclass(frozen=True)
@@ -64,6 +67,10 @@ class HmUiAction:
     seq: int
     kind: str
     values: dict[str, dict[str, int]] | None
+
+
+class RuntimeRollbackError(RuntimeError):
+    """The frame owner could not restore state after a rejected runtime edit."""
 
 
 class HmUiProcess:
@@ -100,6 +107,8 @@ class HmUiProcess:
         self.playback_rate = 1.0
         self._last_batch_time = None
         self._last_batch_frames = 1
+        self._frame_clock_position = None
+        self._frame_clock_wall = None
         normalized_preview_names = [
             str(name).strip() for name in preview_names if str(name).strip()
         ]
@@ -129,7 +138,13 @@ class HmUiProcess:
         self._last_action_seq = 0
         self._pending_actions: list[HmUiAction] = []
         self._closed = False
+        self._replay_controls_restored = False
         self._spec_version_warned = False
+        requested_layers = set(os.environ.get("HSTREAM_UI_PREVIEW_OVERLAYS", "").split(","))
+        self.preview_overlay_layers = tuple(
+            name in requested_layers for name in ("players", "play", "rink")
+        )
+        self._preview_overlay_renderer = None
 
     def add_window(self, name: str) -> None:
         self._windows.setdefault(name, [])
@@ -306,6 +321,120 @@ class HmUiProcess:
                 changed = True
         return changed
 
+    def _apply_runtime_controls(self, values: dict, apply_controls: Callable[[], bool]) -> None:
+        if not isinstance(values, dict):
+            raise TypeError("Runtime control batch must be a mapping")
+        for window, controls in values.items():
+            if not isinstance(controls, dict):
+                raise TypeError("Runtime window controls must be a mapping")
+            for name, value in controls.items():
+                control = self._find_control(window, name)
+                if type(value) is not int or not control.min_value <= value <= control.max_value:
+                    raise ValueError(f"Runtime control is outside its range: {name}")
+        previous = self.control_values()
+        try:
+            self.apply_control_values(values, publish=True)
+            if not apply_controls():
+                raise ValueError("Runtime owner rejected the control batch")
+            self._write_state()
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+            try:
+                self.apply_control_values(previous, publish=True)
+                if not apply_controls():
+                    raise RuntimeError("Runtime owner rejected restored controls")
+                self._write_state()
+            except (OSError, RuntimeError, TypeError, ValueError, KeyError) as rollback_error:
+                raise RuntimeRollbackError(
+                    "Runtime control rollback failed; pipeline cannot continue"
+                ) from rollback_error
+            raise
+
+    def apply_runtime_requests(
+        self,
+        apply_controls: Callable[[], bool],
+        operation: Callable[[dict], None] | None = None,
+    ) -> None:
+        """Validate and apply whole desktop requests on the frame-owning thread."""
+        from hmlib.ui.hstream_runtime import read_document
+
+        if not self._replay_controls_restored:
+            replay = self._tmpdir / "replay-controls.json"
+            try:
+                saved = read_document(replay)
+            except FileNotFoundError:
+                saved = None
+            if saved is not None:
+                self._apply_runtime_controls(saved["values"], apply_controls)
+                if "preview" in saved:
+                    name = saved["preview"]
+                    if name != "none" and name not in self.preview_paths:
+                        raise ValueError("Restored preview is unavailable")
+                    self._selected_preview_name = name
+                if "overlays" in saved:
+                    layers = saved["overlays"]
+                    if (
+                        not isinstance(layers, list)
+                        or len(layers) != 3
+                        or any(type(v) is not bool for v in layers)
+                    ):
+                        raise ValueError("Restored preview overlays require three booleans")
+                    self.preview_overlay_layers = tuple(layers)
+                self._write_state()
+                replay.unlink()
+            self._replay_controls_restored = True
+        directory = self._tmpdir / "runtime-requests"
+        if not directory.is_dir():
+            return
+        pending = []
+        for path in directory.glob("*.json"):
+            try:
+                pending.append((path.stat().st_mtime_ns, path))
+            except FileNotFoundError:
+                continue
+        for _, path in sorted(pending)[:8]:
+            result_path = self._tmpdir / "runtime-results" / path.name
+            if result_path.exists():
+                path.unlink(missing_ok=True)
+                continue
+            try:
+                request = read_document(path)
+                if request.get("session_id") != self.session_id:
+                    raise ValueError("Runtime request belongs to a different pipeline session")
+                deadline = request["deadline"]
+                if (
+                    not isinstance(deadline, (int, float))
+                    or not math.isfinite(deadline)
+                    or deadline < time.monotonic()
+                ):
+                    raise ValueError("Runtime request expired before application")
+                kind = request["kind"]
+                if kind == "controls":
+                    self._apply_runtime_controls(request["values"], apply_controls)
+                elif kind == "preview":
+                    name = request["name"]
+                    if name != "none" and name not in self.preview_paths:
+                        raise ValueError(f"Preview source is unavailable: {name}")
+                    self._selected_preview_name = name
+                    self._write_state()
+                elif kind == "clock-reset":
+                    self._frame_clock_position = None
+                    self._frame_clock_wall = None
+                elif kind == "playback":
+                    if not self.apply_playback_action(request["action"]):
+                        raise ValueError("Unknown playback request")
+                elif kind == "operation" and operation is not None:
+                    operation(request["operation"])
+                else:
+                    raise ValueError(f"Unknown runtime request kind: {kind}")
+                result = {"ok": True, "session_id": self.session_id}
+            except RuntimeRollbackError:
+                raise
+            except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
+                result = {"ok": False, "error": str(error), "session_id": self.session_id}
+                logger.warning("Shared desktop runtime request failed: %s", error)
+            self._write_json_atomic(result_path, result)
+            path.unlink(missing_ok=True)
+
     def _check_spec_version(self, state: dict) -> None:
         """Warn once when the sidecar does not understand the spec we wrote.
 
@@ -369,6 +498,8 @@ class HmUiProcess:
         if not self._runtime_enabled:
             raise ValueError("Playback controls are unavailable in this UI")
         self._last_batch_time = None
+        self._frame_clock_position = None
+        self._frame_clock_wall = None
         if kind.startswith("rate:"):
             rate = float(kind.split(":", 1)[1])
             if rate not in {0, 0.25, 0.5, 1, 2, 4}:
@@ -439,6 +570,35 @@ class HmUiProcess:
             },
         )
 
+    def wait_for_shared_frame(
+        self, frame: int, fps: float, poll_controls: Callable[[], None]
+    ) -> None:
+        """Pace source frames while servicing the frame owner's control mailbox."""
+        if not math.isfinite(fps) or fps <= 0:
+            raise ValueError("Real-time playback requires a positive source frame rate")
+        position = frame / fps
+        while not self.stop_requested and not self.closed:
+            poll_controls()
+            if self.paused and self._step_batches:
+                self._step_batches -= 1
+                break
+            now = time.monotonic()
+            if self._frame_clock_position is None:
+                self._frame_clock_position = position
+                self._frame_clock_wall = now
+            delay = (
+                self._frame_clock_wall
+                + (position - self._frame_clock_position) / self.playback_rate
+                - now
+                if os.environ.get("HM_SHARED_RENDER_REALTIME") == "1" and self.playback_rate
+                else 0
+            )
+            if not self.paused and delay <= 0:
+                break
+            self.publish_runtime()
+            time.sleep(0.02 if self.paused else min(0.02, delay))
+        self.publish_runtime(frame=frame, fps=fps)
+
     def wait_for_playback(self, poll_controls: Callable[[], None]) -> None:
         """Gate one batch on its owning worker while keeping Save/reset responsive."""
         poll_controls()
@@ -474,10 +634,13 @@ class HmUiProcess:
         show_scaled: float | None = None,
         max_width: int = 1280,
         min_interval_seconds: float | None = None,
+        metadata: dict | list[dict] | None = None,
     ) -> None:
         if self._closed:
             return
         if name not in self.preview_paths:
+            return
+        if self._selected_preview_name == "none":
             return
         if min_interval_seconds is None:
             min_interval_seconds = 1.0 / 15.0 if name == self._selected_preview_name else 1.0
@@ -495,6 +658,8 @@ class HmUiProcess:
                 img=img,
                 show_scaled=show_scaled,
                 max_width=int(max_width),
+                metadata=(metadata[-1] if isinstance(metadata, list) and metadata else metadata),
+                overlays=self.preview_overlay_layers,
             )
             self._last_preview_write_monotonic[name] = now
             if self._preview_worker is None:
@@ -582,6 +747,14 @@ class HmUiProcess:
         if frame.ndim != 3 or frame.shape[-1] not in (1, 3, 4):
             raise ValueError(f"hm-ui preview expected HxWxC image, got shape={frame.shape}")
         frame = np.ascontiguousarray(frame)
+        if job.metadata is not None and any(job.overlays):
+            if self._preview_overlay_renderer is None:
+                from hmlib.ui.preview_overlays import PreviewOverlayRenderer
+
+                self._preview_overlay_renderer = PreviewOverlayRenderer()
+            frame = self._preview_overlay_renderer.draw(
+                frame, job.metadata, (source_width, source_height), job.overlays
+            )
         ok, encoded = cv2.imencode(
             ".jpg",
             frame,

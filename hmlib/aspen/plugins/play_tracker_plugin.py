@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import torch
@@ -310,7 +311,7 @@ class PlayTrackerPlugin(Plugin):
         self._ensure_initialized(context, results)
         assert self._play_tracker is not None
         ui = self._play_tracker.hm_ui_process()
-        if ui is not None:
+        if ui is not None and os.environ.get("HM_SHARED_UI_BACKEND") != "1":
             ui.wait_for_playback(self._play_tracker._apply_ui_controls)
         with torch.no_grad():
             out = self._play_tracker.forward(results=results)
@@ -353,12 +354,15 @@ class PlayTrackerPlugin(Plugin):
                 "img",
                 "current_box",
                 "current_fast_box_list",
+                "native_current_box",
                 "camera_policy_events",
+                "native_replay",
                 "frame_ids",
                 "player_bottom_points",
                 "player_ids",
                 "play_box",
                 "rink_profile",
                 "rink_map_overlay",
+                "shared_preview_metadata",
             }
         return self._output_keys

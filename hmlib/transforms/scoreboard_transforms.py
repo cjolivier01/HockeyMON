@@ -1,5 +1,7 @@
+import copy
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -68,15 +70,49 @@ class HmConfigureScoreboard:
             self._allow_interactive_setup = bool(allow_interactive_setup)
         self._scoreboard_config = None
         self._configured = False
+        self._polygon_revision = None
+        self._shared_canvas_saved = False
 
     def __call__(self, results: dict[str, Any]) -> dict[str, Any]:
         if self._game_id is None:
             self._game_id = results.get("game_id", None)
+        if (
+            not self._shared_canvas_saved
+            and self._game_id
+            and os.environ.get("HM_SHARED_UI_BACKEND") == "1"
+            and "HM_SHARED_NATIVE_CALIBRATION" not in os.environ
+        ):
+            import cv2
+
+            from hmlib.config import get_game_dir
+            from hmlib.utils.image import to_uint8_image
+
+            image = make_channels_last(to_uint8_image(results["img"]))
+            if image.ndim == 4:
+                image = image[0]
+            data = image.detach().cpu().numpy()
+            valid, encoded = cv2.imencode(".png", data)
+            if not valid:
+                raise OSError("Cannot encode the shared scoreboard reference canvas")
+            target = Path(get_game_dir(self._game_id)) / "s.png"
+            temporary = target.with_name(f".s-{os.getpid()}.png")
+            try:
+                temporary.write_bytes(encoded.tobytes())
+                os.replace(temporary, target)
+            finally:
+                temporary.unlink(missing_ok=True)
+            self._shared_canvas_saved = True
         runtime_config = results.get("game_config")
         if runtime_config is not None:
             preferences = get_nested_value(runtime_config, "rink.scoreboard", {}) or {}
             results["scoreboard_preferences"] = preferences
+            polygon = preferences.get("perspective_polygon")
+            if polygon != self._polygon_revision:
+                self._polygon_revision = copy.deepcopy(polygon)
+                self._configured = False
+                self._scoreboard_config = None
             if not preferences.get("enabled", True):
+                results.pop("scoreboard_cfg", None)
                 return results
         if self._game_id and not self._configured:
             self._configured = True
@@ -122,7 +158,8 @@ class HmConfigureScoreboard:
                 }
         if self._scoreboard_config:
             results["scoreboard_cfg"] = self._scoreboard_config
-
+        else:
+            results.pop("scoreboard_cfg", None)
         return results
 
 
@@ -135,9 +172,15 @@ class HmCaptureScoreboard:
         self._scoreboard = None
         self._scoreboard_scale = scoreboard_scale
         self._skip_capture = False
+        self._geometry_signature = None
 
     def __call__(self, results: dict[str, Any]) -> dict[str, Any]:
         scoreboard = results.get("scoreboard_cfg")
+        geometry = repr(scoreboard)
+        if geometry != self._geometry_signature:
+            self._geometry_signature = geometry
+            self._scoreboard = None
+            self._skip_capture = False
         if not scoreboard or self._skip_capture:
             results.pop("scoreboard_cfg", None)
             return results

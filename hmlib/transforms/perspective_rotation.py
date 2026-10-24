@@ -1,5 +1,5 @@
-from typing import Optional, Tuple, Union
-
+import cv2
+import numpy as np
 import torch
 from mmengine.registry import TRANSFORMS
 
@@ -9,7 +9,7 @@ from hmlib.utils.gpu import StreamTensorBase
 from hmlib.utils.image import image_height, image_width, rotate_image, to_float_image
 
 
-def _slow_to_tensor(tensor: Union[torch.Tensor, StreamTensorBase]) -> torch.Tensor:
+def _slow_to_tensor(tensor: torch.Tensor | StreamTensorBase) -> torch.Tensor:
     """
     Give up on the stream and get the sync'd tensor
     """
@@ -33,8 +33,8 @@ class HmPerspectiveRotation:
     def __init__(
         self,
         enabled: bool = True,
-        fixed_edge_rotation: Optional[bool] = None,
-        fixed_edge_rotation_angle: Union[float, Tuple[float, float]] = 0.0,
+        fixed_edge_rotation: bool | None = None,
+        fixed_edge_rotation_angle: float | tuple[float, float] = 0.0,
         dtype: torch.dtype = torch.float,
         pre_clip: bool = False,
         image_label: str = "img",
@@ -55,9 +55,9 @@ class HmPerspectiveRotation:
         self._crop_half_width_scale = float(crop_half_width_scale)
         self._horizontal_image_gaussian_distribution = None
         self._zero_uint8 = None
-        self._crop_half_width: Optional[float] = None
+        self._crop_half_width: float | None = None
 
-    def set_fixed_edge_rotation_angle(self, value: Union[float, Tuple[float, float]]) -> None:
+    def set_fixed_edge_rotation_angle(self, value: float | tuple[float, float]) -> None:
         """Update the live left/right edge rotation angles."""
         if isinstance(value, (list, tuple)):
             if len(value) != 2:
@@ -100,7 +100,9 @@ class HmPerspectiveRotation:
                 crop_half_width = float(self._crop_half_width)
         rotated_images = []
         current_boxes = []
-        for img, bbox in zip(online_im, current_box):
+        for index, (img, bbox) in enumerate(zip(online_im, current_box)):
+            metadata = results.get("shared_preview_metadata")
+            translation = np.eye(3)
             rotation_point = [int(i) for i in center(bbox)]
             width_center = src_image_width / 2
             if rotation_point[0] < width_center:
@@ -132,6 +134,7 @@ class HmPerspectiveRotation:
             #
             if self._pre_clip:
                 pre_size = image_width(img), image_height(img)
+                previous_left = float(bbox[0])
                 img, bbox = self.crop_working_image_width(
                     image=img, current_box=bbox, crop_half_width=crop_half_width
                 )
@@ -139,6 +142,7 @@ class HmPerspectiveRotation:
                 if pre_size != post_size:
                     results["rotation_crop"] = {"from": pre_size, "to": post_size}
                 rotation_point = [int(i) for i in center(bbox)]
+                translation[0, 2] = float(bbox[0]) - previous_left
             #
             # END PERFORMANCE HACK
             #
@@ -148,6 +152,14 @@ class HmPerspectiveRotation:
                 angle=float(angle),
                 rotation_point=rotation_point,
             )
+            if metadata is not None:
+                from hmlib.ui.preview_overlays import compose_transform
+
+                rotation = np.eye(3)
+                rotation[:2] = cv2.getRotationMatrix2D(
+                    (rotation_point[0] - 0.5, rotation_point[1] - 0.5), float(angle), 1.0
+                )
+                compose_transform(metadata, index, rotation @ translation)
             rotated_images.append(img)
             current_boxes.append(bbox)
         del online_im
@@ -157,7 +169,7 @@ class HmPerspectiveRotation:
         return results
 
     def crop_working_image_width(
-        self, image: torch.Tensor, current_box: torch.Tensor, crop_half_width: Optional[float]
+        self, image: torch.Tensor, current_box: torch.Tensor, crop_half_width: float | None
     ):
         """
         We try to only retain enough image to supply an arbitrary rotation
@@ -188,7 +200,7 @@ class HmPerspectiveRotation:
             clip_right = img_width
         else:
             center_x = float(bbox_c[0].item())
-            clip_left = int(round(center_x - desired_width / 2.0))
+            clip_left = round(center_x - desired_width / 2.0)
             clip_right = clip_left + desired_width
             if clip_left < 0:
                 clip_right -= clip_left
@@ -196,8 +208,7 @@ class HmPerspectiveRotation:
             if clip_right > img_width:
                 clip_left -= clip_right - img_width
                 clip_right = img_width
-                if clip_left < 0:
-                    clip_left = 0
+                clip_left = max(clip_left, 0)
         if image.ndim == 3:
             # no batch dimension
             image = image[:, clip_left:clip_right, :]

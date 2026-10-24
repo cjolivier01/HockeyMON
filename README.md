@@ -5,6 +5,7 @@ HockeyMON
 ## Docs
 - Repository guidelines: see [AGENTS.md](AGENTS.md).
 - How to contribute: see [CONTRIBUTING.md](CONTRIBUTING.md).
+- Shared HStream desktop: [launch and install](hm-ui/README.md), [backend and workflow ownership](docs/shared-ui-backend.md).
 
 ## System dependencies and native tools
 
@@ -59,6 +60,11 @@ python -m hmlib.cli.stitch --game-id ev-stockton-1 -o stitched_output-with-audio
 ```
 
 Ensure your `PYTHONPATH` includes the repo root when running directly (for example, see `hm_run.sh` for how we set `PYTHONPATH` in development).
+
+`hm-ui` opens the shared HStream Qt desktop with HockeyMON processing. Adding
+`--camera-ui=1` to `hmtrack` or `hmstitch` opens that desktop and starts the
+requested workflow. Install the matching HStream desktop/native helpers or set
+the executable paths described in [hm-ui/README.md](hm-ui/README.md).
 
 When a game-based NONA calibration creates new stitching maps, it also opens the optional
 [rink-post leveling selector](docs/rink-leveling-selection.md) after panorama alignment and before the final maps.

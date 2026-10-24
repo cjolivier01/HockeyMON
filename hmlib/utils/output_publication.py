@@ -9,9 +9,9 @@ import shutil
 import stat
 import sys
 import tempfile
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
 
 from hmlib.telemetry.database import database_generation
 from hmlib.utils.finalization import finalize_resources
@@ -172,13 +172,14 @@ def publish_artifacts(
             name: directory / (name if literal_names else artifact_name(name, suffix))
             for name in names
         }
-        if exact and any(
-            database_generation(path.name) is not None for path in candidates.values()
+        if (
+            exact
+            and any(database_generation(path.name) is not None for path in candidates.values())
+            and any(database_generation(path.name) == suffix for path in directory.iterdir())
         ):
             # A renamed database must not claim a version occupied by an old
             # producer, a different extension, or another spelling of the number.
-            if any(database_generation(path.name) == suffix for path in directory.iterdir()):
-                raise FileExistsError(f"Output generation {suffix} already exists in {directory}")
+            raise FileExistsError(f"Output generation {suffix} already exists in {directory}")
         while any(os.path.lexists(path) for path in candidates.values()):
             if exact:
                 raise FileExistsError(f"Output generation {suffix} already exists in {directory}")
@@ -242,6 +243,19 @@ def publish_artifacts(
                 (f"sync publication directory {directory}", lambda: _sync_directory(directory))
             )
             finalize_resources(actions, primary_error=sys.exc_info()[1])
+        receipt = os.environ.get("HM_BACKEND_PUBLICATION_FILE")
+        if receipt:
+            import json
+
+            from hmlib.ui.workspace.files import write_json
+
+            path = Path(receipt)
+            records = json.loads(path.read_text()) if path.exists() else []
+            records.extend(
+                {"name": name, "path": str(target.resolve()), "version": suffix}
+                for name, target in candidates.items()
+            )
+            write_json(path, records)
         return PublishedArtifacts(suffix, candidates)
     finally:
         os.close(lock_fd)

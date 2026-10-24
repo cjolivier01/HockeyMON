@@ -1,4 +1,5 @@
 import contextlib
+import os
 import sys
 import time
 import traceback
@@ -413,11 +414,16 @@ def run_mmtrack(
                         work_dir,
                         config.get("game_id") or Path(work_dir).name,
                         {
+                            **(config.get("game_config") or {}),
                             "game_config": config.get("game_config"),
                             "aspen": aspen_cfg,
                             "source_video_paths": source_video_paths or [],
                             "timestamp_source": "source frame / source FPS unless explicit pts_ns",
-                            "native_replay": "unavailable in HM producer",
+                            "native_replay": (
+                                "hockeymon-play-tracker-2026-09-replay-v1"
+                                if os.environ.get("HM_SHARED_UI_BACKEND") == "1"
+                                else "unavailable in HM producer"
+                            ),
                         },
                         stages,
                     )

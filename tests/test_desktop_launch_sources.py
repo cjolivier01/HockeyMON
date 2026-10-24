@@ -37,44 +37,52 @@ def workspace(tmp_path, monkeypatch):
         yield instance
 
 
-def _initial_launch(monkeypatch, tmp_path, *, game_id, arguments):
-    from hmlib.camera.hm_ui_bridge import HmUiProcess
-    from hmlib.ui.desktop import launch_desktop
-    from hmlib.ui.workspace.jobs import Jobs
+def _initial_launch(monkeypatch, tmp_path, *, game_id, arguments, module="hmlib.cli.hmtrack"):
+    from hmlib.ui import desktop
 
     calls = []
 
-    class DesktopProcess:
-        returncode = 0
+    def call(command, *, env):
+        request = Path(
+            next(
+                value.split("=", 1)[1] for value in command if value.startswith("--backend-launch=")
+            )
+        )
+        envelope = json.loads(request.read_text())
+        captured = {
+            "command": command,
+            "environment": env,
+            "envelope": envelope,
+            "request": request,
+        }
+        if envelope.get("anonymous"):
+            captured["sources"] = read_config(Path(env["HM_GAME_DIR"]) / envelope["game_id"])[
+                "game"
+            ]["videos"]
+        calls.append(captured)
+        return 0
 
-        def poll(self):
-            return 0
-
-    def start(self, command, **kwargs):
-        calls.append({"command": command, **kwargs})
-        return {"id": "captured"}
-
-    monkeypatch.setattr(HmUiProcess, "_resolve_command", lambda: ["hm-ui-test"])
-    monkeypatch.setattr("hmlib.ui.desktop.subprocess.Popen", lambda *a, **kw: DesktopProcess())
-    monkeypatch.setattr(Jobs, "start", start)
+    monkeypatch.setattr(
+        desktop, "executable", lambda explicit, name, candidates=(): Path("/test/bin") / name
+    )
+    monkeypatch.setattr(desktop.subprocess, "call", call)
     assert (
-        launch_desktop(
+        desktop.launch_desktop(
             game_id=game_id,
-            module="hmlib.cli.hmtrack",
+            module=module,
             arguments=arguments,
             root_dir=tmp_path / "games",
         )
         == 0
     )
     assert len(calls) == 1
+    assert not calls[0]["request"].exists()
     return calls[0]
 
 
 def should_launch_initial_configured_single_source_with_cli_overrides(
     workspace, tmp_path, monkeypatch
 ):
-    from hmlib.cli.hmtrack import make_parser
-
     game = workspace.game()
     source = game / "single.mp4"
     source.write_bytes(b"fixture")
@@ -99,50 +107,67 @@ def should_launch_initial_configured_single_source_with_cli_overrides(
         "relative-output",
     ]
     launch = _initial_launch(monkeypatch, tmp_path, game_id=game.name, arguments=arguments)
-    parsed = make_parser().parse_args(launch["command"][3:])
-    assert parsed.input_video == str(source)
-    assert parsed.game_id == game.name
-    assert parsed.output_fps == 30
-    assert parsed.batch_size == 1
-    assert parsed.deploy_dir == "relative-output"
-    assert launch["cwd"] == invocation
+    assert launch["envelope"] == {
+        "version": 1,
+        "module": "hmlib.cli.hmtrack",
+        "arguments": arguments,
+        "cwd": str(invocation),
+        "game_id": game.name,
+    }
     assert launch["environment"]["HM_GAME_DIR"] == str(game.parent)
-    assert launch["command"][-len(arguments) :] == arguments
+    assert launch["command"][:3] == [
+        "/test/bin/hstream-ui",
+        "--backend=hockeymon",
+        "--backend-runner=/test/bin/hm-cli",
+    ]
+    assert "--play" in launch["command"] and "--game-id=launch-test" in launch["command"]
 
 
-def should_launch_initial_explicit_video_without_creating_a_game(tmp_path, monkeypatch):
-    from hmlib.cli.hmtrack import make_parser
-
+def should_scope_anonymous_initial_sources_to_the_desktop_lifetime(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    launch = _initial_launch(
-        monkeypatch,
-        tmp_path,
-        game_id=None,
-        arguments=["--input-video", "relative.mp4", "--camera-ui=1", "-t=2"],
-    )
-    parsed = make_parser().parse_args(launch["command"][3:])
-    assert parsed.input_video == "relative.mp4"
-    assert parsed.game_id is None
-    assert parsed.deploy_dir is None
-    assert launch["game"] is None
-    assert launch["cwd"] == tmp_path
-    assert launch["environment"]["HM_GAME_DIR"] == str(tmp_path / "games")
-    assert not list((tmp_path / "games").iterdir())
+    (tmp_path / "relative.mp4").write_bytes(b"fixture")
+    arguments = ["--input-video", "relative.mp4", "--camera-ui=1", "-t=2"]
+    launch = _initial_launch(monkeypatch, tmp_path, game_id=None, arguments=arguments)
+    assert launch["envelope"]["arguments"] == arguments
+    assert launch["envelope"]["anonymous"] is True
+    assert launch["envelope"]["cwd"] == str(tmp_path)
+    assert launch["sources"] == {"source": [str(tmp_path / "relative.mp4")]}
+    assert not Path(launch["environment"]["HM_GAME_DIR"]).exists()
+    assert not (tmp_path / "games").exists()
 
 
-def should_keep_explicit_initial_input_and_not_force_publication(workspace, tmp_path, monkeypatch):
-    from hmlib.cli.hmtrack import make_parser
-
+def should_preserve_explicit_initial_input_and_publication_choices(
+    workspace, tmp_path, monkeypatch
+):
     write_config(workspace.game(), {"game": {"videos": {"source": ["missing.mp4"]}}})
+    arguments = ["--input-video=relative.mp4", "--camera-ui=1"]
+    launch = _initial_launch(
+        monkeypatch, tmp_path, game_id=workspace.game().name, arguments=arguments
+    )
+    assert launch["envelope"]["arguments"] == arguments
+    assert "--deploy-dir" not in launch["command"]
+
+
+def should_forward_original_stitch_invocation_to_the_native_calibration_trampoline(
+    workspace, tmp_path, monkeypatch
+):
+    arguments = [
+        "--game-id=launch-test",
+        "--camera-ui=1",
+        "--stitch-frame-time=00:00:03",
+        "--config",
+        "lens.yaml",
+    ]
     launch = _initial_launch(
         monkeypatch,
         tmp_path,
         game_id=workspace.game().name,
-        arguments=["--input-video=relative.mp4", "--camera-ui=1"],
+        arguments=arguments,
+        module="hmlib.cli.stitch",
     )
-    parsed = make_parser().parse_args(launch["command"][3:])
-    assert parsed.input_video == "relative.mp4"
-    assert parsed.deploy_dir is None
+    assert "--stitching-calibration-only" in launch["command"]
+    assert launch["envelope"]["module"] == "hmlib.cli.stitch"
+    assert launch["envelope"]["arguments"] == arguments
 
 
 @pytest.mark.parametrize("target", ["detector", "pose"])

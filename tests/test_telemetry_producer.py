@@ -592,3 +592,19 @@ def should_save_fresh_replay_actions_without_appending_to_input_tracks(tmp_path)
     assert saved.get_data_dict_by_frame(0) == {"actions": []}
     assert replay["tracking_dataframe"]._dataframe_list == []
     assert recorder.path.read_bytes() == before
+
+
+def should_keep_native_camera_before_optional_rink_guidance(tmp_path):
+    recorder = TelemetryRecorder(tmp_path, "guided", {}, {"cameras"})
+    ctx = context((0,))
+    ctx["native_current_box"] = torch.tensor([[10.0, 5.0, 70.0, 35.0]])
+    capture(recorder, ctx, stages=("cameras",))
+    recorder.close()
+    complete_recording(recorder.path)
+    with read_database(recorder.path) as db:
+        cameras = {
+            row["role"]: (row["left"], row["top"], row["width"], row["height"])
+            for row in db.execute("SELECT * FROM cameras")
+        }
+    assert cameras["program"] == (0, 0, 80, 40)
+    assert cameras["program-native"] == (10, 5, 60, 30)

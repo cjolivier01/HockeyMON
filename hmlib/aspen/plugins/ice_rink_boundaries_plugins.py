@@ -445,11 +445,21 @@ class IceRinkSegmConfigPlugin(Plugin):
                 exp_shape = torch.Size(
                     frame0.shape[:2] if frame0.shape[-1] in (3, 4) else frame0.shape[-2:]
                 )
-            if mask_time != "auto":
+            from hmlib.stitching.native_calibration import shared_native_calibration
+
+            native = shared_native_calibration()
+            current_rotation = float(geometry.get("post_stitch_rotate_degrees", 0.0))
+            if native is not None and current_rotation == native.post_stitch_rotate_degrees:
+                self._rink_profile = native.rink_profile(tuple(exp_shape))
+            if self._rink_profile is None and mask_time != "auto":
                 # Check provenance before opening extra readers or allocating an
                 # independent stitcher. Telemetry batches also exist during live
                 # recording and must not suppress the requested sample time.
-                cached = load_rink_combined_mask(game_id=game_id) if mask_revision else None
+                cached = (
+                    load_rink_combined_mask(game_id=game_id)
+                    if mask_revision and native is None
+                    else None
+                )
                 if (
                     cached is not None
                     and cached.get("geometry_revision") == mask_revision
@@ -468,8 +478,8 @@ class IceRinkSegmConfigPlugin(Plugin):
                     image=frame0,
                     # A timed sample must replace any unproven cache. Auto
                     # keeps configure_ice_rink_mask's revision/shape checks.
-                    force=mask_time != "auto",
-                    persist=True,
+                    force=mask_time != "auto" or native is not None,
+                    persist=native is None,
                     geometry_revision=mask_revision,
                 )
             if self._rink_profile is not None and strict_geometry:
@@ -494,9 +504,13 @@ class IceRinkSegmConfigPlugin(Plugin):
                 if mask is not None:
                     if self._snapshot_mask is not None:
                         if not torch.equal(mask, self._snapshot_mask):
-                            raise ValueError(
-                                "Rink mask changed during a run with an output snapshot"
-                            )
+                            if native is None or not geometry.get("native_output_authorization_id"):
+                                raise ValueError(
+                                    "Rink mask changed during a run with an output snapshot"
+                                )
+                            # Authenticated live epochs carry their own geometry and
+                            # mask in telemetry. Keep the first-frame sidecar intact.
+                            self._snapshot_mask = mask.clone()
                         return {"rink_profile": self._rink_profile}
                     destination = Path(work_dir) / "rink_mask_0.png"
                     destination.parent.mkdir(parents=True, exist_ok=True)

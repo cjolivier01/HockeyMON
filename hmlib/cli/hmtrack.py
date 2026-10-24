@@ -993,7 +993,8 @@ def _with_audio_output_path(path: str) -> str:
 def _resolve_mux_audio_source(
     input_av_files: Any,
     *,
-    frame_offsets: tuple[int, int] | None = None,
+    frame_offsets: tuple[float, float] | None = None,
+    single_playlist: bool = False,
     start_frame: int = 0,
     work_dir: Path | None = None,
     stream: int = 0,
@@ -1011,7 +1012,11 @@ def _resolve_mux_audio_source(
     from hmlib.ui.output_audio import prepare_chapter_audio
 
     source_frame_offset = 0
-    if isinstance(input_av_files, dict) or (
+    if single_playlist:
+        if not isinstance(input_av_files, list) or not input_av_files:
+            raise ValueError("A single-source audio playlist must contain at least one chapter")
+        chosen = [str(path) for path in input_av_files]
+    elif isinstance(input_av_files, dict) or (
         isinstance(input_av_files, list) and len(input_av_files) == 2
     ):
         if isinstance(input_av_files, dict):
@@ -2022,6 +2027,7 @@ def _main(args, num_gpu):
 
         postprocessor = None
         synchronized_audio_offsets = None
+        shared_source_chapters = None
         if args.input_video:
             input_video_files = args.input_video.split(",")
             source_video_paths = input_video_files
@@ -2093,20 +2099,28 @@ def _main(args, num_gpu):
                 if not args.max_frames and args.max_time:
                     args.max_frames = time_to_frame(time_str=args.max_time, fps=left_vid.fps)
 
-                pto_project_file, lfo, rfo = configure_video_stitching(
-                    dir_name=dir_name,
-                    video_left=str(game_videos["left"][0]),
-                    video_right=str(game_videos["right"][0]),
-                    max_control_points=args.max_control_points,
-                    project_file_name=project_file_name,
-                    left_frame_offset=args.lfo,
-                    right_frame_offset=args.rfo,
-                    base_frame_offset=stitch_frame_number,
-                    game_id=args.game_id,
-                    stitch_frame_time=stitch_frame_time,
-                    ignore_private_config=bool(args.ignore_private_config),
-                    game_config=args.game_config,
-                )
+                from hmlib.stitching.native_calibration import shared_native_calibration
+
+                native_calibration = shared_native_calibration()
+                if native_calibration is not None:
+                    native_calibration.verify_sources(Path(dir_name), game_videos)
+                    pto_project_file = native_calibration.directory / "hm_project.pto"
+                    lfo, rfo = native_calibration.frame_offsets
+                else:
+                    pto_project_file, lfo, rfo = configure_video_stitching(
+                        dir_name=dir_name,
+                        video_left=str(game_videos["left"][0]),
+                        video_right=str(game_videos["right"][0]),
+                        max_control_points=args.max_control_points,
+                        project_file_name=project_file_name,
+                        left_frame_offset=args.lfo,
+                        right_frame_offset=args.rfo,
+                        base_frame_offset=stitch_frame_number,
+                        game_id=args.game_id,
+                        stitch_frame_time=stitch_frame_time,
+                        ignore_private_config=bool(args.ignore_private_config),
+                        game_config=args.game_config,
+                    )
                 stitch_videos = {
                     "left": {
                         "files": game_videos["left"],
@@ -2274,6 +2288,29 @@ def _main(args, num_gpu):
                     dataloader.append_dataset("pano", mot_dataloader)
             else:
                 assert len(input_video_files) == 1
+                if os.environ.get("HM_SHARED_SOURCE_CHAPTERS"):
+                    import json
+
+                    shared_source_chapters = json.loads(os.environ["HM_SHARED_SOURCE_CHAPTERS"])
+                    if (
+                        not isinstance(shared_source_chapters, list)
+                        or not shared_source_chapters
+                        or any(
+                            not isinstance(path, str) or not path for path in shared_source_chapters
+                        )
+                    ):
+                        raise ValueError("Shared source chapters must be a nonempty list of paths")
+                    if (
+                        Path(shared_source_chapters[0]).resolve()
+                        != Path(input_video_files[0]).resolve()
+                    ):
+                        raise ValueError(
+                            "Shared source chapters must start with the selected input video"
+                        )
+                    if any(not Path(path).is_file() for path in shared_source_chapters):
+                        raise ValueError("A shared source recording chapter is missing")
+                    input_video_files = shared_source_chapters
+                    source_video_paths = shared_source_chapters
                 if isinstance(aspen_cfg_for_pipeline, dict):
                     stitching_cfg = aspen_cfg_for_pipeline.get("stitching")
                     if isinstance(stitching_cfg, dict):
@@ -2289,17 +2326,21 @@ def _main(args, num_gpu):
                     dir_name = Path(input_video_files[0]).parent
                 assert not args.start_frame or not args.start_frame_time
                 if not args.start_frame and args.start_frame_time:
-                    vid_info = BasicVideoInfo(input_video_files[0])
+                    vid_info = BasicVideoInfo(",".join(input_video_files))
                     args.start_frame = time_to_frame(
                         time_str=args.start_frame_time, fps=vid_info.fps
                     )
 
                 assert not args.max_frames or not args.max_time
                 if not args.max_frames and args.max_time:
-                    vid_info = BasicVideoInfo(input_video_files[0])
+                    vid_info = BasicVideoInfo(",".join(input_video_files))
                     args.max_frames = time_to_frame(time_str=args.max_time, fps=vid_info.fps)
                 pano_dataloader = MOTLoadVideoWithOrig(
-                    path=input_video_files[0],
+                    path=(
+                        input_video_files
+                        if shared_source_chapters is not None
+                        else input_video_files[0]
+                    ),
                     start_frame_number=args.start_frame,
                     batch_size=args.batch_size,
                     max_frames=args.max_frames,
@@ -2401,7 +2442,12 @@ def _main(args, num_gpu):
                 raise ValueError("Could not apply the requested output label") from error
 
         mux_audio_file = args.mux_audio_file
-        if (not args.audio_only) and (not args.no_audio) and output_video_path:
+        output_routes = game_config.get("video_out", {})
+        audio_output_requested = bool(output_video_path) or any(
+            output_routes.get(route, False)
+            for route in ("archive_stitched", "archive_program_4k", "show_youtube", "rtsp_enabled")
+        )
+        if (not args.audio_only) and (not args.no_audio) and audio_output_requested:
             if not mux_audio_file:
                 (
                     mux_audio_file,
@@ -2410,6 +2456,7 @@ def _main(args, num_gpu):
                 ) = _resolve_mux_audio_source(
                     input_video_files,
                     frame_offsets=synchronized_audio_offsets,
+                    single_playlist=shared_source_chapters is not None,
                     start_frame=args.start_frame or 0,
                     work_dir=Path(results_folder),
                     stream=args.mux_audio_stream,
@@ -2420,7 +2467,7 @@ def _main(args, num_gpu):
                     args.mux_audio_offset_seconds += source_audio_offset
                     if mux_audio_temp_file is not None:
                         args.mux_audio_stream = 0
-            if mux_audio_file:
+            if mux_audio_file and output_video_path:
                 output_video_path = _with_audio_output_path(output_video_path)
 
         args.mux_audio_file = mux_audio_file

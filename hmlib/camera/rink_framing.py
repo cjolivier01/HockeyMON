@@ -136,25 +136,26 @@ class RinkCameraGuide:
                 # IIHF/NHL blue lines are approximately 7.6m from centre ice.
                 weight = np.clip((abs(x) - 9.6) / 8, 0, 1)
                 goal = np.asarray(self.goals[int(x > 0)])
-                height = float(np.median(heights))
-                low, high = goal - height * [0.3, 1.2], goal + height * [0.3, 0.2]
-                centre = (baseline[:2] + baseline[2:]) / 2 + desired_offset
-                required = 2 * max(
-                    centre[0] - low[0],
-                    high[0] - centre[0],
-                    (centre[1] - low[1]) * aspect,
-                    (high[1] - centre[1]) * aspect,
-                )
-                desired_scale += (
-                    np.clip(required / bw, desired_scale, 1.35) - desired_scale
-                ) * weight
-                half = np.array([bw, bh]) * desired_scale / 2
-                for axis in range(2):
-                    if high[axis] - half[axis] <= low[axis] + half[axis]:
-                        target = np.clip(
-                            centre[axis], high[axis] - half[axis], low[axis] + half[axis]
-                        )
-                        desired_offset[axis] += (target - centre[axis]) * weight
+                if np.isfinite(goal).all():
+                    height = float(np.median(heights))
+                    low, high = goal - height * [0.3, 1.2], goal + height * [0.3, 0.2]
+                    centre = (baseline[:2] + baseline[2:]) / 2 + desired_offset
+                    required = 2 * max(
+                        centre[0] - low[0],
+                        high[0] - centre[0],
+                        (centre[1] - low[1]) * aspect,
+                        (high[1] - centre[1]) * aspect,
+                    )
+                    desired_scale += (
+                        np.clip(required / bw, desired_scale, 1.35) - desired_scale
+                    ) * weight
+                    half = np.array([bw, bh]) * desired_scale / 2
+                    for axis in range(2):
+                        if high[axis] - half[axis] <= low[axis] + half[axis]:
+                            target = np.clip(
+                                centre[axis], high[axis] - half[axis], low[axis] + half[axis]
+                            )
+                            desired_offset[axis] += (target - centre[axis]) * weight
         desired_offset = np.clip(desired_offset, [-bw * 0.2, -bh * 0.1], [bw * 0.2, bh * 0.1])
         self.offset += (desired_offset - self.offset) * _blend(dt, 0.45)
         self.scale += (desired_scale - self.scale) * _blend(

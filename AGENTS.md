@@ -63,6 +63,8 @@
 
 ## Security & Configuration Tips
 
+- `--camera-ui`, `hm-ui` and `hm-cli` use the shared HStream Qt desktop and its versioned backend protocol. Native calibration, camera leveling, rink-map fitting, experiments and highlights remain owned by HockeyMONStream; Python Program processing consumes validated private native snapshots through `hstream-calibration-export`. Do not add a second desktop or duplicate native provenance parsing. Runtime mutations acknowledge only frame-owner receipts, and publication reports only files committed by this run. See `docs/shared-ui-backend.md` and `hm-ui/README.md`.
+
 - `hmlib/scoreboard/proposal.py` supplies an ephemeral initial polygon only when the selector has no saved selection. Its pinned TorchScript export shares the native HStream scoreboard model contract; CUDA is preferred, GPU OOM releases resources and retries once on CPU, and other failures remain visible with manual selection available. Saved and disabled polygons bypass model work. Keep inference out of per-frame transforms; see `hmlib/scoreboard/README.md`.
 
 - Keep `hmlib/config/baseline.yaml` byte-for-byte synchronized with HockeyMONStream's `configs/baseline.yaml`. `stitching.control_point_execution_provider` defaults to `cuda` (`cpu` is an explicit alternative without a UI switch). `stitching.control_point_resolution` is the native HStream matcher setting (`2k` is the default on every platform, including missing or `auto` settings; explicit `native`/`1k` choices remain available); its runtime policy is documented in that repository's `docs/native-feature-matchers.md`.

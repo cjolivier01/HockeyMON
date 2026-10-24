@@ -287,6 +287,38 @@ class TelemetryRecorder:
                     "INSERT INTO cameras VALUES(?,?,?,?,?,?,?)",
                     (self.run_id, self._sample_id, role, *boxes[index]),
                 )
+            replay = stages.get("cameras", {}).get("native_replay", [])
+            if replay:
+                if len(replay) != len(ids):
+                    raise ValueError("Native replay input count differs from telemetry frames")
+                sample = replay[index]
+                connection.execute(
+                    "INSERT INTO replay_frames VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        self.run_id,
+                        self._sample_id,
+                        *sample["arena"],
+                        int(sample["stepped"]),
+                        int(sample["has_received_tracks"]),
+                        *sample["edge_rotation"],
+                    ),
+                )
+                for ordinal, row in enumerate(sample["tracks"]):
+                    connection.execute(
+                        "INSERT INTO replay_tracks VALUES(?,?,?,?,?,?,?,?)",
+                        (self.run_id, self._sample_id, ordinal, str(row[0]), *row[1:]),
+                    )
+                if sample["checkpoint"] is not None:
+                    connection.execute(
+                        "INSERT INTO checkpoints VALUES(?,?,?,?,?)",
+                        (
+                            self.run_id,
+                            self._sample_id,
+                            1,
+                            sample["checkpoint"],
+                            sample["base_checkpoint"],
+                        ),
+                    )
             for event in events:
                 if event["frame"] == frame:
                     self._event_id += 1
