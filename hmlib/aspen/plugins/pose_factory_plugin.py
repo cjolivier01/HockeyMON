@@ -120,9 +120,15 @@ class PoseInferencerFactoryPlugin(Plugin):
             ):
                 cfg = prepend_root_dir(cfg)
             ckpt = self._pose_checkpoint
+            gpu = None
             if self._shared_model is not None:
-                from hmlib.models.player_analytics import load_model_bundle, prepare_player_model
+                from hmlib.models.player_analytics import (
+                    load_model_bundle,
+                    prepare_player_model,
+                    validate_model_gpu,
+                )
 
+                gpu = validate_model_gpu(self._shared_model.get("gpu"))
                 bundle = self._shared_model.get("bundle")
                 if bundle:
                     path, _ = load_model_bundle("pose", bundle)
@@ -201,6 +207,7 @@ class PoseInferencerFactoryPlugin(Plugin):
                             quantize_int8=bool(self._onnx_cfg.get("quantize_int8", False)),
                             calib_frames=int(self._onnx_cfg.get("calib_frames", 0)),
                             native_simcc=self._shared_model is not None,
+                            gpu=gpu,
                         )
                         inferencer._hm_onnx_runner = self._onnx_runner
                         runner = self._onnx_runner
@@ -261,8 +268,12 @@ class _OnnxPoseRunner:
         quantize_int8: bool = False,
         calib_frames: int = 0,
         native_simcc: bool = False,
+        gpu: int | None = None,
     ):
+        from hmlib.models.player_analytics import validate_model_gpu
+
         self.model = model
+        self.gpu = None if gpu is None else validate_model_gpu(gpu)
         self.native_simcc = native_simcc
         self.onnx_path = onnx_path
         self.force_export = force_export
@@ -410,7 +421,14 @@ class _OnnxPoseRunner:
         so.enable_cpu_mem_arena = True
         avail = ort.get_available_providers()
         if "CUDAExecutionProvider" in avail:
-            self._providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            self._providers = [
+                (
+                    "CUDAExecutionProvider"
+                    if self.gpu is None
+                    else ("CUDAExecutionProvider", {"device_id": self.gpu})
+                ),
+                "CPUExecutionProvider",
+            ]
             self._use_cuda = True
         else:
             self._providers = ["CPUExecutionProvider"]
@@ -458,6 +476,10 @@ class _OnnxPoseRunner:
             dev = torch.device("cpu")
         if self._use_cuda and x.is_cuda:
             xc = x.contiguous() if preprocessed else self._preprocess_gpu(x)
+            if self.gpu is not None:
+                # Preprocessing can belong to another GPU in the Python graph.
+                # Move only these bounded crops to the accepted model device.
+                xc = xc.to(device=torch.device("cuda", self.gpu))
             if need_calib and len(self._calib_inputs) < self.calib_target:
                 x_cpu = xc.detach().to("cpu")
                 remaining = max(0, self.calib_target - len(self._calib_inputs))
@@ -475,7 +497,8 @@ class _OnnxPoseRunner:
                 buffer_ptr=int(xc.data_ptr()),
             )
             for out in self._ort_sess.get_outputs():
-                io.bind_output(out.name, device_type="cuda")
+                device = {} if self.gpu is None else {"device_id": self.gpu}
+                io.bind_output(out.name, device_type="cuda", **device)
             self._ort_sess.run_with_iobinding(io)
             ort_outs = io.get_outputs()
             outs_t: list[torch.Tensor] = []

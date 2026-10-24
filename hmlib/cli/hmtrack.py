@@ -2762,7 +2762,7 @@ def split_config_paths(items: list[str] | None) -> list[str]:
     ]
 
 
-def main():
+def main() -> int | None:
     setup_logging()
 
     # Prefer CUDA, but don't hard-fail if the runtime isn't detected so CPU-only
@@ -2929,9 +2929,10 @@ if __name__ == "__main__":
         # without touching full tracker startup.
         if "--smoke-test" not in sys.argv and torch.cuda.is_available():
             with torch.cuda.stream(torch.cuda.Stream(torch.device("cuda"))):
-                main()
+                exit_status = main()
         else:
-            main()
+            exit_status = main()
+        raise SystemExit(exit_status)
     except Exception as e:  # noqa: BLE001 - CLI reports errors before a failing exit status.
         print(f"Exception during processing: {e}")
         traceback.print_exc()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
-from hmlib.models.player_analytics import model_contract
+from hmlib.models.player_analytics import model_contract, validate_model_gpu
 
 
 def translate_shared_analytics(
@@ -109,12 +109,17 @@ def translate_shared_analytics(
 def shared_pose_parameters(config: dict) -> dict:
     from hmlib.ui.analytics_graph import NATIVE_POSE_CONFIG
 
-    settings = config["pipeline"]["player-analytics"]["pose"]
+    analytics = config["pipeline"]["player-analytics"]
+    settings = analytics["pose"]
     return {
         "pose_config": NATIVE_POSE_CONFIG,
         "pose_checkpoint": None,
         "pose_checkpoint_sha256": None,
-        "shared_model": {"model": settings["model"], "bundle": settings.get("bundle")},
+        "shared_model": {
+            "model": settings["model"],
+            "bundle": settings.get("bundle"),
+            "gpu": analytics.get("gpu-id"),
+        },
         "onnx": {"enable": False},
         "trt": {"enable": False},
     }
@@ -144,12 +149,10 @@ def apply_prepared_shared_analytics(config: dict, prepared: dict) -> None:
             and Path(destination[path_key]).resolve() != Path(source[path_key]).resolve()
         ):
             raise ValueError(f"Prepared {feature} bundle changed during the run")
-        if feature == "reid":
-            from hmlib.models.appearance import validate_appearance_gpu
-
-            # The native preparer resolves device inheritance together with the
-            # engine. Reuse that device after seeks as well as the initial run.
-            destination["gpu-id"] = validate_appearance_gpu(source.get("gpu-id"))
+        # Native preparation resolves device inheritance together with assets.
+        # Preserve that accepted device when operator config is reloaded on seek.
+        owner = "tracker" if feature == "reid" else "player-analytics"
+        config["pipeline"][owner]["gpu-id"] = validate_model_gpu(pipeline[owner].get("gpu-id"))
         destination[path_key] = deepcopy(source[path_key])
     from hmlib.ui.runtime_setup import apply_engine_preferences
 

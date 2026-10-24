@@ -159,6 +159,12 @@ def load_model_bundle(feature: str, bundle: str | Path) -> tuple[Path, dict]:
     return path, contract
 
 
+def validate_model_gpu(gpu: int) -> int:
+    if type(gpu) is not int or gpu < 0:
+        raise ValueError("Player model GPU id must be a nonnegative integer")
+    return gpu
+
+
 class PlayerModel:
     def __init__(
         self,
@@ -166,6 +172,7 @@ class PlayerModel:
         model_path: str | None = None,
         provider: str = "auto",
         model_bundle: str | None = None,
+        gpu: int | None = None,
     ):
         if provider not in {"auto", "cpu", "cuda"}:
             raise ValueError("Player model provider must be auto, cpu or cuda")
@@ -178,6 +185,7 @@ class PlayerModel:
                 raise ValueError("Choose a model bundle or ONNX path, not both")
             self.path, self.contract = load_model_bundle(feature, model_bundle)
         self.provider = provider
+        self.gpu = None if gpu is None else validate_model_gpu(gpu)
         self.session = None
 
     def ensure_session(self):
@@ -192,15 +200,20 @@ class PlayerModel:
         if self.provider == "cuda" and "CUDAExecutionProvider" not in available:
             raise RuntimeError(f"Requested CUDA provider unavailable for {self.feature}")
         providers = ["CPUExecutionProvider"]
-        if self.provider != "cpu" and "CUDAExecutionProvider" in available:
-            providers.insert(0, "CUDAExecutionProvider")
+        use_cuda = self.provider != "cpu" and "CUDAExecutionProvider" in available
+        if use_cuda:
+            providers.insert(
+                0,
+                (
+                    "CUDAExecutionProvider"
+                    if self.gpu is None
+                    else ("CUDAExecutionProvider", {"device_id": self.gpu})
+                ),
+            )
         elif self.provider == "auto":
             logger.warning("%s CUDA provider unavailable; inference runs on CPU", self.feature)
         session = ort.InferenceSession(str(path), providers=providers)
-        if (
-            providers[0] == "CUDAExecutionProvider"
-            and "CUDAExecutionProvider" not in session.get_providers()
-        ):
+        if use_cuda and "CUDAExecutionProvider" not in session.get_providers():
             raise RuntimeError(
                 f"CUDA initialization failed for {self.feature}; refusing provider substitution"
             )

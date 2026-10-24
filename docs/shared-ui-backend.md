@@ -129,12 +129,18 @@ the default DeepStream appearance option executes the prepared ETLT-derived
 TensorRT engine through `hstream-model-infer`, using the same native TensorRT
 runtime that built it. Its binary pipe carries batches of at most 32 preprocessed
 player crops and returns embeddings; full video frames never enter that pipe.
-Native preparation also publishes the resolved `pipeline.tracker.gpu-id`, using
-the same tracker/application inheritance as engine preparation. Python carries
-that accepted device into the ReID stage and its native helper or ONNX CUDA
-provider, including after a seek; it does not choose a separate shared default.
 This bounded host transfer isolates native engine compatibility from the Python
-environment's TensorRT version. Custom bundles retain their selected paths. Explicit initial
+environment's TensorRT version.
+
+Native preparation publishes resolved `pipeline.player-analytics.gpu-id` and
+`pipeline.tracker.gpu-id` using its existing application inheritance. Python
+carries each accepted device through the pose, jersey, action, team and ReID
+stages into their ONNX CUDA providers or native helper, including after a seek;
+it does not choose a separate shared default. Pose input/output bindings use
+that same device. If preprocessing uses another GPU, only the bounded pose
+crops move to the inference device, and results return to the preprocessing
+model's device for coordinate decoding.
+Custom bundles retain their selected paths. Explicit initial
 Python model overrides remain authoritative for that launch. A seek retains the
 accepted assets; selecting a different model requires a new run. Stop cancels
 preparation before any Python worker starts.

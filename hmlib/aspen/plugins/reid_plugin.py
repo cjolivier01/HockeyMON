@@ -115,9 +115,9 @@ class ReidPlugin(Plugin):
     ):
         super().__init__(enabled=enabled)
         if gpu is not None:
-            from hmlib.models.appearance import validate_appearance_gpu
+            from hmlib.models.player_analytics import validate_model_gpu
 
-            gpu = validate_appearance_gpu(gpu)
+            gpu = validate_model_gpu(gpu)
         self.gpu = gpu
         self.settings = {}
         self.engine = False
@@ -274,9 +274,9 @@ def configure_reid(config: dict, game: Path, *, validate_weights: bool = True) -
         # Graph inspection can precede native model preparation. Executable
         # shared graphs require its resolved device instead of choosing one.
         if validate_weights or settings.get("gpu-id") is not None:
-            from hmlib.models.appearance import validate_appearance_gpu
+            from hmlib.models.player_analytics import validate_model_gpu
 
-            extraction["gpu"] = validate_appearance_gpu(settings.get("gpu-id"))
+            extraction["gpu"] = validate_model_gpu(settings.get("gpu-id"))
     else:
         extraction = {}
     needs_legacy = (tracker_enabled and "reid" not in shared) or (
@@ -306,10 +306,12 @@ def configure_reid(config: dict, game: Path, *, validate_weights: bool = True) -
     plugins = config.get("aspen", {}).get("plugins", {})
     if team_enabled:
         team_path = path
+        team_options = {}
         if "team" in shared:
-            from hmlib.models.player_analytics import load_model_bundle
+            from hmlib.models.player_analytics import load_model_bundle, validate_model_gpu
 
-            bundle = config["pipeline"]["player-analytics"]["team"].get("bundle")
+            analytics = config["pipeline"]["player-analytics"]
+            bundle = analytics["team"].get("bundle")
             if not bundle and validate_weights:
                 raise ValueError("Shared team model preparation did not provide its bundle")
             team_path = (
@@ -317,6 +319,8 @@ def configure_reid(config: dict, game: Path, *, validate_weights: bool = True) -
                 if bundle
                 else game / ".hm-ui" / "shared-models" / "team.onnx"
             )
+            if validate_weights or analytics.get("gpu-id") is not None:
+                team_options["reid_gpu"] = validate_model_gpu(analytics.get("gpu-id"))
         team_nodes = [
             node
             for node in plugins.values()
@@ -326,7 +330,7 @@ def configure_reid(config: dict, game: Path, *, validate_weights: bool = True) -
             raise ValueError("NVIDIA team appearance requires a TeamAffiliationPlugin stage")
         for node in team_nodes:
             node.setdefault("params", {}).update(
-                reid_onnx_path=str(team_path), backend="reidentificationnet"
+                reid_onnx_path=str(team_path), backend="reidentificationnet", **team_options
             )
     if not tracker_enabled:
         return

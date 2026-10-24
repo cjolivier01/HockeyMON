@@ -536,18 +536,18 @@ pytest_test(
     ],
 )
 
-pytest_test(
-    name="test_team_plugin",
-    srcs=["test_team_plugin.py"],
-    args=[
-        "-c",
-        "$(location //:pyproject.toml)",
-    ],
-    data=["aspen_plugin_harness.py"],
-    deps=[
+sh_test(
+    name = "test_team_plugin",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_team_plugin.py", "cv2", "mmengine", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
         "//hmlib:hmlib.lib",
-        requirement("pytest"),
+        "aspen_plugin_harness.py",
+        "python_runtime.sh",
+        "test_team_plugin.py",
     ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
 
 pytest_test(
@@ -603,18 +603,18 @@ pytest_test(
     ],
 )
 
-pytest_test(
-    name="test_team_graph",
-    srcs=["test_team_graph.py"],
-    args=[
-        "-c",
-        "$(location //:pyproject.toml)",
-    ],
-    data=["//hmlib:config_data_files"],
-    deps=[
+sh_test(
+    name = "test_team_graph",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_team_graph.py", "numpy", "pytest", "torch", "yaml"],
+    data = [
+        "//:pyproject.toml",
+        "//hmlib:config_data_files",
         "//hmlib:hmlib.lib",
-        requirement("pytest"),
+        "python_runtime.sh",
+        "test_team_graph.py",
     ],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
 
 py_test(

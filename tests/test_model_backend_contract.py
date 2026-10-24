@@ -185,6 +185,53 @@ def should_not_run_pytorch_when_wrapped_pose_execution_fails():
         model.test_step({})
 
 
+@pytest.mark.parametrize("input_gpu", [0, 1])
+def should_bind_shared_pose_crops_and_outputs_to_the_accepted_gpu(monkeypatch, tmp_path, input_gpu):
+    moves, inputs, outputs = [], [], []
+
+    class Crops:
+        ndim = 4
+        is_cuda = True
+        shape = (2, 3, 256, 192)
+
+        def __init__(self, gpu):
+            self.device = torch.device("cuda", gpu)
+
+        def contiguous(self):
+            return self
+
+        def to(self, *, device):
+            moves.append(device)
+            return Crops(device.index)
+
+        def data_ptr(self):
+            return 1234
+
+    binding = SimpleNamespace(
+        bind_input=lambda **kwargs: inputs.append(kwargs),
+        bind_output=lambda name, **kwargs: outputs.append((name, kwargs)),
+        get_outputs=list,
+    )
+    monkeypatch.setattr(pose._OnnxPoseRunner, "_export_and_create_session", lambda self: None)
+    runner = pose._OnnxPoseRunner(torch.nn.Identity(), str(tmp_path / "pose.onnx"), gpu=1)
+    runner._use_cuda = True
+    runner._ort_sess = SimpleNamespace(
+        io_binding=lambda: binding,
+        get_inputs=lambda: [SimpleNamespace(name="images")],
+        get_outputs=lambda: [SimpleNamespace(name="simcc_x"), SimpleNamespace(name="simcc_y")],
+        run_with_iobinding=lambda io: None,
+    )
+    monkeypatch.setattr(runner, "_ensure_tensor", lambda value: value)
+    runner._run_feats(Crops(input_gpu), preprocessed=True)
+    assert moves == [torch.device("cuda", 1)]
+    assert len(inputs) == 1 and inputs[0]["device_id"] == 1
+    assert inputs[0]["buffer_ptr"] == 1234 and inputs[0]["shape"] == [2, 3, 256, 192]
+    assert outputs == [
+        ("simcc_x", {"device_type": "cuda", "device_id": 1}),
+        ("simcc_y", {"device_type": "cuda", "device_id": 1}),
+    ]
+
+
 @pytest.mark.parametrize("backend", ["onnx", "trt"])
 def should_preserve_mmpose_preprocessing_flip_and_image_coordinates(monkeypatch, tmp_path, backend):
     from mmengine.structures import InstanceData

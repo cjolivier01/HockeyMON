@@ -383,3 +383,147 @@ def should_execute_custom_native_bundle_bytes_and_its_output_semantics(tmp_path,
     manifest.write_text(yaml.safe_dump(contract))
     with pytest.raises(ValueError, match="checksum"):
         load_model_bundle(feature, tmp_path)
+
+
+@pytest.mark.parametrize("custom", [False, True])
+@pytest.mark.parametrize("cuda_available", [False, True])
+def should_preserve_prepared_analytics_gpu_through_every_runner_and_seek(
+    tmp_path, monkeypatch, caplog, custom, cuda_available
+):
+    from copy import deepcopy
+    from pathlib import Path
+
+    import mmpose.apis.inferencers
+    import onnxruntime as ort
+
+    from hmlib.aspen.plugins.pose_factory_plugin import PoseInferencerFactoryPlugin
+    from hmlib.aspen.plugins.reid_plugin import configure_reid
+    from hmlib.aspen.plugins.team_plugin import TeamAffiliationPlugin
+    from hmlib.models import player_analytics
+    from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+
+    features = ("pose", "jersey", "action", "team")
+    selected = {
+        feature: "custom" if custom else model_contract(feature)["model_id"] for feature in features
+    }
+    paths = {feature: tmp_path / f"{feature}.onnx" for feature in features}
+    for path in paths.values():
+        path.touch()
+    monkeypatch.setattr(
+        player_analytics,
+        "load_model_bundle",
+        lambda feature, bundle: (paths[feature], model_contract(feature)),
+    )
+    observed = []
+    providers = ["CPUExecutionProvider"]
+    if cuda_available:
+        providers.insert(0, "CUDAExecutionProvider")
+    monkeypatch.setattr(ort, "get_available_providers", lambda: providers)
+
+    def create_session(path, *, providers, **kwargs):
+        feature = Path(path).stem
+        observed.append((feature, providers))
+        contract = model_contract(feature)
+
+        def nodes(kind):
+            return [
+                SimpleNamespace(
+                    name=spec["name"], shape=["N", *spec["shape"][1:]], type="tensor(float)"
+                )
+                for spec in contract[kind]
+            ]
+
+        return SimpleNamespace(
+            get_inputs=lambda: nodes("inputs"),
+            get_outputs=lambda: nodes("outputs"),
+            get_providers=lambda: (
+                ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                if cuda_available
+                else ["CPUExecutionProvider"]
+            ),
+        )
+
+    monkeypatch.setattr(ort, "InferenceSession", create_session)
+
+    class PoseModel(torch.nn.Module):
+        def test_step(self, data):
+            return []
+
+    monkeypatch.setattr(
+        mmpose.apis.inferencers,
+        "MMPoseInferencer",
+        lambda **kwargs: SimpleNamespace(
+            inferencer=SimpleNamespace(cfg=SimpleNamespace(data_mode="topdown"), model=PoseModel())
+        ),
+    )
+    analytics = {
+        feature: {"enable": True, "model": selected[feature], "bundle": str(tmp_path / feature)}
+        for feature in features
+    }
+    base = {
+        "hm_ui": {
+            "shared_analytics": selected,
+            "run": {
+                "analytics": "custom",
+                "pose_model": "shared",
+                "jersey_model": "shared",
+                "action_model": "shared",
+            },
+        },
+        "pipeline": {"player-analytics": analytics},
+        "team": {"enabled": True, "backend": "reidentificationnet"},
+        "aspen": {
+            "plugins": {
+                "pose_factory": {"params": {}},
+                "jersey_numbers": {"params": {}},
+                "actions": {"params": {}},
+                "team_affiliation": {
+                    "class": "hmlib.aspen.plugins.team_plugin.TeamAffiliationPlugin",
+                    "params": {},
+                },
+            }
+        },
+    }
+    prepared = {"pipeline": {"player-analytics": {**deepcopy(analytics), "gpu-id": 1}}}
+    expected = (
+        [("CUDAExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"]
+        if cuda_available
+        else ["CPUExecutionProvider"]
+    )
+    for operator_gpu in (None, 2):
+        # A seek rebuild reads operator settings again, then reapplies the
+        # accepted bundle/device before constructing new model sessions.
+        config = deepcopy(base)
+        config["pipeline"]["player-analytics"]["gpu-id"] = operator_gpu
+        apply_prepared_shared_analytics(config, prepared)
+        configure_reid(config, tmp_path)
+        nodes = config["aspen"]["plugins"]
+        PoseInferencerFactoryPlugin(**nodes["pose_factory"]["params"]).forward({"device": "cpu"})
+        ParseqJerseyPlugin(**nodes["jersey_numbers"]["params"]).model.ensure_session()
+        TemporalActionPlugin(**nodes["actions"]["params"]).model.ensure_session()
+        TeamAffiliationPlugin(
+            **nodes["team_affiliation"]["params"]
+        )._ensure_backend()._runner._ensure_session()
+        assert observed[-4:] == [(feature, expected) for feature in features]
+    if not cuda_available:
+        assert "Shared pose CUDA provider unavailable" in caplog.text
+        assert "jersey CUDA provider unavailable" in caplog.text
+        assert "action CUDA provider unavailable" in caplog.text
+        assert "ReID CUDA provider unavailable" in caplog.text
+
+
+@pytest.mark.parametrize("gpu", [None, True, -1, "1"])
+def should_refuse_unresolved_prepared_analytics_gpu(gpu):
+    from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+
+    config = {"hm_ui": {"shared_analytics": {"pose": "native"}}, "pipeline": {}}
+    prepared = {
+        "pipeline": {
+            "player-analytics": {
+                "gpu-id": gpu,
+                "pose": {"model": "native", "bundle": "/prepared/pose"},
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="GPU id"):
+        apply_prepared_shared_analytics(config, prepared)

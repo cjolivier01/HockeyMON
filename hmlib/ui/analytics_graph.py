@@ -143,6 +143,7 @@ def apply_analytics_preferences(config: dict) -> None:
             node["params"]["model_bundle"] = config["pipeline"]["player-analytics"][target].get(
                 "bundle"
             )
+            node["params"]["gpu"] = config["pipeline"]["player-analytics"].get("gpu-id")
 
     # Telemetry snapshots tracks at SaveTrackingPlugin, so it must wait for
     # every enabled label producer even in a threaded graph.

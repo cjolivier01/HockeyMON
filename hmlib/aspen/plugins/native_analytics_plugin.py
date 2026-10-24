@@ -150,9 +150,9 @@ def _frames(context):
 class _NativeAnalytics(Plugin):
     feature = ""
 
-    def __init__(self, model_path, provider, enabled, model_bundle=None):
+    def __init__(self, model_path, provider, enabled, model_bundle=None, gpu=None):
         super().__init__(enabled=enabled)
-        self.model = PlayerModel(self.feature, model_path, provider, model_bundle)
+        self.model = PlayerModel(self.feature, model_path, provider, model_bundle, gpu=gpu)
         self._reset()
 
     def _reset(self):
@@ -233,8 +233,9 @@ class TemporalActionPlugin(_NativeAnalytics):
         top_k: int = 3,
         score_threshold: float = 0.5,
         model_bundle: str | None = None,
+        gpu: int | None = None,
     ):
-        super().__init__(model_path, provider, enabled, model_bundle)
+        super().__init__(model_path, provider, enabled, model_bundle, gpu=gpu)
         if not 1 <= top_k <= 60:
             raise ValueError("Action top_k must be between 1 and 60")
         self.top_k = top_k
@@ -329,8 +330,9 @@ class ParseqJerseyPlugin(_NativeAnalytics):
         roi_mode: str = "bbox",
         min_confidence: float = 0.8,
         model_bundle: str | None = None,
+        gpu: int | None = None,
     ):
-        super().__init__(model_path, provider, enabled, model_bundle)
+        super().__init__(model_path, provider, enabled, model_bundle, gpu=gpu)
         if roi_mode not in {"bbox", "pose"}:
             raise ValueError("Jersey ROI mode must be bbox or pose")
         self.roi_mode = roi_mode

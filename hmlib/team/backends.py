@@ -129,10 +129,10 @@ class TaoBackend:
     name = TAO_BACKEND
     dim = 256
 
-    def __init__(self, onnx_path: str):
+    def __init__(self, onnx_path: str, gpu: int | None = None):
         from hmlib.aspen.plugins.reid_plugin import ReidPlugin
 
-        self._runner = ReidPlugin(onnx_path)
+        self._runner = ReidPlugin(onnx_path, gpu=gpu)
         self._lab = LabBackend()
 
     def extract(self, batch: torch.Tensor) -> BackendOutput:
@@ -189,6 +189,7 @@ def build_backend(
     prtreid_backbone_weights: str = "",
     prtreid_device: str = "cuda",
     reid_onnx_path: str = "",
+    reid_gpu: int | None = None,
 ):
     """Construct a backend by name.
 
@@ -208,7 +209,7 @@ def build_backend(
     if normalised == TAO_BACKEND:
         if not reid_onnx_path:
             raise ValueError("Prepare the NVIDIA appearance model before selecting it for teams")
-        return TaoBackend(reid_onnx_path)
+        return TaoBackend(reid_onnx_path, gpu=reid_gpu)
     raise ValueError(
         f"unknown team.backend {backend!r}; expected one of {', '.join(BACKEND_NAMES)}"
     )

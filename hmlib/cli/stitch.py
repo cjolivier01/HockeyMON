@@ -1384,7 +1384,7 @@ def _main(args) -> None:
         )
 
 
-def main() -> None:
+def main() -> int | None:
     parser = hm_opts.parser(parser=make_parser())
     args = parser.parse_args()
     args.explicit_arg_names = hm_opts.collect_explicit_arg_names(parser)
@@ -1401,5 +1401,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
-    print("Done.")
+    exit_status = main()
+    if not exit_status:
+        print("Done.")
+    raise SystemExit(exit_status)

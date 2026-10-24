@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import subprocess
 import sys
 import time
@@ -213,6 +214,49 @@ def should_forward_original_stitch_invocation_to_the_native_calibration_trampoli
     assert "--stitching-calibration-only" in launch["command"]
     assert launch["envelope"]["module"] == "hmlib.cli.stitch"
     assert launch["envelope"]["arguments"] == arguments
+
+
+@pytest.mark.parametrize("module", ["hmtrack", "stitch"])
+@pytest.mark.parametrize("invocation", ["module", "file"])
+def should_propagate_desktop_failure_from_python_entrypoints(tmp_path, module, invocation):
+    root = Path(__file__).resolve().parents[1]
+    game = tmp_path / "games" / "exit-status"
+    game.mkdir(parents=True)
+    (game / "source.mp4").write_bytes(b"source preflight checks file ownership only")
+    (game / "config.yaml").write_text("game:\n  videos:\n    source: [source.mp4]\n")
+    ui = tmp_path / "hstream-ui"
+    ui.write_text("#!/bin/sh\nexit 7\n")
+    ui.chmod(0o755)
+    backend = tmp_path / "hm-cli"
+    backend.write_text(
+        f"#!{sys.executable}\n"
+        "from hmlib.cli.hstream_backend import main\n"
+        "raise SystemExit(main())\n"
+    )
+    backend.chmod(0o755)
+    entrypoint = (
+        ["-m", f"hmlib.cli.{module}"]
+        if invocation == "module"
+        else [str(root / "hmlib" / "cli" / f"{module}.py")]
+    )
+    result = subprocess.run(
+        [sys.executable, *entrypoint, "--game-id=exit-status", "--camera-ui=1"],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join([str(root), os.environ.get("PYTHONPATH", "")]),
+            "CUDA_VISIBLE_DEVICES": "",
+            "HM_GAME_DIR": str(game.parent),
+            "HSTREAM_UI_BIN": str(ui),
+            "HM_CLI_BIN": str(backend),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=90,
+    )
+    assert result.returncode == 7, result.stdout + result.stderr
+    assert "Done." not in result.stdout
 
 
 @pytest.mark.parametrize("target", ["detector", "pose"])

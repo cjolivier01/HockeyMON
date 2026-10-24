@@ -708,12 +708,15 @@ def should_preserve_shared_custom_bundles_and_rebind_them_after_seek(game, tmp_p
         )
     )
     prepared = {
-        "pipeline": {"player-analytics": {"pose": {"model": "custom", "bundle": str(bundle)}}}
+        "pipeline": {
+            "player-analytics": {"gpu-id": 1, "pose": {"model": "custom", "bundle": str(bundle)}}
+        }
     }
     apply_prepared_shared_analytics(plan.config, prepared)
     assert plan.config["aspen"]["plugins"]["pose_factory"]["params"]["shared_model"] == {
         "model": "custom",
         "bundle": str(bundle),
+        "gpu": 1,
     }
     prepared["pipeline"]["player-analytics"]["pose"]["bundle"] = str(tmp_path / "other")
     with pytest.raises(ValueError, match="changed during the run"):
