@@ -103,6 +103,7 @@ runtime:
     cancellation_poll_ms: 10
     maximum_inference_io_bytes: 268435456
     maximum_encoded_packet_bytes: 67108864
+    maximum_runtime_command_bytes: 8192
     compact_stitch_workspace: true
     playback_start_seconds: 0
     model_cache:
