@@ -2,6 +2,7 @@
 
 import base64
 import json
+import threading
 import time
 
 import pytest
@@ -320,17 +321,143 @@ def should_report_actual_precision_and_reject_lost_precision():
 
 
 def should_notify_local_audio_owner_before_native_pause_acknowledgements(runtime):
-    _ui, protocol, messages = runtime
+    ui, protocol, messages = runtime
+    ui.enable_playback()
     protocol._spec()
     messages.clear()
     notifications = []
     protocol.process_paused = lambda paused: notifications.append((paused, len(messages)))
     assert protocol.handle_line("@process-pause 1")
+    assert notifications == []
+    assert not any("HSTREAM_PROCESS_PAUSE" in line for line in messages)
+    ui.apply_runtime_requests(lambda: True)
+    assert ui.paused
+    protocol.poll()
+    assert messages[-1] == "HSTREAM_PROCESS_PAUSE status=prepared generation=1 mode=cooperative"
+    assert protocol.replay_state["paused"]
     assert protocol.handle_line("@process-resume 1")
+    assert notifications == [(True, 0)]
+    ui.apply_runtime_requests(lambda: True)
+    assert not ui.paused
+    protocol.poll()
+    assert messages[-1] == "HSTREAM_PROCESS_PAUSE status=resumed generation=1 mode=cooperative"
     assert notifications == [(True, 0), (False, 1)]
+    assert not protocol.replay_state["paused"]
     assert not protocol.handle_line("@process-pause 1")
     assert not protocol.handle_line("@process-resume 2")
     assert len(notifications) == 2
+
+
+def should_fail_unapplied_pauses_without_acknowledging_or_pausing_audio(runtime):
+    ui, protocol, messages = runtime
+    notifications = []
+    protocol.process_paused = notifications.append
+    assert protocol.handle_line("@process-pause 1")
+    ui.apply_runtime_requests(lambda: True)
+    protocol.poll()
+    assert "Playback controls are unavailable" in messages[-1]
+    assert notifications == []
+    assert not protocol.replay_state["paused"]
+    assert not any("HSTREAM_PROCESS_PAUSE" in line for line in messages)
+
+
+def should_resume_after_a_pause_timeout_without_stranding_the_frame_owner(runtime):
+    ui, protocol, messages = runtime
+    ui.enable_playback()
+    assert protocol.handle_line("@process-pause 1")
+    # Qt may send its recovery resume before the supervisor has polled its
+    # matching deadline. Preserve mailbox order and acknowledge both outcomes.
+    assert protocol.handle_line("@process-resume 1")
+    assert not protocol.handle_line("@process-resume 1")
+    assert not protocol.handle_line("@process-pause 2")
+    ui.apply_runtime_requests(lambda: True)
+    protocol.poll()
+    assert not ui.paused
+    assert not protocol.replay_state["paused"]
+    assert messages[-1] == "HSTREAM_PROCESS_PAUSE status=resumed generation=1 mode=cooperative"
+
+
+@pytest.mark.parametrize("release", ["resume", "stop"])
+def should_hold_frames_after_pause_receipt_and_service_operations_until_release(runtime, release):
+    ui, protocol, messages = runtime
+    ui.enable_playback()
+    ui.publish_runtime(frame=10, fps=30, force=True)
+    assert protocol.handle_line("@process-pause 1")
+    operations = []
+    operation_done = threading.Event()
+    finished = threading.Event()
+
+    def apply_operation(value):
+        operations.append(value)
+        operation_done.set()
+
+    def frame_owner():
+        ui.wait_for_shared_frame(
+            11, 30, lambda: ui.apply_runtime_requests(lambda: True, apply_operation)
+        )
+        finished.set()
+
+    owner = threading.Thread(target=frame_owner, daemon=True)
+    owner.start()
+    try:
+        deadline = time.monotonic() + 2
+        while not protocol.replay_state["paused"] and time.monotonic() < deadline:
+            protocol.poll()
+            time.sleep(0.005)
+        assert protocol.replay_state["paused"], messages
+        assert read_document(ui.runtime_path)["frame"] == 10
+        protocol._queue({"kind": "operation", "operation": {"kind": "scoreboard"}}, [])
+        assert operation_done.wait(2)
+        assert operations == [{"kind": "scoreboard"}]
+        assert not finished.wait(0.1)
+        assert read_document(ui.runtime_path)["frame"] == 10
+        assert protocol.handle_line("@process-resume 1" if release == "resume" else "q")
+        assert finished.wait(2)
+        protocol.poll()
+        assert ui._runtime_frame == 11
+        assert ui.stop_requested == (release == "stop")
+    finally:
+        ui.stop_requested = True
+        owner.join(timeout=2)
+
+
+def should_restore_paused_seek_allowing_only_the_first_preview_batch(runtime):
+    ui, protocol, _messages = runtime
+    ui.enable_playback()
+    assert protocol.handle_line("@process-pause 1")
+    ui.apply_runtime_requests(lambda: True)
+    protocol.poll()
+    protocol.reset_child(2_000_000_000)
+    write_document(ui._tmpdir / "replay-controls.json", protocol.replay_state)
+    ui._replay_controls_restored = False
+    ui.apply_playback_action("resume")
+    ui.apply_runtime_requests(lambda: True)
+    assert ui.paused
+    ui.wait_for_shared_frame(60, 30, lambda: None)
+    ui.wait_for_shared_frame(61, 30, lambda: None)
+    ui.publish_runtime(force=True)
+    assert read_document(ui.runtime_path)["seek_ready"] is False
+    ui.complete_shared_batch(frame=61, fps=30)
+    assert read_document(ui.runtime_path)["seek_ready"] is True
+    assert read_document(ui.runtime_path)["state"] == "paused"
+    finished = threading.Event()
+
+    def owner():
+        ui.wait_for_shared_frame(62, 30, lambda: ui.apply_runtime_requests(lambda: True))
+        finished.set()
+
+    thread = threading.Thread(target=owner, daemon=True)
+    thread.start()
+    try:
+        assert not finished.wait(0.1)
+        assert ui._runtime_frame == 61
+        assert protocol.handle_line("@process-resume 1")
+        assert finished.wait(2)
+        protocol.poll()
+        assert not protocol.replay_state["paused"]
+    finally:
+        ui.stop_requested = True
+        thread.join(timeout=2)
 
 
 def should_pace_source_frames_and_service_controls_during_wait(runtime, monkeypatch):
@@ -348,9 +475,11 @@ def should_pace_source_frames_and_service_controls_during_wait(runtime, monkeypa
     ui.wait_for_shared_frame(33, 30, lambda: polls.append(clock[0]))
     assert clock[0] == pytest.approx(100.1)
     assert len(polls) >= 5
-    # The resume handshake must reset source/wall alignment after SIGSTOP.
+    # The owner-confirmed resume must reset source/wall alignment after a pause.
     protocol._spec()
     assert protocol.handle_line("@process-pause 1")
+    ui.apply_runtime_requests(lambda: True)
+    protocol.poll()
     clock[0] += 10
     assert protocol.handle_line("@process-resume 1")
     ui.apply_runtime_requests(lambda: True)

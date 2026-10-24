@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
+import os
 import secrets
 import subprocess
 import sys
@@ -31,12 +33,104 @@ def _points(value, width: int, height: int) -> list[list[int]]:
     return value
 
 
+def _source_paths(config: dict, game_dir: Path) -> list[str]:
+    videos = config.get("game", {}).get("videos", {})
+    playlists = [value for value in videos.values() if value] if isinstance(videos, dict) else []
+    if len(playlists) != 1:
+        return []
+    values = playlists[0] if isinstance(playlists[0], list) else [playlists[0]]
+    return [str((game_dir / path).resolve()) for path in values]
+
+
+def _accepted_source_paths() -> list[str]:
+    sources = json.loads(os.environ["HM_SHARED_SOURCE_CHAPTERS"])
+    if (
+        not isinstance(sources, list)
+        or not sources
+        or any(not isinstance(path, str) or not Path(path).is_absolute() for path in sources)
+    ):
+        raise ValueError("Shared source processing requires its accepted source playlist")
+    return [str(Path(path).resolve()) for path in sources]
+
+
+def shared_source_owns_saved_game(game_id: str) -> bool:
+    """Whether a shared single-source run may reuse or update saved source geometry."""
+    from hmlib.config import get_game_dir
+
+    game_dir = Path(get_game_dir(game_id)).resolve()
+    saved = read_document(game_dir / "config.yaml", yaml_document=True)
+    return _source_paths(saved, game_dir) == _accepted_source_paths()
+
+
+def publish_source_canvas(game_id: str, config: dict, image) -> None:
+    """Publish one private source canvas, never the saved native panorama.
+
+    The source snapshot lives for the supervised run, including seeks. A saved
+    pair's inherited polygon does not describe an explicitly substituted source.
+    """
+    import cv2
+
+    from hmlib.config import get_game_dir
+    from hmlib.utils.image import make_channels_last, to_uint8_image
+
+    session = Path(os.environ["HM_UI_SESSION_DIR"]).resolve()
+    game_dir = Path(get_game_dir(game_id)).resolve()
+    sources = _accepted_source_paths()
+    directory = session / "scoreboard-source"
+    directory.mkdir(exist_ok=True)
+    owner = {"version": 1, "game_directory": str(game_dir), "sources": sources}
+    owner_path = directory / "owner.json"
+    if owner_path.exists():
+        if read_document(owner_path) != owner:
+            raise ValueError("Shared scoreboard reference belongs to a different run source")
+        private = read_document(directory / "config.yaml", yaml_document=True)
+        # For saved single-source playback the native transaction persisted to
+        # the original game; for an override it persisted only to this run.
+        saved = read_document(game_dir / "config.yaml", yaml_document=True)
+        if _source_paths(saved, game_dir) == sources:
+            private["rink"]["scoreboard"] = copy.deepcopy(
+                saved.get("rink", {}).get("scoreboard", {})
+            )
+    else:
+        saved = read_document(game_dir / "config.yaml", yaml_document=True)
+        preferences = copy.deepcopy(config.get("rink", {}).get("scoreboard", {}))
+        if _source_paths(saved, game_dir) != sources:
+            explicit_polygon = os.environ.get("HM_SHARED_SOURCE_SCOREBOARD_POLYGON")
+            preferences["perspective_polygon"] = (
+                json.loads(explicit_polygon) if explicit_polygon is not None else None
+            )
+        private = {"game": {"videos": {"source": sources}}, "rink": {"scoreboard": preferences}}
+        pixels = make_channels_last(to_uint8_image(image))
+        if pixels.ndim == 4:
+            pixels = pixels[0]
+        valid, encoded = cv2.imencode(".png", pixels.detach().cpu().numpy())
+        if not valid:
+            raise OSError("Cannot encode the shared scoreboard reference canvas")
+        temporary = directory / f".s-{os.getpid()}.png"
+        try:
+            temporary.write_bytes(encoded.tobytes())
+            os.replace(temporary, directory / "s.png")
+        finally:
+            temporary.unlink(missing_ok=True)
+        write_document(directory / "config.yaml", private)
+        write_document(owner_path, owner)
+    config.setdefault("rink", {}).setdefault("scoreboard", {})["perspective_polygon"] = (
+        private.get("rink", {}).get("scoreboard", {}).get("perspective_polygon")
+    )
+
+
 def apply_scoreboard_selection(game_id: str, config: dict, points: list, canvas: dict) -> None:
     """Persist through the native transaction, then publish to Python transforms."""
     from hmlib.config import get_game_dir
     from hmlib.stitching.native_calibration import save_native_scoreboard
 
     points = _points(points, canvas["width"], canvas["height"])
+    if "source_game_directory" in canvas:
+        reference = Path(os.environ["HM_UI_SESSION_DIR"]).resolve() / "scoreboard-source"
+        if Path(canvas["source_game_directory"]) != reference or canvas["game_directory"] != str(
+            Path(get_game_dir(game_id)).resolve()
+        ):
+            raise ValueError("Scoreboard canvas belongs to a different run or game")
     try:
         ordered = save_native_scoreboard(Path(get_game_dir(game_id)), points, canvas)
     except subprocess.CalledProcessError as error:
@@ -76,7 +170,18 @@ class ScoreboardSession:
         from hmlib.stitching.native_calibration import read_scoreboard_canvas
 
         try:
-            self.canvas = read_scoreboard_canvas(self.game_dir)
+            reference = self.session / "scoreboard-source"
+            if reference.is_dir():
+                owner = read_document(reference / "owner.json")
+                if owner.get("version") != 1 or owner.get("game_directory") != str(
+                    self.game_dir.resolve()
+                ):
+                    raise ValueError("Scoreboard source reference belongs to a different game")
+                self.canvas = read_scoreboard_canvas(
+                    self.game_dir, source_reference=reference, destination=self.session
+                )
+            else:
+                self.canvas = read_scoreboard_canvas(self.game_dir, destination=self.session)
             self._prepare_initial()
             if self._closed.is_set():
                 return
@@ -172,7 +277,20 @@ class ScoreboardSession:
             self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
             self.authority = f"127.0.0.1:{self.server.server_port}"
             self.origin = f"http://{self.authority}"
-            self.emit(f"Scoreboard selector: {self.origin}/?token={self.token}")
+            selector_url = f"{self.origin}/?token={self.token}"
+            write_document(
+                self.session / "scoreboard-selection.json",
+                {
+                    "version": 1,
+                    "game_id": self.game_dir.name,
+                    "session_id": self.session_id,
+                    "url": selector_url,
+                    "image_path": self.canvas["image_path"],
+                    "points": self.initial["points"],
+                    "scope": "run" if self.canvas.get("persist_to_game") is False else "game",
+                },
+            )
+            self.emit(f"Scoreboard selector: {selector_url}")
             self.server.timeout = 0.05
             while not self._closed.is_set():
                 self.server.handle_request()
@@ -192,13 +310,21 @@ class ScoreboardSession:
                 Path(self.canvas["image_path"]).unlink(missing_ok=True)
 
     def _prepare_initial(self) -> None:
-        config = read_document(self.game_dir / "config.yaml", yaml_document=True)
+        reference = self.canvas.get("source_game_directory")
+        config_dir = (
+            Path(reference) if reference and not self.canvas["persist_to_game"] else self.game_dir
+        )
+        config = read_document(config_dir / "config.yaml", yaml_document=True)
         saved = config.get("rink", {}).get("scoreboard", {}).get("perspective_polygon")
         if saved is not None:
             points = _points(saved, self.canvas["width"], self.canvas["height"])
             self.initial = {
                 "points": [] if points == _DISABLED else points,
-                "message": "Saved scoreboard selection loaded.",
+                "message": (
+                    "Run scoreboard selection loaded. This selection applies only to the current source override."
+                    if self.canvas.get("persist_to_game") is False
+                    else "Saved scoreboard selection loaded."
+                ),
             }
             return
         if self._closed.is_set():
@@ -237,6 +363,10 @@ class ScoreboardSession:
             }
         finally:
             self._proposal = None
+        if self.canvas.get("persist_to_game") is False:
+            self.initial[
+                "message"
+            ] += " This selection applies only to the current source override."
 
     def _save(self, points: list) -> None:
         identifier = uuid.uuid4().hex

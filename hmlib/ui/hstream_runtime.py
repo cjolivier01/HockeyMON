@@ -176,6 +176,8 @@ class RuntimeProtocol:
         self._session_id = ""
         self._generation = 0
         self._pause_generation = 0
+        self._pause_is_cooperative = False
+        self._cooperatively_paused = False
         self._progress_generation = 0
         if initial_preview not in PREVIEW_NAMES or initial_preview == "main":
             raise ValueError(f"Unknown initial preview channel: {initial_preview}")
@@ -386,22 +388,39 @@ class RuntimeProtocol:
                 if command == "process-pause":
                     if generation <= self._pause_generation:
                         raise ValueError("Stale process pause generation")
-                    if self.process_paused is not None:
-                        self.process_paused(True)
-                    self._pause_generation = generation
-                    status = "prepared"
+                    if any("process_generation" in item.payload for item in self._pending.values()):
+                        raise ValueError("Another process pause transition is pending")
+                    cooperative = (self.session / "spec.json").is_file()
                 else:
                     if generation != self._pause_generation:
                         raise ValueError("Stale process resume generation")
-                    # Before the first frame there is no pacing clock to reset.
-                    if (self.session / "spec.json").is_file():
+                    cooperative = self._pause_is_cooperative
+                paused = command == "process-pause"
+                action = "pause" if paused else "resume"
+                status = "prepared" if paused else "resumed"
+                receipt = f"HSTREAM_PROCESS_PAUSE status={status} generation={generation}"
+                if cooperative:
+                    if any(
+                        item.payload.get("process_generation") == generation
+                        and item.payload.get("action") == action
+                        for item in self._pending.values()
+                    ):
+                        raise ValueError("The process pause transition is already pending")
+                    self._queue(
+                        {"kind": "playback", "action": action, "process_generation": generation},
+                        [receipt + " mode=cooperative"],
+                        lambda reason: f"runtime command failed: process-{action}: {reason}",
+                    )
+                else:
+                    # Startup/native preparation has no frame owner yet. Qt
+                    # retains its process-group signal fallback for this mode.
+                    if not paused and (self.session / "spec.json").is_file():
                         self._queue({"kind": "clock-reset"}, [])
-                    if self.process_paused is not None:
-                        self.process_paused(False)
-                    self._clock_origin = time.monotonic()
-                    self._clock_position_ns = self._last_position_ns
-                    status = "resumed"
-                self.emit(f"HSTREAM_PROCESS_PAUSE status={status} generation={generation}")
+                    self._acknowledge_process_pause(paused, cooperative=False)
+                    self.emit(receipt)
+                if paused:
+                    self._pause_generation = generation
+                    self._pause_is_cooperative = cooperative
             elif command == "reset-progress-rate":
                 self._progress_generation = _integer(arguments, minimum=1)
                 self._clock_origin = time.monotonic()
@@ -688,6 +707,14 @@ class RuntimeProtocol:
         zero_start_bias = int(offset == 0 and self.start_ns + self._child_offset_ns == 0)
         return max(0.0, (int(frame) - offset - zero_start_bias) / rate)
 
+    def _acknowledge_process_pause(self, paused: bool, *, cooperative: bool) -> None:
+        if self.process_paused is not None:
+            self.process_paused(paused)
+        self._cooperatively_paused = paused and cooperative
+        if not paused:
+            self._clock_origin = time.monotonic()
+            self._clock_position_ns = self._last_position_ns
+
     def poll(self) -> None:
         """Drain receipts, then expose the last completed frame and preview."""
         now = time.monotonic()
@@ -707,6 +734,10 @@ class RuntimeProtocol:
             if result.get("ok") is True and result.get("session_id") != self._session_id:
                 result = {"ok": False, "error": "stale runtime acknowledgement"}
             if result.get("ok") is True:
+                if "process_generation" in pending.payload:
+                    self._acknowledge_process_pause(
+                        pending.payload["action"] == "pause", cooperative=True
+                    )
                 if pending.payload["kind"] == "preview":
                     self._preview_generation = pending.payload["generation"]
                     self._active_channel = pending.payload["channel"]
@@ -830,11 +861,12 @@ class RuntimeProtocol:
 
     @property
     def replay_state(self) -> dict:
-        """Acknowledged visual preferences retained across a seek replacement."""
+        """Acknowledged playback and visual state retained across a seek replacement."""
         return {
             "values": self.replay_values,
             "preview": PREVIEW_NAMES[self._active_channel],
             "overlays": list(self._overlay_layers),
+            "paused": self._cooperatively_paused,
         }
 
 

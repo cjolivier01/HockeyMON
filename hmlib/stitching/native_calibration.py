@@ -252,9 +252,13 @@ def _native_operation(arguments: list[str]) -> dict[str, Any]:
     return result
 
 
-def read_scoreboard_canvas(game_dir: Path) -> dict[str, Any]:
+def read_scoreboard_canvas(
+    game_dir: Path, *, source_reference: Path | None = None, destination: Path | None = None
+) -> dict[str, Any]:
     """Pin native scoreboard bytes and provenance. Caller removes image_path."""
-    descriptor, image_path = tempfile.mkstemp(prefix="hm-scoreboard-", suffix=".png")
+    descriptor, image_path = tempfile.mkstemp(
+        prefix="hm-scoreboard-", suffix=".png", dir=destination
+    )
     os.close(descriptor)
     try:
         return _native_operation(
@@ -263,6 +267,11 @@ def read_scoreboard_canvas(game_dir: Path) -> dict[str, Any]:
                 str(Path(game_dir).resolve()),
                 "--scoreboard-canvas",
                 image_path,
+                *(
+                    ["--scoreboard-reference-game", str(source_reference.resolve())]
+                    if source_reference
+                    else []
+                ),
             ]
         )
     except BaseException:

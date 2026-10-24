@@ -2,10 +2,125 @@
 
 from __future__ import annotations
 
+import json
+import os
 from copy import deepcopy
 from pathlib import Path
 
 from hmlib.models.player_analytics import model_contract, validate_model_gpu
+
+_ACCEPTED_MODELS = "accepted-models.json"
+_MODEL_FEATURES = {"pose", "jersey", "action", "team", "reid"}
+
+
+def _model_settings(pipeline: dict, feature: str) -> tuple[dict, dict, str, str]:
+    owner = pipeline.setdefault("tracker" if feature == "reid" else "player-analytics", {})
+    settings = owner if feature == "reid" else owner.setdefault(feature, {})
+    return (
+        owner,
+        settings,
+        "reid-model" if feature == "reid" else "model",
+        "reid-config-file" if feature == "reid" else "bundle",
+    )
+
+
+def write_accepted_shared_analytics(
+    session: Path, game_id: str, config: dict, prepared: dict, initial_settings: dict
+) -> None:
+    """Freeze accepted model bindings outside YAML files the worker reloads."""
+    from hmlib.ui.hstream_runtime import write_document
+
+    selected = config.get("hm_ui", {}).get("shared_analytics", {})
+    models = {}
+    for feature, model in selected.items():
+        owner, settings, model_key, path_key = _model_settings(prepared["pipeline"], feature)
+        path = Path(settings[path_key])
+        if settings[model_key] != model or not path.is_absolute():
+            raise ValueError(f"Prepared {feature} binding is not resolved")
+        entry = {"model": model, "path": str(path), "gpu": validate_model_gpu(owner.get("gpu-id"))}
+        _, original, _, _ = _model_settings(deepcopy(initial_settings.get("pipeline", {})), feature)
+        for key, name in ((model_key, "original_model"), (path_key, "original_path")):
+            if key in original:
+                entry[name] = original[key]
+        models[feature] = entry
+    write_document(
+        session / _ACCEPTED_MODELS,
+        {
+            "version": 1,
+            "session": str(session.resolve()),
+            "game_id": game_id,
+            "selected": selected,
+            "models": models,
+        },
+    )
+
+
+def restore_worker_shared_analytics(config: dict, game_id: str) -> None:
+    """Restore only accepted model bindings after original worker YAML/CLI overrides."""
+    if os.environ.get("HM_SHARED_UI_BACKEND") != "1":
+        return
+    session = Path(os.environ["HM_UI_SESSION_DIR"]).resolve()
+    path = session / _ACCEPTED_MODELS
+    selected = config.get("hm_ui", {}).get("shared_analytics", {})
+    if not path.exists() and not selected:
+        return
+    if not path.is_file():
+        raise ValueError("Missing or oversized accepted shared model snapshot")
+    with path.open("rb") as stream:
+        payload = stream.read(64 * 1024 + 1)
+    if len(payload) > 64 * 1024:
+        raise ValueError("Missing or oversized accepted shared model snapshot")
+    snapshot = json.loads(payload)
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("version") != 1
+        or snapshot.get("session") != str(session)
+        or snapshot.get("game_id") != game_id
+        or snapshot.get("selected") != selected
+        or not isinstance(selected, dict)
+        or not set(selected) <= _MODEL_FEATURES
+        or not isinstance(snapshot.get("models"), dict)
+        or set(snapshot["models"]) != set(selected)
+    ):
+        raise ValueError(
+            "Accepted shared model snapshot does not match this session/game/selections"
+        )
+    for feature, model in selected.items():
+        entry = snapshot["models"][feature]
+        if not isinstance(entry, dict) or entry.get("model") != model:
+            raise ValueError(f"Accepted {feature} model identity changed")
+        accepted_path = entry.get("path")
+        if not isinstance(accepted_path, str) or not Path(accepted_path).is_absolute():
+            raise ValueError(f"Accepted {feature} asset path is not resolved")
+        owner, destination, model_key, path_key = _model_settings(config["pipeline"], feature)
+        current_model = destination.get(model_key)
+        if current_model != model and not (
+            "original_model" in entry and current_model == entry["original_model"]
+        ):
+            raise ValueError(f"Shared {feature} model changed after preparation")
+        if model == "custom":
+            current_path = destination.get(path_key)
+            if not isinstance(current_path, str) or not (
+                current_path == entry.get("original_path")
+                or Path(current_path).expanduser().resolve() == Path(accepted_path).resolve()
+            ):
+                raise ValueError(f"Prepared {feature} bundle changed during the run")
+        destination[model_key], destination[path_key] = model, accepted_path
+        owner["gpu-id"] = validate_model_gpu(entry.get("gpu"))
+    # Generic engine preferences ran before CLI overrides. Repeating them here
+    # would erase unrelated explicit Python engine settings; update only the
+    # graph parameters owned by the accepted shared selections instead.
+    plugins = config.get("aspen", {}).get("plugins", {})
+    if "pose" in selected and "pose_factory" in plugins:
+        plugins["pose_factory"].setdefault("params", {}).update(shared_pose_parameters(config))
+    for feature, node in (("jersey", "jersey_numbers"), ("action", "actions")):
+        if feature in selected and node in plugins:
+            analytics = config["pipeline"]["player-analytics"]
+            plugins[node].setdefault("params", {}).update(
+                model_path=None,
+                model_bundle=analytics[feature]["bundle"],
+                gpu=analytics["gpu-id"],
+            )
 
 
 def translate_shared_analytics(
@@ -14,9 +129,11 @@ def translate_shared_analytics(
     *,
     initial_settings: dict | None = None,
     config_directory: Path | None = None,
+    initial_model_overrides: set[str] | None = None,
 ) -> None:
     """Mark shared choices before graph selection; native preparation supplies bundles later."""
     initial_settings = initial_settings or {}
+    initial_model_overrides = initial_model_overrides or set()
     initial_run = initial_settings.get("hm_ui", {}).get("run", {})
     initial_plugins = initial_settings.get("aspen", {}).get("plugins", {})
     pipeline = config.setdefault("pipeline", {})
@@ -38,7 +155,11 @@ def translate_shared_analytics(
         settings = analytics.get(feature, {})
         if not settings.get("enable", False):
             continue
-        if any(key.startswith(feature + "_") for key in initial_run) or node in initial_plugins:
+        if (
+            feature in initial_model_overrides
+            or any(key.startswith(feature + "_") for key in initial_run)
+            or node in initial_plugins
+        ):
             continue
         if feature == "team" and any(
             key in initial_settings.get("team", {}) for key in ("enabled", "backend")

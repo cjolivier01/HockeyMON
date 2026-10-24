@@ -1,7 +1,6 @@
 import copy
 import logging
 import os
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -82,25 +81,9 @@ class HmConfigureScoreboard:
             and os.environ.get("HM_SHARED_UI_BACKEND") == "1"
             and "HM_SHARED_NATIVE_CALIBRATION" not in os.environ
         ):
-            import cv2
+            from hmlib.ui.hstream_scoreboard import publish_source_canvas
 
-            from hmlib.config import get_game_dir
-            from hmlib.utils.image import to_uint8_image
-
-            image = make_channels_last(to_uint8_image(results["img"]))
-            if image.ndim == 4:
-                image = image[0]
-            data = image.detach().cpu().numpy()
-            valid, encoded = cv2.imencode(".png", data)
-            if not valid:
-                raise OSError("Cannot encode the shared scoreboard reference canvas")
-            target = Path(get_game_dir(self._game_id)) / "s.png"
-            temporary = target.with_name(f".s-{os.getpid()}.png")
-            try:
-                temporary.write_bytes(encoded.tobytes())
-                os.replace(temporary, target)
-            finally:
-                temporary.unlink(missing_ok=True)
+            publish_source_canvas(self._game_id, results["game_config"], results["img"])
             self._shared_canvas_saved = True
         runtime_config = results.get("game_config")
         if runtime_config is not None:
@@ -143,7 +126,9 @@ class HmConfigureScoreboard:
                 and torch.sum(torch.tensor(scoreboard_points, dtype=torch.float)).item() != 0
                 and game_config
             ):
-                clip_box = get_clip_box(game_id=self._game_id)
+                clip_box = (
+                    None if self._shared_canvas_saved else get_clip_box(game_id=self._game_id)
+                )
                 if clip_box:
                     scoreboard_points = [
                         [point[0] - clip_box[0], point[1] - clip_box[1]]

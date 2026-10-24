@@ -449,6 +449,7 @@ def make_plan(
     set_path(config, "video_out.spare_rtmp_enabled", False)
     set_path(config, "video_out.rtsp_enabled", "RTSP" in sinks)
     initial_settings = {}
+    initial_model_overrides = set()
     if initial_args is not None:
         from hmlib.config import ROOT_DIR, load_yaml_files_ordered
 
@@ -479,8 +480,10 @@ def make_plan(
         initial_settings = merge(initial_settings, explicit_settings)
         # These hmtrack-only model flags are consumed directly by its worker,
         # rather than the generic argparse-to-config mapping.
-        if {"pose_config", "pose_checkpoint"} & explicit_names:
-            set_path(initial_settings, "aspen.plugins.pose_factory", {})
+        if {"pose_config", "pose_checkpoint"} & explicit_names or has_explicit_backend(
+            explicit, "pose"
+        ):
+            initial_model_overrides.add("pose")
         _initial_output_routes(explicit_settings, sinks)
         if initial_args.output_video or initial_args.output_file:
             sinks.add("ENCODE_FILE")
@@ -532,7 +535,11 @@ def make_plan(
         else Path(os.environ["HM_CONFIG_ROOT"]) if os.environ.get("HM_CONFIG_ROOT") else None
     )
     translate_shared_analytics(
-        config, game, initial_settings=initial_settings, config_directory=config_directory
+        config,
+        game,
+        initial_settings=initial_settings,
+        config_directory=config_directory,
+        initial_model_overrides=initial_model_overrides,
     )
     paths = graph_paths(selected_analysis(config))
     graph_config = {}

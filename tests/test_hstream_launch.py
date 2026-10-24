@@ -863,3 +863,58 @@ def should_resolve_packaged_native_wrapper_to_its_binary(tmp_path, monkeypatch, 
     resolved = native_runner(str(public / "hstream-cli") if explicit else None)
     assert resolved == binary
     assert native_application_config(resolved) == config
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "--pose-onnx=/operator/pose.onnx",
+        "--pose-onnx-enable",
+        "--pose-onnx-quantize-int8",
+        "--pose-trt-enable",
+        "--pose-trt-engine=/operator/pose.engine",
+    ],
+)
+def should_keep_initial_pose_backend_out_of_shared_model_preparation(game, tmp_path, backend):
+    from hmlib.cli.hmtrack import make_parser
+    from hmlib.ui.runtime_setup import apply_engine_preferences
+
+    config = yaml.safe_load((game / "config.yaml").read_text())
+    config["hm_ui"] = {"run": {"analytics": "tracking"}}
+    (game / "config.yaml").write_text(yaml.safe_dump(config))
+    envelope = tmp_path / "initial-pose-backend.json"
+    envelope.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": [backend],
+            }
+        )
+    )
+    plan = make_plan(
+        parser().parse_args(
+            [
+                "-g",
+                game.name,
+                "--options=pipeline.player-analytics.pose.enable=true",
+                "--options=pipeline.player-analytics.jersey.enable=true",
+            ]
+        ),
+        initial=envelope,
+    )
+    assert "pose" not in plan.config["hm_ui"]["shared_analytics"]
+    assert "jersey" in plan.config["hm_ui"]["shared_analytics"]
+    assert plan.config["hm_ui"]["run"]["analytics"] == "custom"
+    assert backend in plan.explicit_arguments
+    command = plan.write(tmp_path)
+    parsed = make_parser().parse_args(command[4:])
+    option = backend.split("=", 1)[0]
+    destination = make_parser()._option_string_actions[option].dest
+    assert vars(parsed)[destination] == (backend.split("=", 1)[1] if "=" in backend else True)
+    # Rebuilding engine preferences in the worker cannot reattach the shared
+    # override that used to replace explicit ONNX/TensorRT settings at runtime.
+    apply_engine_preferences(plan.config)
+    assert "shared_model" not in plan.config["aspen"]["plugins"]["pose_factory"]["params"]

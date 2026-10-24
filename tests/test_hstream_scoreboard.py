@@ -29,7 +29,7 @@ def selector(tmp_path, monkeypatch):
     )
     Image.new("RGB", (64, 40), "white").save(game / "s.png")
 
-    def canvas(_game):
+    def canvas(_game, **kwargs):
         image = tmp_path / "pinned.png"
         shutil.copyfile(game / "s.png", image)
         return {
@@ -70,6 +70,11 @@ def request(server, path, body=None, *, token=None, origin=True):
 
 def should_authenticate_requests_and_load_saved_selection_without_inference(selector):
     server, _session, _messages, points = selector
+    descriptor = read_document(_session / "scoreboard-selection.json")
+    assert descriptor["url"] == server.origin + "/?token=" + server.token
+    assert descriptor["session_id"] == "session-1"
+    assert descriptor["points"] == points
+    assert descriptor["scope"] == "game"
     with request(server, "/initial") as response:
         assert json.load(response)["points"] == points
     with pytest.raises(HTTPError) as denied:

@@ -100,6 +100,7 @@ class HmUiProcess:
         self.paused = False
         self.stop_requested = False
         self._step_batches = 0
+        self._paused_replay_pending = False
         self._runtime_frame: int | None = None
         self._runtime_fps: float | None = None
         self._runtime_enabled = False
@@ -380,6 +381,15 @@ class HmUiProcess:
                     ):
                         raise ValueError("Restored preview overlays require three booleans")
                     self.preview_overlay_layers = tuple(layers)
+                if "paused" in saved:
+                    if type(saved["paused"]) is not bool:
+                        raise ValueError("Restored playback pause must be a boolean")
+                    if saved["paused"]:
+                        self.apply_playback_action("pause")
+                        # A seek needs its first complete batch to publish the
+                        # new preview. Keep the paused state/audio while that
+                        # batch runs, then hold all subsequent source frames.
+                        self._paused_replay_pending = True
                 self._write_state()
                 replay.unlink()
             self._replay_controls_restored = True
@@ -501,6 +511,7 @@ class HmUiProcess:
         self._last_batch_time = None
         self._frame_clock_position = None
         self._frame_clock_wall = None
+        self._paused_replay_pending = False
         if kind.startswith("rate:"):
             rate = float(kind.split(":", 1)[1])
             if rate not in {0, 0.25, 0.5, 1, 2, 4}:
@@ -561,6 +572,7 @@ class HmUiProcess:
                 "frame": self._runtime_frame,
                 "fps": self._runtime_fps,
                 "rate": self.playback_rate,
+                "seek_ready": not self._paused_replay_pending,
                 "message": (
                     "Finishing queued batches" if self.stop_requested else self._runtime_message
                 ),
@@ -580,6 +592,8 @@ class HmUiProcess:
         position = frame / fps
         while not self.stop_requested and not self.closed:
             poll_controls()
+            if self._paused_replay_pending:
+                break
             if self.paused and self._step_batches:
                 self._step_batches -= 1
                 break
@@ -599,6 +613,12 @@ class HmUiProcess:
             self.publish_runtime()
             time.sleep(0.02 if self.paused else min(0.02, delay))
         self.publish_runtime(frame=frame, fps=fps)
+
+    def complete_shared_batch(self, *, frame: int | None, fps: float | None) -> None:
+        """Mark the replacement preview's first batch ready without resuming it."""
+        replay_completed = self._paused_replay_pending
+        self._paused_replay_pending = False
+        self.publish_runtime(frame=frame, fps=fps, force=replay_completed)
 
     def wait_for_playback(self, poll_controls: Callable[[], None]) -> None:
         """Gate one batch on its owning worker while keeping Save/reset responsive."""

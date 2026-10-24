@@ -73,7 +73,10 @@ request and returns a receipt; enqueueing does not acknowledge a successful
 change. Pause/resume generations, progress, preview selection, inspector edits,
 scoreboard selection and output rotation follow the shared native protocol.
 Seek replaces the worker, clears stale preview/control files and restores only
-acknowledged controls, overlays and selected preview. Seeking is refused while
+acknowledged controls, overlays, selected preview and playback pause. A paused
+replacement permits its first complete preview batch, then holds subsequent
+frames; seek completion waits for that batch and local audio remains paused.
+Seeking is refused while
 archives, streams or telemetry are recording, matching the desktop's admission
 rules. The desktop sends Python Stop through the supervisor’s `q` command so
 archive and telemetry finalization can finish before forced process-group cleanup.
@@ -82,8 +85,13 @@ requested outputs are shown as having no file.
 
 On Linux, a small process guard owns each worker and audio player, reaps their
 decoder descendants after crashes or parent death, and bounds forced shutdown.
-It stays in the desktop's process group so pause and resume cover the complete
-processing tree. Seeking retains the original start-frame/time origin and stops
+It stays in the desktop's process group for coordinated forced cleanup. Once
+the Python frame-owner mailbox exists, pause/resume acknowledgements carry
+`mode=cooperative` only after that owner applies the change. Qt keeps the
+supervisor running so scoreboard edits, other runtime controls and graceful Stop
+remain available while frames are held. During startup and native preparation,
+receipts omit that mode and Qt retains its process-group signal fallback.
+Seeking retains the original start-frame/time origin and stops
 local audio until the replacement worker produces its first frame.
 The desktop's thirty-second Stop deadline still escalates
 to termination of the process group if shutdown does not finish.
@@ -95,9 +103,17 @@ are not copied to the UI every frame. Only the selected channel is published,
 at most fifteen times per second. Camera 1 covers single-source games and the
 left camera; Camera 2 covers the right camera. Their raw decoded frames are
 copied at preview resolution before downstream color or drawing changes.
-The single-source scoreboard selector saves
-one reference canvas, including when the scoreboard is initially disabled;
-dual-source selection uses the native-owned canvas and its provenance.
+The single-source scoreboard selector publishes one private reference canvas in
+the backend session, including when the scoreboard is initially disabled. It
+never replaces the saved game's native `s.png`. The dialog displays the exact
+pinned canvas named by its authenticated session descriptor. Native transactions
+persist a selection to the game only when its saved single-source playlist still
+matches the active source; a temporary source override keeps its selection within
+the run, including seeks, and leaves the saved pair's polygon unchanged. Temporary
+source overrides also infer their rink mask from the active frame without reading
+or replacing the saved game's masks or contour metadata, even at equal dimensions.
+Normal saved single-source playback retains its mask cache. Source coordinates do not inherit a saved pair's crop offset. Selection remains available
+while paused. Dual-source selection uses the native-owned canvas and provenance.
 
 Local monitor audio follows source time, pause, seek and Render video. It opens
 the current source chapter lazily and does not concatenate an entire game before
@@ -144,6 +160,16 @@ Custom bundles retain their selected paths. Explicit initial
 Python model overrides remain authoritative for that launch. A seek retains the
 accepted assets; selecting a different model requires a new run. Stop cancels
 preparation before any Python worker starts.
+
+The supervisor freezes accepted shared model bindings in its private
+`accepted-models.json`. Each worker validates the version, session, game and
+selection identity, with a 64 KiB read limit, after reloading the original YAML
+and CLI overrides. Captured original custom-path spellings identify the same
+accepted absolute bundle even when the worker has a different working directory;
+other model/custom-path changes fail. The worker restores only those asset paths,
+resolved devices and shared graph parameters. Explicit Python model overrides
+and unrelated engine/control choices retain their precedence. This snapshot
+survives seek restarts and is never saved into the user's game configuration.
 
 ONNX analytics use the installed ONNX Runtime providers. Automatic provider
 selection reports when CUDA is unavailable and uses CPU; explicitly requesting

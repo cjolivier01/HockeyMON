@@ -322,7 +322,10 @@ class PlayTrackerPlugin(Plugin):
 
                 frame_ids = unwrap_tensor(frame_ids)
             frame = int(frame_ids[-1]) if frame_ids is not None and len(frame_ids) else None
-            ui.publish_runtime(frame=frame, fps=context.get("fps"))
+            if os.environ.get("HM_SHARED_UI_BACKEND") == "1":
+                ui.complete_shared_batch(frame=frame, fps=context.get("fps"))
+            else:
+                ui.publish_runtime(frame=frame, fps=context.get("fps"))
         self._update_hm_ui_preview_status(context)
         # Surface current play_box for downstream video out sizing
         try:

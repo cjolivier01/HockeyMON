@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 import torch
 
 from hmlib.transforms.scoreboard_transforms import HmCaptureScoreboard, HmConfigureScoreboard
@@ -104,21 +105,75 @@ def should_apply_live_polygon_and_disabled_transitions(monkeypatch):
     assert "scoreboard_cfg" not in transform(results)
 
 
-def should_publish_single_source_selector_canvas_even_when_disabled(tmp_path, monkeypatch):
+@pytest.mark.parametrize("saved_size", [(60, 40), (120, 80)])
+@pytest.mark.parametrize("explicit_polygon", [False, True])
+def should_preserve_saved_native_canvas_and_polygon_for_a_single_source_override(
+    tmp_path, monkeypatch, saved_size, explicit_polygon
+):
+    import copy
+    import json
+
     import cv2
+    import numpy as np
+    import yaml
 
     import hmlib.config as configuration
 
+    session = tmp_path / "session"
+    session.mkdir()
+    source = tmp_path / "override.mp4"
+    source.touch()
     monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(session))
+    monkeypatch.setenv("HM_SHARED_SOURCE_CHAPTERS", json.dumps([str(source)]))
     monkeypatch.delenv("HM_SHARED_NATIVE_CALIBRATION", raising=False)
     monkeypatch.setattr(configuration, "get_game_dir", lambda game_id: str(tmp_path))
-    config = {"rink": {"scoreboard": {"enabled": False}}}
+    monkeypatch.setattr(
+        "hmlib.transforms.scoreboard_transforms.get_clip_box", lambda **kw: [50, 50, 60, 60]
+    )
+    config = _scoreboard_game_config()
+    config["game"] = {"videos": {"left": "left.mp4", "right": "right.mp4"}}
+    config["rink"]["scoreboard"]["enabled"] = False
+    monkeypatch.delenv("HM_SHARED_SOURCE_SCOREBOARD_POLYGON", raising=False)
+    if explicit_polygon:
+        monkeypatch.setenv(
+            "HM_SHARED_SOURCE_SCOREBOARD_POLYGON",
+            json.dumps(config["rink"]["scoreboard"]["perspective_polygon"]),
+        )
+    original_config = yaml.safe_dump(config).encode()
+    (tmp_path / "config.yaml").write_bytes(original_config)
+    cv2.imwrite(
+        str(tmp_path / "s.png"), np.full((saved_size[1], saved_size[0], 3), 23, dtype=np.uint8)
+    )
+    original_image = (tmp_path / "s.png").read_bytes()
+    runtime = copy.deepcopy(config)
     transform = HmConfigureScoreboard(game_id="test-game", allow_interactive_setup=False)
-    transform({"game_config": config, "img": torch.full((1, 40, 60, 3), 71, dtype=torch.uint8)})
-    image = cv2.imread(str(tmp_path / "s.png"))
+    transform({"game_config": runtime, "img": torch.full((1, 40, 60, 3), 71, dtype=torch.uint8)})
+    private = session / "scoreboard-source"
+    image = cv2.imread(str(private / "s.png"))
     assert image.shape == (40, 60, 3) and (image == 71).all()
-    transform({"game_config": config, "img": torch.zeros((1, 40, 60, 3), dtype=torch.uint8)})
-    assert (cv2.imread(str(tmp_path / "s.png")) == 71).all()
+    assert runtime["rink"]["scoreboard"]["perspective_polygon"] == (
+        config["rink"]["scoreboard"]["perspective_polygon"] if explicit_polygon else None
+    )
+    assert (tmp_path / "s.png").read_bytes() == original_image
+    assert (tmp_path / "config.yaml").read_bytes() == original_config
+    transform({"game_config": runtime, "img": torch.zeros((1, 40, 60, 3), dtype=torch.uint8)})
+    assert (cv2.imread(str(private / "s.png")) == 71).all()
+    # A run-local native save survives seek reconstruction and its source
+    # coordinates never inherit the saved pair's crop offset.
+    private_config = yaml.safe_load((private / "config.yaml").read_text())
+    corners = [[2, 2], [30, 2], [30, 10], [2, 10]]
+    private_config["rink"]["scoreboard"]["perspective_polygon"] = corners
+    (private / "config.yaml").write_text(yaml.safe_dump(private_config))
+    runtime = copy.deepcopy(config)
+    runtime["rink"]["scoreboard"]["enabled"] = True
+    resumed = HmConfigureScoreboard(game_id="test-game", allow_interactive_setup=False)
+    result = resumed(
+        {"game_config": runtime, "img": torch.zeros((1, 40, 60, 3), dtype=torch.uint8)}
+    )
+    assert result["scoreboard_cfg"]["scoreboard_points"] == corners
+    assert (tmp_path / "s.png").read_bytes() == original_image
+    assert (tmp_path / "config.yaml").read_bytes() == original_config
 
 
 def should_skip_interactive_scoreboard_setup_when_polygon_is_missing(monkeypatch, caplog):

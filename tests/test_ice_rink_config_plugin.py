@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -27,6 +28,67 @@ else:
     wrap_tensor = None  # type: ignore[assignment]
 
 requires_torch = pytest.mark.skipif(torch is None, reason="requires torch")
+
+
+@requires_torch
+@pytest.mark.parametrize("saved_source", ["pair", "different-single", "same-single"])
+def should_keep_temporary_source_masks_out_of_saved_calibration(
+    tmp_path, monkeypatch, saved_source
+):
+    import hmlib.config as configuration
+    from hmlib.segm import ice_rink
+
+    game = tmp_path / "game"
+    game.mkdir()
+    source = tmp_path / "active.mp4"
+    source.touch()
+    videos = (
+        {"left": ["left.mp4"], "right": ["right.mp4"]}
+        if saved_source == "pair"
+        else {"source": [str(source) if saved_source == "same-single" else "other.mp4"]}
+    )
+    (game / "config.yaml").write_text(
+        json.dumps({"game": {"videos": videos}, "rink": {"ice_contours_mask_count": 1}})
+    )
+    (game / "rink_mask_0.png").write_bytes(b"saved native mask")
+    before = {path.name: path.read_bytes() for path in game.iterdir()}
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.setenv("HM_SHARED_SOURCE_CHAPTERS", json.dumps([str(source)]))
+    monkeypatch.delenv("HM_SHARED_NATIVE_CALIBRATION", raising=False)
+    monkeypatch.setattr(configuration, "get_game_dir", lambda *args, **kwargs: str(game))
+    monkeypatch.setattr(ice_rink, "get_game_dir", lambda *args, **kwargs: str(game))
+    monkeypatch.setattr(ice_rink, "get_model_config", lambda **kwargs: ("model.py", "model.pth"))
+    monkeypatch.setattr(ice_rink, "prepend_root_dir", lambda path: path)
+    cached = {"combined_mask": torch.zeros((20, 30), dtype=torch.bool)}
+    generated = {"combined_mask": torch.ones((20, 30), dtype=torch.bool)}
+    calls = []
+
+    def load(**kwargs):
+        assert saved_source == "same-single", "Reused another recording's same-sized mask"
+        calls.append("cache")
+        return cached
+
+    def infer(**kwargs):
+        calls.append("inference")
+        return generated
+
+    def persist(**kwargs):
+        raise AssertionError("Temporary source overwrote saved rink mask/calibration")
+
+    monkeypatch.setattr(ice_rink, "load_rink_combined_mask", load)
+    monkeypatch.setattr(ice_rink, "find_ice_rink_masks", infer)
+    monkeypatch.setattr(ice_rink, "save_rink_profile_config", persist)
+    context = {
+        "game_id": "game",
+        "original_images": torch.zeros(1, 3, 20, 30),
+        "data_samples": make_track_data_sample(num_frames=1, ori_shape=(20, 30)),
+    }
+    plugin = IceRinkSegmConfigPlugin()
+    result = plugin.forward(context)["rink_profile"]
+    assert result is (cached if saved_source == "same-single" else generated)
+    assert calls == (["cache"] if saved_source == "same-single" else ["inference"])
+    assert plugin.forward(context)["rink_profile"] is result
+    assert {path.name: path.read_bytes() for path in game.iterdir()} == before
 
 
 @requires_torch

@@ -448,6 +448,11 @@ class IceRinkSegmConfigPlugin(Plugin):
             from hmlib.stitching.native_calibration import shared_native_calibration
 
             native = shared_native_calibration()
+            temporary_source = False
+            if native is None and os.environ.get("HM_SHARED_UI_BACKEND") == "1":
+                from hmlib.ui.hstream_scoreboard import shared_source_owns_saved_game
+
+                temporary_source = not shared_source_owns_saved_game(game_id)
             current_rotation = float(geometry.get("post_stitch_rotate_degrees", 0.0))
             if native is not None and current_rotation == native.post_stitch_rotate_degrees:
                 self._rink_profile = native.rink_profile(tuple(exp_shape))
@@ -457,7 +462,7 @@ class IceRinkSegmConfigPlugin(Plugin):
                 # recording and must not suppress the requested sample time.
                 cached = (
                     load_rink_combined_mask(game_id=game_id)
-                    if mask_revision and native is None
+                    if mask_revision and native is None and not temporary_source
                     else None
                 )
                 if (
@@ -478,8 +483,10 @@ class IceRinkSegmConfigPlugin(Plugin):
                     image=frame0,
                     # A timed sample must replace any unproven cache. Auto
                     # keeps configure_ice_rink_mask's revision/shape checks.
-                    force=mask_time != "auto" or native is not None,
-                    persist=native is None,
+                    force=mask_time != "auto" or native is not None or temporary_source,
+                    # A temporary single-source override has a different camera
+                    # plane even when its dimensions match the saved recording.
+                    persist=native is None and not temporary_source,
                     geometry_revision=mask_revision,
                 )
             if self._rink_profile is not None and strict_geometry:

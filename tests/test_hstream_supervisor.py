@@ -231,6 +231,31 @@ def should_preserve_initial_argument_cwd_while_using_durable_working_outputs(
             signal.signal(kind, handler)
 
 
+@pytest.mark.parametrize("explicit_polygon", [False, True])
+def should_bind_explicit_source_scoreboard_intent_and_clear_inherited_environment(
+    supervisor, monkeypatch, explicit_polygon
+):
+    from hmlib.ui import hstream_launch
+
+    plan = copy.deepcopy(supervisor.plan)
+    plan.sources = {"source": next(iter(plan.sources.values()))}
+    points = [[1, 1], [20, 1], [20, 10], [1, 10]]
+    if explicit_polygon:
+        plan.initial_settings = {"rink": {"scoreboard": {"perspective_polygon": points}}}
+    monkeypatch.setattr(hstream_launch, "make_plan", lambda *args, **kwargs: plan)
+    monkeypatch.setenv("HM_SHARED_SOURCE_SCOREBOARD_POLYGON", "stale other game's polygon")
+    instance = Supervisor(supervisor.args, [], supervisor.session)
+    try:
+        value = instance.environment.get("HM_SHARED_SOURCE_SCOREBOARD_POLYGON")
+        assert (json.loads(value) if value is not None else None) == (
+            points if explicit_polygon else None
+        )
+    finally:
+        instance.selector.close()
+        for kind, handler in instance._old_handlers.items():
+            signal.signal(kind, handler)
+
+
 def should_clear_previous_worker_artifacts_and_replay_acknowledged_controls(
     supervisor, monkeypatch
 ):
@@ -268,6 +293,7 @@ def should_clear_previous_worker_artifacts_and_replay_acknowledged_controls(
         "values": {"Program": {"HStream_Exposure_x100": 80}},
         "preview": "Stitched",
         "overlays": [True, False, True],
+        "paused": False,
     }
     assert "hmlib.cli.hstream_worker" in calls[0]
 
@@ -582,6 +608,38 @@ def should_feed_the_synchronized_runtime_clock_to_the_audio_monitor(supervisor):
     assert updates and all(value == 3 for value in updates)
 
 
+def should_wait_for_paused_seek_preview_batch_before_acknowledging(supervisor, monkeypatch):
+    runtime = supervisor.session / "runtime.json"
+    runtime.write_text(json.dumps({"frame": 60, "fps": 30, "state": "paused", "seek_ready": False}))
+    acknowledgements = []
+
+    def acknowledged(target, generation):
+        assert json.loads(runtime.read_text())["seek_ready"]
+        acknowledgements.append((target, generation))
+
+    monkeypatch.setattr(supervisor.protocol, "seek_completed", acknowledged)
+    supervisor.seek_generation = 4
+    supervisor.last_seek = 2_000_000_000
+    supervisor.audio_seeking = True
+    supervisor.audio_paused = True
+    script = """
+import json, pathlib, sys, time
+path = pathlib.Path(sys.argv[1])
+time.sleep(.2)
+state = json.loads(path.read_text())
+state['seek_ready'] = True
+temporary = path.with_suffix('.tmp')
+temporary.write_text(json.dumps(state))
+temporary.replace(path)
+time.sleep(.1)
+"""
+    supervisor._spawn([sys.executable, "-c", script, str(runtime)], phase="python")
+    assert supervisor._pump() == 0
+    assert acknowledgements == [(2_000_000_000, 4)]
+    assert not supervisor.audio_seeking
+    assert supervisor.audio_paused
+
+
 def should_keep_audio_start_seconds_independent_of_selected_camera_rate(monkeypatch):
     from hmlib.cli.hmtrack import _resolve_mux_audio_source
     from hmlib.video import ffmpeg
@@ -659,6 +717,7 @@ def should_prepare_shared_models_before_single_camera_processing(supervisor, mon
         assert input_config["pipeline"]["player-analytics"]["jersey"]["enable"] is False
         output = supervisor.session / "models-resolved.yaml"
         input_config["pipeline"]["player-analytics"]["pose"]["bundle"] = "/prepared/exact-pose"
+        input_config["pipeline"]["player-analytics"]["gpu-id"] = 0
         output.write_text(yaml.safe_dump(input_config))
         (supervisor.session / "models-receipt.json").write_text(
             json.dumps({"version": 1, "status": "complete", "output": str(output)})

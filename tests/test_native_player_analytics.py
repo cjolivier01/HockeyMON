@@ -527,3 +527,142 @@ def should_refuse_unresolved_prepared_analytics_gpu(gpu):
     }
     with pytest.raises(ValueError, match="GPU id"):
         apply_prepared_shared_analytics(config, prepared)
+
+
+@pytest.mark.parametrize("path_source", ["yaml", "override"])
+def should_restore_accepted_models_after_actual_worker_config_and_cli_overrides(
+    tmp_path, monkeypatch, path_source
+):
+    import copy
+    import sys
+
+    import yaml
+
+    from hmlib.cli import hmtrack
+    from hmlib.config import get_config
+    from hmlib.ui import runtime_setup
+    from hmlib.ui.hstream_launch import LaunchPlan
+    from hmlib.ui.shared_analytics import write_accepted_shared_analytics
+
+    game, session = tmp_path / "game", tmp_path / "session"
+    game.mkdir()
+    session.mkdir()
+    bundle = tmp_path / "native-configs" / "custom-pose"
+    bundle.mkdir(parents=True)
+    config = get_config(game_id=None)
+    config["hm_ui"] = {
+        "shared_analytics": {"pose": "custom"},
+        "run": {"analytics": "custom", "pose_model": "shared", "precision": "trt-fp32"},
+    }
+    config.setdefault("pipeline", {})["player-analytics"] = {
+        "gpu-id": 0,
+        "pose": {"enable": True, "model": "custom", "bundle": str(bundle)},
+    }
+    config["aspen"] = {
+        "plugins": {
+            "pose_factory": {"params": {}},
+            "detector_factory": {"params": {"trt": {"enable": False}}},
+        }
+    }
+    original = {
+        "pipeline": {
+            "player-analytics": {"gpu-id": None, "pose": {"enable": True, "model": "custom"}}
+        },
+        "aspen": {"pipeline": {"queue_size": 9}},
+    }
+    initial = copy.deepcopy(original)
+    initial["pipeline"]["player-analytics"]["pose"]["bundle"] = "custom-pose"
+    overlay = tmp_path / "initial.yaml"
+    extra = []
+    if path_source == "yaml":
+        original["pipeline"]["player-analytics"]["pose"]["bundle"] = "custom-pose"
+    else:
+        extra += ["--config-override", "pipeline.player-analytics.pose.bundle=custom-pose"]
+    overlay.write_text(yaml.safe_dump(original))
+    extra += [
+        "--config-override",
+        "pipeline.player-analytics.gpu-id=null",
+        "--config-override",
+        "rink.camera.color.brightness=1.7",
+        "--config-override",
+        "aspen.plugins.detector_factory.params.trt.enable=true",
+    ]
+    plan = LaunchPlan(
+        game=game,
+        config=config,
+        arguments=["--game-id", game.name, "--decoder=cv2"],
+        explicit_arguments=["--config", str(overlay), *extra],
+        cwd=tmp_path,
+        sources={},
+        sinks={"FAKE"},
+        start_seconds=0,
+        graph=config["aspen"],
+        limit_seconds=10,
+        initial_settings=initial,
+    )
+    write_accepted_shared_analytics(
+        session, game.name, config, {"pipeline": config["pipeline"]}, initial
+    )
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(session))
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.chdir(tmp_path)
+    baseline = get_config(game_id=None)
+    monkeypatch.setattr(hmtrack, "get_config", lambda **kwargs: copy.deepcopy(baseline))
+    monkeypatch.setattr(runtime_setup, "saved_pipeline_preferences", lambda *args, **kwargs: {})
+    monkeypatch.setattr(hmtrack, "configure_model", lambda *, config, args: args)
+    captured = []
+
+    def run_worker(args, num_gpus):
+        actual = args.game_config
+        captured.append(
+            copy.deepcopy(actual["aspen"]["plugins"]["pose_factory"]["params"]["shared_model"])
+        )
+        assert actual["pipeline"]["player-analytics"]["gpu-id"] == 0
+        assert actual["aspen"]["pipeline"]["queue_size"] == 9
+        assert actual["rink"]["camera"]["color"]["brightness"] == 1.7
+        assert actual["aspen"]["plugins"]["detector_factory"]["params"]["trt"]["enable"] is True
+
+    monkeypatch.setattr(hmtrack, "_main", run_worker)
+    for seek in (0, 1):
+        command = plan.write(session, seek_seconds=seek)
+        arguments = command[command.index("hmlib.cli.hmtrack") + 1 :]
+        monkeypatch.setattr(sys, "argv", ["hmtrack", *arguments])
+        hmtrack.main()
+    assert captured == [{"model": "custom", "bundle": str(bundle), "gpu": 0}] * 2
+    assert yaml.safe_load(overlay.read_text()) == original
+
+
+@pytest.mark.parametrize("changed", ["game", "session", "model", "path", "oversized"])
+def should_refuse_changed_or_unbound_worker_model_snapshots(tmp_path, monkeypatch, changed):
+    import json
+
+    from hmlib.ui.shared_analytics import (
+        restore_worker_shared_analytics,
+        write_accepted_shared_analytics,
+    )
+
+    config = {
+        "hm_ui": {"shared_analytics": {"pose": "custom"}},
+        "pipeline": {
+            "player-analytics": {
+                "gpu-id": 0,
+                "pose": {"model": "custom", "bundle": str(tmp_path / "accepted")},
+            }
+        },
+    }
+    write_accepted_shared_analytics(tmp_path, "game", config, {"pipeline": config["pipeline"]}, {})
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    path = tmp_path / "accepted-models.json"
+    snapshot = json.loads(path.read_text())
+    if changed in {"game", "session"}:
+        snapshot["game_id" if changed == "game" else "session"] = "other"
+        path.write_text(json.dumps(snapshot))
+    elif changed == "oversized":
+        path.write_text(" " * (64 * 1024 + 1))
+    else:
+        config["pipeline"]["player-analytics"]["pose"][
+            "model" if changed == "model" else "bundle"
+        ] = "other"
+    with pytest.raises(ValueError, match="snapshot|changed"):
+        restore_worker_shared_analytics(config, "game")

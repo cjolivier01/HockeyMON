@@ -155,10 +155,18 @@ class Supervisor:
         self.environment["HM_SHARED_TELEMETRY"] = (
             "1" if self.plan.config["hm_shared_ui"]["telemetry"] else "0"
         )
+        self.environment.pop("HM_SHARED_SOURCE_SCOREBOARD_POLYGON", None)
         if set(self.plan.sources) == {"source"}:
             self.environment["HM_SHARED_SOURCE_CHAPTERS"] = json.dumps(
                 [str(path) for path in self.plan.sources["source"]]
             )
+            # Initial source-specific corners are explicit operator intent,
+            # even when their coordinates equal a saved pair's old selection.
+            scoreboard = self.plan.initial_settings.get("rink", {}).get("scoreboard", {})
+            if "perspective_polygon" in scoreboard:
+                self.environment["HM_SHARED_SOURCE_SCOREBOARD_POLYGON"] = json.dumps(
+                    scoreboard["perspective_polygon"], allow_nan=False
+                )
         self.protocol = RuntimeProtocol(
             session,
             emit,
@@ -273,7 +281,10 @@ class Supervisor:
         import yaml
 
         from hmlib.ui.hstream_launch import merge, native_application_config, read_mapping
-        from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+        from hmlib.ui.shared_analytics import (
+            apply_prepared_shared_analytics,
+            write_accepted_shared_analytics,
+        )
 
         runner = self._native_runner()
         application = (
@@ -342,6 +353,13 @@ class Supervisor:
             raise ValueError("Shared model preparation did not commit the requested output")
         prepared = read_mapping(output)
         apply_prepared_shared_analytics(self.plan.config, prepared)
+        write_accepted_shared_analytics(
+            self.session,
+            self.plan.game.name,
+            self.plan.config,
+            prepared,
+            self.plan.initial_settings,
+        )
         self.prepared_analytics = prepared
         self.plan.graph = self.plan.config.get("aspen", {})
         self.protocol.graph = self.plan.graph
@@ -584,7 +602,8 @@ class Supervisor:
                         )
                 if self.seek_generation is not None:
                     path = self.session / "runtime.json"
-                    if path.is_file() and json.loads(path.read_text()).get("frame") is not None:
+                    state = json.loads(path.read_text()) if path.is_file() else {}
+                    if state.get("frame") is not None and state.get("seek_ready", True):
                         self.protocol.seek_completed(self.last_seek, self.seek_generation)
                         self.seek_generation = None
                         self.audio_seeking = False

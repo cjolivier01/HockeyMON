@@ -2867,6 +2867,9 @@ def main() -> int | None:
         config=args.game_config,
         explicit_arg_names=getattr(args, "explicit_arg_names", None),
     )
+    from hmlib.ui.shared_analytics import restore_worker_shared_analytics
+
+    restore_worker_shared_analytics(args.game_config, args.game_id)
     game_config = resolve_global_refs(args.game_config)
     args.game_config = game_config
 
