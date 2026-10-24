@@ -104,6 +104,16 @@ runtime:
     maximum_inference_io_bytes: 268435456
     maximum_encoded_packet_bytes: 67108864
     compact_stitch_workspace: true
+    playback_start_seconds: 0
+    output:
+      width: 3840
+      height: 2160
+      bitrate_kbps: 20000
+      keyframe_interval: 60
+      realtime: false
+      shadow_lift_percent: 0
+      lift_shadow_black_point: false
+      exposure: 0
     tracker:
       low_score: 0.25
       high_score: 0.6
