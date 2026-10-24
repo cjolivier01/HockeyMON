@@ -134,7 +134,11 @@ def should_bind_native_parent_identity_to_the_immediate_guard(tmp_path, monkeypa
 @pytest.fixture
 def supervisor(tmp_path, monkeypatch):
     from hmlib.cli import hstream_backend
-    from hmlib.ui import hstream_launch
+    from hmlib.ui import hstream_launch, native_tools
+
+    # Command-assembly tests supply fictional runner paths; executable/layout
+    # resolution is exercised separately with real files in test_hstream_launch.
+    monkeypatch.setattr(native_tools, "native_runner", lambda path=None: Path(path or "/native"))
 
     monkeypatch.setenv("HM_OUTPUT_WORK_DIR", str(tmp_path / "work"))
 

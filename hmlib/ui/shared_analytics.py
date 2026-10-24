@@ -144,6 +144,12 @@ def apply_prepared_shared_analytics(config: dict, prepared: dict) -> None:
             and Path(destination[path_key]).resolve() != Path(source[path_key]).resolve()
         ):
             raise ValueError(f"Prepared {feature} bundle changed during the run")
+        if feature == "reid":
+            from hmlib.models.appearance import validate_appearance_gpu
+
+            # The native preparer resolves device inheritance together with the
+            # engine. Reuse that device after seeks as well as the initial run.
+            destination["gpu-id"] = validate_appearance_gpu(source.get("gpu-id"))
         destination[path_key] = deepcopy(source[path_key])
     from hmlib.ui.runtime_setup import apply_engine_preferences
 

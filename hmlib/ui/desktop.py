@@ -72,6 +72,11 @@ def launch_desktop(
                 launch["anonymous"] = True
             request = directory / "launch.json"
             request.write_text(json.dumps(launch), encoding="utf-8")
+            if module == "hmlib.cli.hmtrack":
+                launch["source_ownership"] = _resolve_initial_sources(
+                    runner, request, launch, environment
+                )
+                request.write_text(json.dumps(launch), encoding="utf-8")
             command += [f"--backend-launch={request}", "--play"]
             if module == "hmlib.cli.stitch":
                 command.append("--stitching-calibration-only")
@@ -79,6 +84,34 @@ def launch_desktop(
             command.append(f"--game-id={game_id}")
         # The desktop owns every processing child; closing it waits for shutdown.
         return subprocess.call(command, env=environment)
+
+
+def _resolve_initial_sources(runner: Path, request: Path, launch: dict, environment: dict) -> dict:
+    """Ask the real adapter to resolve CLI/config precedence before Qt can clean calibration."""
+    result = subprocess.run(
+        [str(runner), "--resolve-initial-sources", "--game-id", launch["game_id"]],
+        env={**environment, "HM_UI_INITIAL_LAUNCH": str(request)},
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            "Could not resolve initial HockeyMON recordings: "
+            + (result.stdout + result.stderr)[-8192:].strip()
+        )
+    if len(result.stdout) > 1024 * 1024:
+        raise ValueError("Initial HockeyMON source response exceeds its size limit")
+    resolved = json.loads(result.stdout)
+    if (
+        not isinstance(resolved, dict)
+        or resolved.get("version") != 1
+        or resolved.get("game_id") != launch["game_id"]
+        or not isinstance(resolved.get("sources"), dict)
+    ):
+        raise ValueError("Initial HockeyMON source response does not match this launch")
+    return {**resolved, "arguments": launch["arguments"], "cwd": launch["cwd"]}
 
 
 def _anonymous_game(game_root: Path, arguments: list[str]) -> str:

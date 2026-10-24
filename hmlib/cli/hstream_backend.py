@@ -260,13 +260,10 @@ class Supervisor:
             self.child.stdin.close()
 
     def _native_runner(self) -> Path:
-        if not self.native:
-            from hmlib.ui.desktop import executable
+        from hmlib.ui.native_tools import native_runner
 
-            self.native = str(
-                executable(None, "hstream-cli", (Path("/opt/hstream/bin/hstream-cli"),))
-            )
-            self.environment["HSTREAM_NATIVE_RUNNER"] = self.native
+        self.native = str(native_runner(self.native))
+        self.environment["HSTREAM_NATIVE_RUNNER"] = self.native
         return Path(self.native)
 
     def _prepare_models(self) -> None:
@@ -757,6 +754,24 @@ def main(arguments: list[str] | None = None) -> int:
 
     args = parser().parse_args(arguments)
     try:
+        if args.resolve_initial_sources:
+            initial = os.environ.get("HM_UI_INITIAL_LAUNCH")
+            if not initial:
+                raise ValueError("Initial source resolution requires HM_UI_INITIAL_LAUNCH")
+            plan = make_plan(args, initial=Path(initial), validate_models=False)
+            emit(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "game_id": plan.game.name,
+                        "sources": {
+                            role: [str(path.resolve()) for path in paths]
+                            for role, paths in plan.sources.items()
+                        },
+                    }
+                )
+            )
+            return 0
         if args.prepare_detector:
             from hmlib.ui.hstream_detector import prepare_detector
 
@@ -766,13 +781,9 @@ def main(arguments: list[str] | None = None) -> int:
             emit(str(export_job(args)))
             return 0
         if args.stitching_calibration_only:
-            from hmlib.ui.desktop import executable
+            from hmlib.ui.native_tools import native_runner
 
-            native = executable(
-                os.environ.get("HSTREAM_NATIVE_RUNNER"),
-                "hstream-cli",
-                (Path("/opt/hstream/bin/hstream-cli"),),
-            )
+            native = native_runner(os.environ.get("HSTREAM_NATIVE_RUNNER"))
             if initial := os.environ.get("HM_UI_INITIAL_LAUNCH"):
                 from hmlib.ui.hstream_initial import calibration_arguments
 

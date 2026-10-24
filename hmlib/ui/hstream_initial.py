@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from hmlib.ui.hstream_launch import (
+    capture_config_overrides,
     get_path,
     native_application_config,
     option_assignments,
@@ -131,7 +132,7 @@ def calibration_arguments(
     hm_opts.apply_arg_config_overrides(
         explicit_settings, opts, parser=parser, explicit_arg_names=names
     )
-    hm_opts.apply_config_overrides(explicit_settings, opts.config_overrides)
+    capture_config_overrides(explicit_settings, opts.config_overrides)
     if opts.input_video:
         paths = [(cwd / value).resolve(strict=True) for value in opts.input_video.split(",")]
         if len(paths) == 2 and all(path.is_file() for path in paths):

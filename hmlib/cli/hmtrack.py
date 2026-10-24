@@ -2755,6 +2755,13 @@ def setup_logging():
     root_logger.setLevel(20)
 
 
+def split_config_paths(items: list[str] | None) -> list[str]:
+    """Flatten repeated/comma-separated --config values in their declared order."""
+    return [
+        part.strip() for item in items or [] if item for part in item.split(",") if part.strip()
+    ]
+
+
 def main():
     setup_logging()
 
@@ -2807,18 +2814,7 @@ def main():
     # Later files override earlier values.
     from hmlib.config import load_yaml_files_ordered, recursive_update
 
-    def _split_and_strip(items):
-        paths = []
-        if not items:
-            return paths
-        for it in items:
-            if not it:
-                continue
-            parts = [p.strip() for p in str(it).split(",") if p.strip()]
-            paths.extend(parts)
-        return paths
-
-    additional_cfg_paths = _split_and_strip(args.config)
+    additional_cfg_paths = split_config_paths(args.config)
     if not additional_cfg_paths:
         default_aspen = os.path.join(ROOT_DIR, "config", "aspen", "tracking.yaml")
         if os.path.exists(default_aspen):

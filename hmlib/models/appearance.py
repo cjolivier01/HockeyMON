@@ -11,6 +11,12 @@ import yaml
 from hmlib.utils.checksum import sha256_file
 
 
+def validate_appearance_gpu(gpu: int) -> int:
+    if type(gpu) is not int or gpu < 0:
+        raise ValueError("Appearance GPU id must be a nonnegative integer")
+    return gpu
+
+
 def read_tracker_model(path: str | Path) -> tuple[Path, dict]:
     path = Path(path).expanduser().resolve()
     if not path.is_file() or path.stat().st_size > 1024 * 1024:
@@ -61,6 +67,7 @@ class TensorRtAppearanceSession:
 
         from hmlib.ui.desktop import executable
 
+        gpu = validate_appearance_gpu(gpu)
         configured = os.environ.get("HM_HSTREAM_MODEL_INFER")
         runner = os.environ.get("HSTREAM_NATIVE_RUNNER")
         candidates = []

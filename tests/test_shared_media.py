@@ -17,7 +17,9 @@ from hmlib.video.high_bit_reader import HighBitVideoReader
 
 def audio_descendants(player):
     """Wait for the real ffplay process behind its lightweight owner."""
-    deadline = time.monotonic() + 3
+    # The full suite starts many Python/Torch processes concurrently. Allow
+    # interpreter startup under that load while still bounding missing children.
+    deadline = time.monotonic() + 10
     children = Path(f"/proc/{player.pid}/task/{player.pid}/children")
     while time.monotonic() < deadline:
         assert player.poll() is None, "Audio owner exited before launching ffplay"

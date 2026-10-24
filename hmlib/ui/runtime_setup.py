@@ -482,6 +482,22 @@ def launch_configuration(game: Path, explicit_arguments: list[str] | None = None
     return resolve_global_refs(normalize_runtime_config(recursive_update(config, game_config)))
 
 
+def has_explicit_backend(arguments: list[str] | None, target: str) -> bool:
+    """An original backend choice replaces the complete saved engine selection."""
+    options = {value.split("=", 1)[0] for value in (arguments or [])}
+    return bool(
+        options.intersection(
+            {
+                f"--{target}-onnx",
+                f"--{target}-onnx-enable",
+                f"--{target}-onnx-quantize-int8",
+                f"--{target}-trt-enable",
+                f"--{target}-trt-engine",
+            }
+        )
+    )
+
+
 def launch_arguments(
     game: Path,
     kind: str,
@@ -493,7 +509,6 @@ def launch_arguments(
     if config is None:
         config = launch_configuration(game, explicit_arguments)
     run = _get(config, "hm_ui.run", {})
-    explicit_options = {value.split("=", 1)[0] for value in (explicit_arguments or [])}
     arguments = []
     if run.get("stitch_precision", "saved") != "saved":
         if run["stitch_precision"] not in {"uint8", "float16", "float32"}:
@@ -518,15 +533,7 @@ def launch_arguments(
         if "jersey" in analysis:
             arguments.append("--detect-jersey-numbers")
     for target, setting in (("detector", "precision"), ("pose", "pose_precision")):
-        if explicit_options.intersection(
-            {
-                f"--{target}-onnx",
-                f"--{target}-onnx-enable",
-                f"--{target}-onnx-quantize-int8",
-                f"--{target}-trt-enable",
-                f"--{target}-trt-engine",
-            }
-        ):
+        if has_explicit_backend(explicit_arguments, target):
             # An explicit backend replaces the whole saved engine choice. Do
             # this before validating a prepared INT8 cache, since that cache
             # is irrelevant when the caller supplies a different engine.

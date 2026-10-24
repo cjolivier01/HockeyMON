@@ -82,6 +82,7 @@ def should_keep_disabled_graph_unchanged_and_insert_reid_before_tracking(tmp_pat
     assert plugins["tracker"]["depends"] == ["player_reid"]
     assert plugins["tracker"]["params"]["tracker_class"].endswith("HmDcfTrackerCudaStatic")
     assert plugins["tracker"]["params"]["tracker_kwargs"]["reid_feature_dim"] == 256
+    assert plugins["player_reid"]["params"] == {"onnx_path": str(path)}
 
 
 def should_reject_models_with_incompatible_feature_dimensions():
@@ -217,3 +218,120 @@ def should_use_native_custom_normalization_defaults_consistently(tmp_path):
     pixels = torch.full((3, 10, 10), 7.0)
     actual = player_crops(pixels, torch.tensor([[0.0, 0.0, 10.0, 10.0]]), settings=settings)
     torch.testing.assert_close(actual, torch.full_like(actual, 7.0))
+
+
+@pytest.mark.parametrize("model", ["deepstream", "custom"])
+def should_run_prepared_reid_on_its_selected_gpu_after_launch_and_seek(
+    tmp_path, monkeypatch, model
+):
+    import json
+    import os
+    import sys
+    from copy import deepcopy
+
+    import yaml
+
+    from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+
+    engine = tmp_path / "selected.engine"
+    engine.write_bytes(b"prepared-engine")
+    tracker = tmp_path / "tracker.yaml"
+    tracker.write_text(
+        yaml.safe_dump(
+            {
+                "ReID": {
+                    "inferDims": [3, 256, 128],
+                    "reidFeatureSize": 256,
+                    "modelEngineFile": str(engine),
+                }
+            }
+        )
+    )
+    captured = tmp_path / "helper-command.json"
+    helper = tmp_path / "native-infer"
+    helper.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, struct, sys\n"
+        "from pathlib import Path\n"
+        f"Path({str(captured)!r}).write_text(json.dumps(sys.argv))\n"
+        "assert os.environ['HSTREAM_UI_PARENT_PID'] == str(os.getppid())\n"
+        "assert sys.stdin.buffer.read(4) == struct.pack('<I', 0)\n"
+    )
+    helper.chmod(0o755)
+    monkeypatch.setenv("HM_HSTREAM_MODEL_INFER", str(helper))
+    base = {
+        "hm_ui": {"shared_analytics": {"reid": model}},
+        "pipeline": {
+            "tracker": {"reid-enable": True, "reid-model": model, "reid-config-file": str(tracker)}
+        },
+        "aspen": {"plugins": {"tracker": {"depends": ["mask"], "params": {}}}},
+    }
+    prepared = {
+        "pipeline": {
+            "tracker": {"reid-model": model, "reid-config-file": str(tracker), "gpu-id": 1}
+        }
+    }
+    for rebuilt_gpu in (None, 2):
+        # A seek rebuild starts from operator config again. Its device must
+        # remain the accepted engine's device even if that config has changed.
+        config = deepcopy(base)
+        config["pipeline"]["tracker"]["gpu-id"] = rebuilt_gpu
+        apply_prepared_shared_analytics(config, prepared)
+        configure_reid(config, tmp_path)
+        parameters = config["aspen"]["plugins"]["player_reid"]["params"]
+        assert parameters == {"tracker_config": str(tracker), "gpu": 1}
+        plugin = ReidPlugin(**parameters)
+        plugin._ensure_session()
+        plugin.finalize()
+        assert json.loads(captured.read_text()) == [
+            str(helper),
+            "--engine",
+            str(engine),
+            "--gpu-id",
+            "1",
+            "--parent-pid",
+            str(os.getpid()),
+        ]
+
+
+@pytest.mark.parametrize("gpu", [None, -1, True, "1", 1.5])
+def should_reject_unresolved_or_invalid_prepared_reid_devices(gpu):
+    from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+
+    config = {"hm_ui": {"shared_analytics": {"reid": "deepstream"}}, "pipeline": {}}
+    prepared = {
+        "pipeline": {
+            "tracker": {
+                "reid-model": "deepstream",
+                "reid-config-file": "/prepared/tracker.yaml",
+                "gpu-id": gpu,
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="GPU id"):
+        apply_prepared_shared_analytics(config, prepared)
+
+
+def should_pass_shared_appearance_gpu_to_onnx_provider(tmp_path, monkeypatch):
+    import sys
+
+    path = tmp_path / "prepared.onnx"
+    path.touch()
+    calls = []
+
+    def create_session(path, providers):
+        calls.append(providers)
+        session = Session()
+        session.get_providers = lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        return session
+
+    monkeypatch.setitem(
+        sys.modules,
+        "onnxruntime",
+        SimpleNamespace(
+            get_available_providers=lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+            InferenceSession=create_session,
+        ),
+    )
+    ReidPlugin(str(path), gpu=1)._ensure_session()
+    assert calls == [[("CUDAExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"]]

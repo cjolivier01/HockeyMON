@@ -15,6 +15,14 @@ silently use an unrelated installed executable. `HSTREAM_UI_BIN`, `HM_CLI_BIN`,
 and `HM_HSTREAM_MODEL_INFER` provide explicit
 overrides. `HM_CONFIG_ROOT` selects the matching native configuration directory.
 
+Before opening Qt for an initial `hmtrack` invocation, the launcher asks
+`hm-cli --resolve-initial-sources` to resolve its recording paths with the same
+CLI/config precedence as processing. The private envelope binds those paths to
+the original game, arguments and working directory. Qt validates that binding
+before calibration admission, so a single prestitched recording never cleans or
+marks the saved game's Left/Right calibration pending. Legacy unresolved initial
+envelopes must be recreated with the matching launcher; they fail before mutation.
+
 ## Ownership
 
 | Operation | Owner |
@@ -121,6 +129,10 @@ the default DeepStream appearance option executes the prepared ETLT-derived
 TensorRT engine through `hstream-model-infer`, using the same native TensorRT
 runtime that built it. Its binary pipe carries batches of at most 32 preprocessed
 player crops and returns embeddings; full video frames never enter that pipe.
+Native preparation also publishes the resolved `pipeline.tracker.gpu-id`, using
+the same tracker/application inheritance as engine preparation. Python carries
+that accepted device into the ReID stage and its native helper or ONNX CUDA
+provider, including after a seek; it does not choose a separate shared default.
 This bounded host transfer isolates native engine compatibility from the Python
 environment's TensorRT version. Custom bundles retain their selected paths. Explicit initial
 Python model overrides remain authoritative for that launch. A seek retains the

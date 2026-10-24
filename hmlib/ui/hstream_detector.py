@@ -242,11 +242,9 @@ def prepare_detector(game_id: str, samples: int, detector_model: str) -> dict[st
         raise FileNotFoundError(f"Game configuration is unavailable: {game}")
     profile = PROFILES[detector_model]
     config, graph, shape = _configuration(game, profile)
-    runner = executable(
-        os.environ.get("HSTREAM_NATIVE_RUNNER"),
-        "hstream-cli",
-        (Path("/opt/hstream/bin/hstream-cli"),),
-    )
+    from hmlib.ui.native_tools import native_runner
+
+    runner = native_runner(os.environ.get("HSTREAM_NATIVE_RUNNER"))
     app_config = _native_config(runner)
     ffmpeg = executable(os.environ.get("HM_FFMPEG"), "ffmpeg")
     cache = model_preparation.cache_directory(game, "detector", config)

@@ -323,6 +323,17 @@ def should_launch_one_shared_desktop_with_private_initial_envelope(game, monkeyp
     monkeypatch.setattr(
         desktop, "executable", lambda explicit, name, candidates=(): Path("/bin") / name
     )
+    monkeypatch.setattr(
+        desktop,
+        "_resolve_initial_sources",
+        lambda runner, request, launch, environment: {
+            "version": 1,
+            "game_id": launch["game_id"],
+            "sources": {"source": [str(game / "one.mp4")]},
+            "arguments": launch["arguments"],
+            "cwd": launch["cwd"],
+        },
+    )
     calls = []
 
     def call(command, env):
@@ -349,6 +360,7 @@ def should_launch_one_shared_desktop_with_private_initial_envelope(game, monkeyp
     assert "--backend=hockeymon" in command and "--backend-runner=/bin/hm-cli" in command
     assert env["HM_GAME_DIR"] == str(game.parent)
     assert envelope["arguments"] == ["--camera-ui=1"]
+    assert envelope["source_ownership"]["sources"] == {"source": [str(game / "one.mp4")]}
     assert not path.exists()
 
 
@@ -361,6 +373,162 @@ def should_validate_anonymous_source_count_after_comma_expansion(tmp_path):
     game_id = _anonymous_game(tmp_path, ["--input-video=" + ",".join(map(str, sources[:2]))])
     config = yaml.safe_load((tmp_path / game_id / "config.yaml").read_text())
     assert set(config["game"]["videos"]) == {"left", "right"}
+
+
+@pytest.mark.parametrize("override", ["input", "config", "config-override"])
+def should_resolve_initial_source_ownership_before_touching_saved_pair(
+    game, tmp_path, monkeypatch, capsys, override
+):
+    from hmlib.cli.hstream_backend import main
+
+    source = game / "prestitched.mp4"
+    source.write_bytes(b"single recording")
+    saved = {
+        "game": {"videos": {"left": ["one.mp4"], "right": ["two.mp4"], "source": None}},
+        "hstream_ui": {
+            "stitching_calibration": {"status": "complete", "invalidation_id": "must-retain"},
+            "hockeymon": {"detector": {"precision": "int8", "engine": "/missing/engine.onnx"}},
+        },
+    }
+    config_path = game / "config.yaml"
+    config_path.write_text(yaml.safe_dump(saved))
+    before = config_path.read_bytes()
+    videos = {"source": [str(source)], "left": None, "right": None}
+    if override == "input":
+        arguments = ["--input-video", str(source)]
+    elif override == "config":
+        config = tmp_path / "initial-sources.yaml"
+        config.write_text(yaml.safe_dump({"game": {"videos": videos}}))
+        arguments = ["--config", str(config)]
+    else:
+        arguments = [
+            "--input-video",
+            str(source),
+            "--config-override",
+            "rink.camera.color.exposure_ev=1",
+        ]
+    initial = tmp_path / "initial-sources.json"
+    initial.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": arguments,
+            }
+        )
+    )
+    monkeypatch.setenv("HM_UI_INITIAL_LAUNCH", str(initial))
+    assert main(["--resolve-initial-sources", "--game-id", game.name]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "version": 1,
+        "game_id": game.name,
+        "sources": {"source": [str(source)]},
+    }
+    assert config_path.read_bytes() == before
+
+
+def should_bind_launcher_source_resolution_to_exact_initial_request(tmp_path, monkeypatch):
+    from hmlib.ui import desktop
+
+    source = tmp_path / "recording.mp4"
+    source.touch()
+    launch = {"game_id": "game", "arguments": ["--input-video", str(source)], "cwd": str(tmp_path)}
+    request = tmp_path / "launch.json"
+    request.write_text(json.dumps(launch))
+
+    def run(command, **kwargs):
+        assert command == ["/matching/hm-cli", "--resolve-initial-sources", "--game-id", "game"]
+        assert kwargs["env"]["HM_GAME_DIR"] == str(tmp_path)
+        assert kwargs["env"]["HM_UI_INITIAL_LAUNCH"] == str(request)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps(
+                {
+                    "version": 1,
+                    "game_id": "game",
+                    "sources": {"source": [str(source)]},
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr(desktop.subprocess, "run", run)
+    ownership = desktop._resolve_initial_sources(
+        Path("/matching/hm-cli"), request, launch, {"HM_GAME_DIR": str(tmp_path)}
+    )
+    assert ownership["sources"] == {"source": [str(source)]}
+    assert ownership["arguments"] == launch["arguments"]
+    assert ownership["cwd"] == launch["cwd"]
+
+
+@pytest.mark.parametrize("source_layer", ["saved", "overlay", "input", "override"])
+def should_freeze_admitted_sources_across_first_launch_config_edits(game, tmp_path, source_layer):
+    source = game / "admitted.mp4"
+    source.touch()
+    overlay = tmp_path / "initial-overlay.yaml"
+    overlay.write_text(yaml.safe_dump({"game": {"videos": {"source": [str(source)]}}}))
+    arguments = ["--game-id", game.name, "--config-override=rink.camera.color.exposure_ev=1"]
+    if source_layer == "overlay":
+        arguments += ["--config", str(overlay)]
+    elif source_layer == "input":
+        arguments += ["--input-video=" + str(source)]
+    elif source_layer == "override":
+        arguments += ["--config-override", "game.videos.source=" + str(source)]
+    else:
+        (game / "config.yaml").write_text(overlay.read_text())
+    initial = tmp_path / "frozen-launch.json"
+    request = {
+        "version": 1,
+        "module": "hmlib.cli.hmtrack",
+        "game_id": game.name,
+        "cwd": str(tmp_path),
+        "arguments": arguments,
+    }
+    initial.write_text(json.dumps(request))
+    preflight = make_plan(
+        parser().parse_args(["-g", game.name]), initial=initial, validate_models=False
+    )
+    request["source_ownership"] = {
+        "version": 1,
+        "game_id": game.name,
+        "cwd": request["cwd"],
+        "arguments": arguments,
+        "sources": {
+            role: [str(path) for path in paths] for role, paths in preflight.sources.items()
+        },
+    }
+    initial.write_text(json.dumps(request))
+    replacement = {
+        "game": {
+            "videos": {"left": ["missing-left.mp4"], "right": ["missing-right.mp4"], "source": None}
+        }
+    }
+    (game / "config.yaml").write_text(yaml.safe_dump(replacement))
+    overlay.write_text(yaml.safe_dump(replacement))
+    before = (game / "config.yaml").read_bytes()
+    plan = make_plan(parser().parse_args(["-g", game.name]), initial=initial)
+    assert plan.sources == {"source": [source]}
+    assert plan.config["game"]["videos"] == {"source": [str(source)]}
+    assert plan.arguments[plan.arguments.index("--input-video") + 1] == str(source)
+    assert not any(value.startswith("--input-video") for value in plan.explicit_arguments)
+    assert not any("game.videos" in value for value in plan.explicit_arguments)
+    assert "--config-override=rink.camera.color.exposure_ev=1" in plan.explicit_arguments
+    command = plan.write(tmp_path)
+    source_config = tmp_path / "initial-sources.yaml"
+    assert command[-3:-1] == ["--config", str(source_config)]
+    assert yaml.safe_load(source_config.read_text())["game"]["videos"] == {
+        "source": [str(source)],
+        "left": None,
+        "right": None,
+    }
+    if source_layer == "overlay":
+        assert str(overlay) in command and command.index(str(overlay)) < command.index(
+            str(source_config)
+        )
+    assert (game / "config.yaml").read_bytes() == before
 
 
 @pytest.mark.parametrize("explicit_root", [False, True])
@@ -376,6 +544,17 @@ def should_preserve_anonymous_games_and_outputs_after_desktop_closes(
     )
     source = tmp_path / "input.mp4"
     source.write_bytes(b"source")
+    monkeypatch.setattr(
+        desktop,
+        "_resolve_initial_sources",
+        lambda runner, request, launch, environment: {
+            "version": 1,
+            "game_id": launch["game_id"],
+            "sources": {"source": [str(source)]},
+            "arguments": launch["arguments"],
+            "cwd": launch["cwd"],
+        },
+    )
     launches = []
 
     def run(command, env):
@@ -602,3 +781,82 @@ def should_keep_initial_python_models_over_shared_menu_defaults(game, tmp_path, 
     assert plan.config["aspen"]["plugins"]["player_reid"]["params"] == {
         "onnx_path": str(appearance)
     }
+
+
+def should_preserve_original_config_lists_and_package_relative_paths(game, tmp_path):
+    from hmlib.config import load_yaml_files_ordered
+
+    (tmp_path / "first.yaml").write_text("aspen:\n  pipeline:\n    queue_size: 3\n")
+    (tmp_path / "last.yaml").write_text("aspen:\n  pipeline:\n    queue_size: 7\n")
+    envelope = tmp_path / "initial-configs.json"
+    request = {
+        "version": 1,
+        "module": "hmlib.cli.hmtrack",
+        "game_id": game.name,
+        "cwd": str(tmp_path),
+        "arguments": ["--config", " first.yaml, last.yaml "],
+    }
+    envelope.write_text(json.dumps(request))
+    plan = make_plan(parser().parse_args(["-g", game.name]), initial=envelope)
+    assert plan.initial_settings["aspen"]["pipeline"]["queue_size"] == 7
+    assert plan.config["aspen"]["pipeline"]["queue_size"] == 7
+    bundled = "config/aspen/tracking_pose.yaml"
+    request["arguments"] = ["--config", bundled]
+    # A colliding cwd filename must not override the bundled ROOT_DIR input.
+    collision = tmp_path / bundled
+    collision.parent.mkdir(parents=True)
+    collision.write_text("wrong_origin: true\n")
+    envelope.write_text(json.dumps(request))
+    plan = make_plan(parser().parse_args(["-g", game.name]), initial=envelope)
+    assert plan.initial_settings["aspen"] == load_yaml_files_ordered([bundled])["aspen"]
+    assert "wrong_origin" not in plan.config
+
+
+@pytest.mark.parametrize("backend", ["--detector-trt-enable", "--detector-onnx=selected.onnx"])
+def should_ignore_unprepared_shared_int8_for_explicit_initial_backend(game, tmp_path, backend):
+    envelope = tmp_path / "initial-backend.json"
+    envelope.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": [backend, "--camera-ui=1"],
+            }
+        )
+    )
+    plan = make_plan(
+        parser().parse_args(
+            ["-g", game.name, "--options=hstream_ui.hockeymon.detector.precision=int8"]
+        ),
+        initial=envelope,
+    )
+    assert backend in plan.explicit_arguments
+    assert not any("int8" in value or ".hm-ui/models" in value for value in plan.arguments)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def should_resolve_packaged_native_wrapper_to_its_binary(tmp_path, monkeypatch, explicit):
+    from hmlib.ui.hstream_launch import native_application_config
+    from hmlib.ui.native_tools import native_runner
+
+    prefix = tmp_path / "opt/hstream"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "configs").mkdir()
+    binary = prefix / "bin/hstream-cli"
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    wrapper = prefix / "run.sh"
+    wrapper.write_text("#!/bin/sh\nexit 99\n")
+    wrapper.chmod(0o755)
+    public = tmp_path / "usr/bin"
+    public.mkdir(parents=True)
+    (public / "hstream-cli").symlink_to(wrapper)
+    config = prefix / "configs/ds_hockey_app_config.yaml"
+    config.write_text("tracker:\n  gpu-id: 0\n")
+    monkeypatch.setenv("PATH", str(public))
+    monkeypatch.delenv("HM_CONFIG_ROOT", raising=False)
+    resolved = native_runner(str(public / "hstream-cli") if explicit else None)
+    assert resolved == binary
+    assert native_application_config(resolved) == config

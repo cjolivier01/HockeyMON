@@ -38,9 +38,38 @@ def workspace(tmp_path, monkeypatch):
 
 
 def _initial_launch(monkeypatch, tmp_path, *, game_id, arguments, module="hmlib.cli.hmtrack"):
+    import hmlib.config as configuration
     from hmlib.ui import desktop
+    from hmlib.ui.hstream_launch import make_plan, parser
 
     calls = []
+
+    def resolve_sources(runner, request, launch, environment):
+        assert runner == Path("/test/bin/hm-cli")
+        # Replace only the subprocess boundary. Resolve actual CLI/config/source
+        # precedence under the same environment the real child would receive.
+        with monkeypatch.context() as child:
+            child.setenv("HM_GAME_DIR", environment["HM_GAME_DIR"])
+            child.setitem(
+                configuration.get_game_config_private.__globals__,
+                "GAME_DIR_BASE",
+                environment["HM_GAME_DIR"],
+            )
+            plan = make_plan(
+                parser().parse_args(["--game-id", launch["game_id"]]),
+                initial=request,
+                validate_models=False,
+            )
+        return {
+            "version": 1,
+            "game_id": plan.game.name,
+            "sources": {
+                role: [str(path.resolve()) for path in paths]
+                for role, paths in plan.sources.items()
+            },
+            "arguments": launch["arguments"],
+            "cwd": launch["cwd"],
+        }
 
     def call(command, *, env):
         request = Path(
@@ -66,6 +95,7 @@ def _initial_launch(monkeypatch, tmp_path, *, game_id, arguments, module="hmlib.
         desktop, "executable", lambda explicit, name, candidates=(): Path("/test/bin") / name
     )
     monkeypatch.setattr(desktop.subprocess, "call", call)
+    monkeypatch.setattr(desktop, "_resolve_initial_sources", resolve_sources)
     assert (
         desktop.launch_desktop(
             game_id=game_id,
@@ -113,6 +143,13 @@ def should_launch_initial_configured_single_source_with_cli_overrides(
         "arguments": arguments,
         "cwd": str(invocation),
         "game_id": game.name,
+        "source_ownership": {
+            "version": 1,
+            "game_id": game.name,
+            "sources": {"source": [str(source)]},
+            "arguments": arguments,
+            "cwd": str(invocation),
+        },
     }
     assert launch["environment"]["HM_GAME_DIR"] == str(game.parent)
     assert launch["command"][:3] == [
@@ -132,6 +169,7 @@ def should_keep_anonymous_game_after_the_desktop_exits(tmp_path, monkeypatch):
     assert launch["envelope"]["anonymous"] is True
     assert launch["envelope"]["cwd"] == str(tmp_path)
     assert launch["sources"] == {"source": [str(tmp_path / "relative.mp4")]}
+    assert launch["envelope"]["source_ownership"]["sources"] == launch["sources"]
     game_root = Path(launch["environment"]["HM_GAME_DIR"])
     assert game_root == tmp_path / "games"
     game = game_root / launch["envelope"]["game_id"]
@@ -142,11 +180,16 @@ def should_preserve_explicit_initial_input_and_publication_choices(
     workspace, tmp_path, monkeypatch
 ):
     write_config(workspace.game(), {"game": {"videos": {"source": ["missing.mp4"]}}})
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "relative.mp4").write_bytes(b"explicit recording")
     arguments = ["--input-video=relative.mp4", "--camera-ui=1"]
     launch = _initial_launch(
         monkeypatch, tmp_path, game_id=workspace.game().name, arguments=arguments
     )
     assert launch["envelope"]["arguments"] == arguments
+    assert launch["envelope"]["source_ownership"]["sources"] == {
+        "source": [str(tmp_path / "relative.mp4")]
+    }
     assert "--deploy-dir" not in launch["command"]
 
 

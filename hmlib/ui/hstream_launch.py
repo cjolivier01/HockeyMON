@@ -49,6 +49,7 @@ def parser() -> argparse.ArgumentParser:
         allow_abbrev=False,
     )
     result.add_argument("--ui-backend-info", action="store_true")
+    result.add_argument("--resolve-initial-sources", action="store_true")
     result.add_argument("-g", "--game-id")
     result.add_argument("-c", "--config", action="append", default=[])
     result.add_argument("--options", action="append", default=[])
@@ -103,6 +104,23 @@ def get_path(config: dict, key: str, default=None):
             return default
         node = node[part]
     return node
+
+
+def capture_config_overrides(explicit: dict, overrides: list[str] | None) -> None:
+    """Record overrides already validated against the complete resolved config.
+
+    The sparse explicit-settings map intentionally lacks inherited keys, so
+    applying the validating override setter to that map would reject valid CLI
+    options. Reuse the CLI's canonical key/value parser after full validation.
+    """
+    from hmlib.hm_opts import _iter_config_override_updates
+
+    for key, value in _iter_config_override_updates(None, overrides):
+        # apply_config_overrides uses set_nested_value's None/no-set sentinel.
+        # Preserve that CLI behavior rather than claiming ownership of a value
+        # that was not applied to the resolved configuration.
+        if value is not None:
+            set_path(explicit, key, value)
 
 
 def read_mapping(path: Path) -> dict:
@@ -169,6 +187,7 @@ class LaunchPlan:
     limit_seconds: float | None = None
     limit_frames: int | None = None
     initial_settings: dict = field(default_factory=dict)
+    initial_source_snapshot: bool = False
 
     def launch_receipt(self) -> dict:
         """Tell the desktop which outputs the initial Python invocation resolved."""
@@ -188,6 +207,16 @@ class LaunchPlan:
         # Explicit initial Python arguments retain their argparse meaning. Only
         # transport ownership and a supervised seek are owned by this adapter.
         arguments = [*self.arguments, "--config", str(config_path), *self.explicit_arguments]
+        if self.initial_source_snapshot:
+            # Original config files remain authoritative for other settings,
+            # but cannot replace the recording ownership Qt already admitted.
+            source_path = session / "initial-sources.yaml"
+            videos = dict.fromkeys(("source", "left", "right"))
+            videos.update(
+                {role: [str(path) for path in paths] for role, paths in self.sources.items()}
+            )
+            source_path.write_text(yaml.safe_dump({"game": {"videos": videos}}), encoding="utf-8")
+            arguments += ["--config", str(source_path)]
         if seek_seconds:
             arguments = strip_options(
                 arguments, {"--start-time", "--start-frame-time", "-s", "--start-frame"}
@@ -220,6 +249,23 @@ def strip_options(arguments: list[str], names: set[str]) -> list[str]:
         else:
             result.append(token)
             index += 1
+    return result
+
+
+def _without_source_overrides(arguments: list[str]) -> list[str]:
+    """Keep other original dot-path overrides while freezing admitted recordings."""
+    result, index = [], 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token.split("=", 1)[0] == "--config-override":
+            value = token.split("=", 1)[1] if "=" in token else arguments[index + 1]
+            count = 1 if "=" in token else 2
+            key = value.split("=", 1)[0].strip()
+            if key == "game.videos" or key.startswith("game.videos."):
+                index += count
+                continue
+        result.append(token)
+        index += 1
     return result
 
 
@@ -272,11 +318,14 @@ def _initial_output_routes(settings: dict, sinks: set[str]) -> None:
             sinks.discard(sink)
 
 
-def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> LaunchPlan:
+def make_plan(
+    args: argparse.Namespace, *, initial: Path | None = None, validate_models: bool = True
+) -> LaunchPlan:
     from hmlib.config import get_config
     from hmlib.ui.analytics_graph import graph_paths, selected_analysis
     from hmlib.ui.runtime_setup import (
         apply_engine_preferences,
+        has_explicit_backend,
         launch_arguments,
         prefer_explicit_launch_arguments,
     )
@@ -312,7 +361,7 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
         cwd = Path(request["cwd"]).resolve()
         if not cwd.is_dir():
             raise ValueError("Initial launch working directory is unavailable")
-        from hmlib.cli.hmtrack import make_parser
+        from hmlib.cli.hmtrack import make_parser, split_config_paths
         from hmlib.hm_opts import hm_opts
 
         python_parser = make_parser()
@@ -401,9 +450,15 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
     set_path(config, "video_out.rtsp_enabled", "RTSP" in sinks)
     initial_settings = {}
     if initial_args is not None:
-        for filename in initial_args.config or []:
+        from hmlib.config import ROOT_DIR, load_yaml_files_ordered
+
+        for filename in split_config_paths(initial_args.config):
             path = Path(filename)
-            layer = read_mapping(path if path.is_absolute() else cwd / path)
+            # The CLI gives bundled ROOT_DIR paths precedence, then resolves
+            # other relative paths from the original invocation directory.
+            if not path.is_absolute() and not (Path(ROOT_DIR) / path).exists():
+                path = cwd / path
+            layer = load_yaml_files_ordered([str(path)])
             _initial_output_routes(layer, sinks)
             initial_settings = merge(initial_settings, layer)
             config = merge(config, layer)
@@ -420,7 +475,7 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
         hm_opts.apply_arg_config_overrides(
             explicit_settings, initial_args, parser=python_parser, explicit_arg_names=explicit_names
         )
-        hm_opts.apply_config_overrides(explicit_settings, initial_args.config_overrides)
+        capture_config_overrides(explicit_settings, initial_args.config_overrides)
         initial_settings = merge(initial_settings, explicit_settings)
         # These hmtrack-only model flags are consumed directly by its worker,
         # rather than the generic argparse-to-config mapping.
@@ -486,12 +541,18 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
     config = merge(graph_config, config)
     apply_engine_preferences(config)
     prepared = []
-    if get_path(config, "hstream_ui.hockeymon.detector.precision") == "int8":
+    if (
+        validate_models
+        and not has_explicit_backend(explicit, "detector")
+        and get_path(config, "hstream_ui.hockeymon.detector.precision") == "int8"
+    ):
         from hmlib.ui.hstream_detector import validated_detector_arguments
 
         prepared = validated_detector_arguments(game, config)
-    generated = launch_arguments(
-        game, "track", config=config, explicit_arguments=[*prepared, *explicit]
+    generated = (
+        launch_arguments(game, "track", config=config, explicit_arguments=[*prepared, *explicit])
+        if validate_models
+        else []
     )
     generated += prepared
     generated = prefer_explicit_launch_arguments(generated, explicit, "track")
@@ -532,6 +593,34 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
             set_path(config, "game.videos", videos)
         else:
             raise ValueError("Program input requires one recording or a left/right pair")
+    initial_source_snapshot = bool(initial and "source_ownership" in request)
+    if initial_source_snapshot:
+        ownership = request["source_ownership"]
+        if (
+            not isinstance(ownership, dict)
+            or ownership.get("version") != 1
+            or ownership.get("game_id") != args.game_id
+            or ownership.get("arguments") != request["arguments"]
+            or ownership.get("cwd") != request["cwd"]
+            or not isinstance(ownership.get("sources"), dict)
+            or set(ownership["sources"]) not in ({"source"}, {"left", "right"})
+        ):
+            raise ValueError("Initial recording ownership does not match this launch")
+        videos = ownership["sources"]
+        if any(
+            not isinstance(paths, list)
+            or not paths
+            or any(not isinstance(path, str) or not Path(path).is_absolute() for path in paths)
+            for paths in videos.values()
+        ):
+            raise ValueError("Initial recording ownership requires absolute source paths")
+        set_path(config, "game.videos", copy.deepcopy(videos))
+        input_names = {
+            name
+            for name, action in python_parser._option_string_actions.items()
+            if action.dest == "input_video"
+        }
+        explicit = _without_source_overrides(strip_options(explicit, input_names))
     if not isinstance(videos, dict) or not videos:
         raise ValueError("The selected game has no recording sources")
     sources = {}
@@ -575,6 +664,7 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
         ),
         initial_args.max_frames if initial_args else None,
         initial_settings,
+        initial_source_snapshot,
     )
 
 

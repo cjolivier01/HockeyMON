@@ -111,8 +111,14 @@ class ReidPlugin(Plugin):
         enabled: bool = True,
         batch_size: int = 32,
         tracker_config: str | None = None,
+        gpu: int | None = None,
     ):
         super().__init__(enabled=enabled)
+        if gpu is not None:
+            from hmlib.models.appearance import validate_appearance_gpu
+
+            gpu = validate_appearance_gpu(gpu)
+        self.gpu = gpu
         self.settings = {}
         self.engine = False
         if tracker_config:
@@ -146,7 +152,8 @@ class ReidPlugin(Plugin):
             if self.engine:
                 from hmlib.models.appearance import TensorRtAppearanceSession
 
-                self.session = TensorRtAppearanceSession(self.path)
+                options = {} if self.gpu is None else {"gpu": self.gpu}
+                self.session = TensorRtAppearanceSession(self.path, **options)
                 self.batch_size = min(self.batch_size, self.session.maximum_batch)
                 return self.session
             import onnxruntime as ort
@@ -156,12 +163,19 @@ class ReidPlugin(Plugin):
             available = ort.get_available_providers()
             providers = ["CPUExecutionProvider"]
             if "CUDAExecutionProvider" in available:
-                providers.insert(0, "CUDAExecutionProvider")
+                providers.insert(
+                    0,
+                    (
+                        "CUDAExecutionProvider"
+                        if self.gpu is None
+                        else ("CUDAExecutionProvider", {"device_id": self.gpu})
+                    ),
+                )
             else:
                 logger.warning("ReID CUDA provider unavailable; appearance extraction runs on CPU")
             session = ort.InferenceSession(str(self.path), providers=providers)
             if (
-                providers[0] == "CUDAExecutionProvider"
+                "CUDAExecutionProvider" in available
                 and "CUDAExecutionProvider" not in session.get_providers()
             ):
                 raise RuntimeError(
@@ -257,6 +271,12 @@ def configure_reid(config: dict, game: Path, *, validate_weights: bool = True) -
                 )
             native = str(game / ".hm-ui" / "shared-models" / "tracker.yaml")
         extraction = {"tracker_config": str(native)}
+        # Graph inspection can precede native model preparation. Executable
+        # shared graphs require its resolved device instead of choosing one.
+        if validate_weights or settings.get("gpu-id") is not None:
+            from hmlib.models.appearance import validate_appearance_gpu
+
+            extraction["gpu"] = validate_appearance_gpu(settings.get("gpu-id"))
     else:
         extraction = {}
     needs_legacy = (tracker_enabled and "reid" not in shared) or (
