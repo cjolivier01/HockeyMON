@@ -683,6 +683,7 @@ rink:
     # 4-sided polygon that maps out the scoreboard in the perspective view
     # Should be tlbr form, with values: [x, y]
     perspective_polygon: null
+    position: upper-left
     projected_height: "%20"
     projected_width: "%10"
     scoreboard_scale: 1.0
