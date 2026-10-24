@@ -105,6 +105,11 @@ runtime:
     maximum_encoded_packet_bytes: 67108864
     compact_stitch_workspace: true
     playback_start_seconds: 0
+    model_cache:
+      enable: true
+      # {user_cache} follows XDG_CACHE_HOME, otherwise HOME/.cache.
+      directory: "{user_cache}/hstream/migraphx"
+      maximum_entry_bytes: 2147483648
     audio:
       maximum_packet_bytes: 1048576
       maximum_frame_samples: 4096
