@@ -1091,6 +1091,9 @@ class PlayTracker(torch.nn.Module):
 
         original_images = unwrap_tensor(results.pop("original_images"))
 
+        if self._stitch_rotation_controller is None:
+            self._publish_hm_ui_preview(original_images, name="Camera 1")
+
         # Figure out what device this image should be on
         image_device = self._device
         if image_device.type != "cuda" and original_images.device.type == "cuda":
@@ -1906,7 +1909,7 @@ class PlayTracker(torch.nn.Module):
                 preview_names=(
                     ("Stitched", "Final", "Camera 1", "Camera 2")
                     if self._stitch_rotation_controller is not None
-                    else ("Stitched", "Final")
+                    else ("Stitched", "Final", "Camera 1")
                 ),
             )
             self._hm_ui_process.enable_playback()
@@ -1943,11 +1946,13 @@ class PlayTracker(torch.nn.Module):
         if self._hm_ui_process.closed:
             raise RuntimeError("hm-ui was closed")
 
-    def _publish_hm_ui_preview(self, img, *, metadata=None) -> None:
+    def _publish_hm_ui_preview(self, img, *, name="Stitched", metadata=None) -> None:
         if not self._camera_ui_enabled or self._hm_ui_process is None:
             return
         try:
-            self._hm_ui_process.publish_preview(img, name="Stitched", metadata=metadata)
+            self._hm_ui_process.publish_preview(
+                img, name=name, metadata=metadata, snapshot=name.startswith("Camera ")
+            )
         except (OSError, RuntimeError, ValueError, TypeError) as ex:
             logger.warning("Failed to publish hm-ui preview frame: %s", ex)
 

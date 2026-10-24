@@ -169,6 +169,52 @@ def should_resolve_initial_config_root_and_private_opt_out(game, tmp_path):
     assert plan.config["rink"]["camera"]["color"]["exposure_ev"] == 0.25
 
 
+@pytest.mark.parametrize("disabled", [False, True])
+def should_honor_initial_output_file_before_generating_recording_flags(game, tmp_path, disabled):
+    from hmlib.cli.hmtrack import make_parser
+
+    initial = tmp_path / "initial-output.json"
+    initial.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": ["--output-video=explicit.mp4"]
+                + (["--no-save-video"] if disabled else []),
+            }
+        )
+    )
+    plan = make_plan(parser().parse_args(["-g", game.name]), initial=initial)
+    worker = make_parser().parse_args(plan.write(tmp_path)[4:])
+    assert worker.no_save_video is disabled
+    assert worker.output_video == "explicit.mp4"
+    assert plan.config["video_out"]["archive_program"] is not disabled
+    assert ("ENCODE_FILE" in plan.sinks) is not disabled
+    assert plan.launch_receipt()["sinks"] == sorted(plan.sinks)
+
+
+def should_honor_initial_archive_config_and_freeze_resolved_routes(game, tmp_path):
+    overlay = tmp_path / "outputs.yaml"
+    overlay.write_text("video_out: {archive_program: true, archive_stitched: true}\n")
+    initial = tmp_path / "initial-output.json"
+    initial.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": ["--config", overlay.name],
+            }
+        )
+    )
+    plan = make_plan(parser().parse_args(["-g", game.name]), initial=initial)
+    assert plan.sinks == {"RENDER", "ENCODE_FILE", "ENCODE_STITCHED_FILE"}
+    assert "--no-save-video" not in plan.arguments
+
+
 def should_export_saved_recipe_and_execute_the_selected_backend(game, tmp_path):
     config = yaml.safe_load((game / "config.yaml").read_text())
     config["hstream_ui"] = {
@@ -255,8 +301,59 @@ def should_validate_anonymous_source_count_after_comma_expansion(tmp_path):
     with pytest.raises(ValueError, match="left/right pair"):
         _anonymous_game(tmp_path, ["--input-video=" + ",".join(map(str, sources))])
     game_id = _anonymous_game(tmp_path, ["--input-video=" + ",".join(map(str, sources[:2]))])
-    config = yaml.safe_load((tmp_path / "games" / game_id / "config.yaml").read_text())
+    config = yaml.safe_load((tmp_path / game_id / "config.yaml").read_text())
     assert set(config["game"]["videos"]) == {"left", "right"}
+
+
+@pytest.mark.parametrize("explicit_root", [False, True])
+def should_preserve_anonymous_games_and_outputs_after_desktop_closes(
+    tmp_path, monkeypatch, explicit_root
+):
+    from hmlib.ui import desktop
+
+    root = tmp_path / "recordings"
+    monkeypatch.setenv("HM_GAME_DIR", str(root if not explicit_root else tmp_path / "unused"))
+    monkeypatch.setattr(
+        desktop, "executable", lambda explicit, name, candidates=(): Path("/bin") / name
+    )
+    source = tmp_path / "input.mp4"
+    source.write_bytes(b"source")
+    launches = []
+
+    def run(command, env):
+        request = Path(
+            next(item.split("=", 1)[1] for item in command if item.startswith("--backend-launch="))
+        )
+        envelope = json.loads(request.read_text())
+        game = Path(env["HM_GAME_DIR"]) / envelope["game_id"]
+        assert game.parent == root
+        assert yaml.safe_load((game / "config.yaml").read_text())["game"]["videos"]["source"] == [
+            str(source)
+        ]
+        for name in ("program-1.mkv", "recording_telemetry-1.db", "calibration.yaml"):
+            (game / name).write_bytes(name.encode())
+        launches.append((game, request))
+        return 0
+
+    monkeypatch.setattr(desktop.subprocess, "call", run)
+    for _ in range(2):
+        assert (
+            launch_desktop(
+                module="hmlib.cli.hmtrack",
+                arguments=[f"--input-video={source}"],
+                root_dir=root if explicit_root else None,
+            )
+            == 0
+        )
+    assert launches[0][0] != launches[1][0]
+    for game, request in launches:
+        assert not request.exists()
+        assert {path.name for path in game.iterdir()} == {
+            "config.yaml",
+            "program-1.mkv",
+            "recording_telemetry-1.db",
+            "calibration.yaml",
+        }
 
 
 def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_path):
@@ -280,12 +377,24 @@ def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_
                     "--lfo=1",
                     "--rfo=0",
                     "--max-time=5",
+                    "--no-audio",
                 ],
             }
         )
     )
     command, cwd = calibration_arguments(
-        ["-g", game.name, "-c", "native.yaml", "--stitching-calibration-only"],
+        [
+            "-g",
+            game.name,
+            "-c",
+            "native.yaml",
+            "--stitching-calibration-only",
+            "--options=stitching.blend_mode=laplacian,stitching.sync_method=imu",
+            "--options",
+            "pipeline.hmaudio.enable=1",
+            "--options=pipeline.hmstitcher.properties.high-bit-depth=auto",
+            "--stitch-frame-time=00:00:09",
+        ],
         envelope,
         Path("/native/hstream-cli"),
     )
@@ -296,4 +405,13 @@ def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_
     assert overlay["stitching"]["blend_mode"] == "alpha"
     assert overlay["stitching"]["stitch_frame_time"] == "00:00:03"
     assert overlay["game"]["stitching"]["frame_offsets"] == {"left": 1, "right": 0}
+    assert overlay["stitching"]["sync_method"] == "manual"
+    assert overlay["pipeline"]["hmaudio"]["enable"] is False
+    assert not any(
+        "stitching.blend_mode=" in arg or "stitching.sync_method=" in arg for arg in command
+    )
+    assert not any("pipeline.hmaudio.enable=" in arg for arg in command)
+    assert "--options=pipeline.hmstitcher.properties.high-bit-depth=auto" in command
+    assert "--stitch-frame-time=00:00:03" in command
+    assert "--stitch-frame-time=00:00:09" not in command
     assert (game / "config.yaml").read_bytes() == before

@@ -117,7 +117,10 @@ def run(command: list[str], parent: int, *, grace_seconds: float = 2) -> int:
         signal.signal(kind, stop)
     if not _configure_owner(parent):
         return 128 + signal.SIGTERM
-    process = subprocess.Popen(command)
+    environment = os.environ.copy()
+    if "HSTREAM_UI_PARENT_PID" in environment:
+        environment["HSTREAM_UI_PARENT_PID"] = str(os.getpid())
+    process = subprocess.Popen(command, env=environment)
     try:
         while process.poll() is None and not stopped:
             time.sleep(0.02)

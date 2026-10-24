@@ -498,6 +498,18 @@ class VideoOutPlugin(Plugin):
     def output_paths(self) -> tuple[Path, ...]:
         return tuple(Path(item["path"]) for item in self._segments if Path(item["path"]).is_file())
 
+    def output_kinds(self) -> tuple[tuple[Path, str], ...]:
+        kinds = {
+            "archive_program": "program",
+            "archive_stitched": "stitched",
+            "archive_program_4k": "program-4k",
+        }
+        return tuple(
+            (Path(item["path"]), kinds[item["role"]])
+            for item in self._segments
+            if Path(item["path"]).is_file()
+        )
+
     def supplementary_paths(self) -> tuple[Path, ...]:
         paths = [path for path in self._archive_paths if path.is_file()]
         if self._segments_manifest is not None:

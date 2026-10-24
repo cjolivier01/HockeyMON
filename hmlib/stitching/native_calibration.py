@@ -7,7 +7,6 @@ exported bytes and uses its own copy for renderer caches.
 
 from __future__ import annotations
 
-import hashlib
 import math
 import os
 import shutil
@@ -20,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from hmlib.utils.checksum import sha256_file
 
 _REQUIRED_ARTIFACTS = {
     "hm_project.pto",
@@ -119,8 +120,7 @@ def load_native_calibration(directory: Path) -> NativeCalibration:
             raise ValueError(f"Native calibration artifact is not a regular file: {name}")
         if artifact.stat().st_size != expected["size"]:
             raise ValueError(f"Native calibration artifact size changed: {name}")
-        with artifact.open("rb") as stream:
-            actual_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+        actual_hash = sha256_file(artifact)
         if actual_hash != expected["sha256"]:
             raise ValueError(f"Native calibration artifact checksum changed: {name}")
     offsets = tuple(float(manifest["frame_offsets"][role]) for role in ("left", "right"))

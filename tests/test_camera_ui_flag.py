@@ -160,6 +160,29 @@ def should_propagate_camera_ui_initialization_failure(monkeypatch):
     assert tracker._hm_ui_process is None
 
 
+@pytest.mark.parametrize("dual", [False, True])
+def should_register_decoded_camera_previews_for_single_and_dual_sources(
+    tmp_path, monkeypatch, dual
+):
+    from hmlib.camera.hm_ui_bridge import HmUiProcess
+
+    PlayTracker = _load_play_tracker(monkeypatch)
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.setattr(HmUiProcess, "ensure_started", lambda self: None)
+    tracker = PlayTracker.__new__(PlayTracker)
+    tracker._game_id = "source-preview"
+    tracker._ui_dialogs = {}
+    tracker._hm_ui_process = None
+    tracker._stitch_rotation_controller = object() if dual else None
+    tracker._create_ui_dialog("Tracker Controls", initial_size=(400, 300))
+    try:
+        assert "Camera 1" in tracker._hm_ui_process.preview_paths
+        assert ("Camera 2" in tracker._hm_ui_process.preview_paths) == dual
+    finally:
+        tracker.close_ui()
+
+
 @pytest.mark.parametrize("native_tracker", [False, True])
 def should_tune_only_follower_zoom_and_preserve_config_reset(monkeypatch, native_tracker):
     PlayTracker = _load_play_tracker(monkeypatch)

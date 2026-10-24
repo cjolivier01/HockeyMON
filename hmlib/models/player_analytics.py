@@ -6,7 +6,6 @@ Hockey PARSeq weights are CC BY-NC 3.0; STGCN++ labels are generic NTU60 actions
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
 import tempfile
@@ -16,6 +15,8 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+
+from hmlib.utils.checksum import sha256_file
 
 logger = logging.getLogger(__name__)
 _ASSETS = {
@@ -34,8 +35,7 @@ def model_contract(feature: str) -> dict:
 
 
 def _digest(path: Path) -> str:
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+    return sha256_file(path)
 
 
 def prepare_player_model(feature: str, cache_dir: Path | None = None) -> Path:

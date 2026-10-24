@@ -139,6 +139,10 @@ def should_resample_recordings_without_changing_source_timing_or_audio(
             finally:
                 reader.close()
     assert len(plugin.output_paths()) == 2
+    assert {path: kind for path, kind in plugin.output_kinds()} == {
+        path: "stitched" if path.name == "stitched_output.mkv" else "program"
+        for path in plugin.output_paths()
+    }
 
 
 def should_resample_live_rtmp_at_recording_fps_and_keep_source_audio_timing(tmp_path):

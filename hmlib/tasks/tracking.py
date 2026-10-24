@@ -50,6 +50,7 @@ def run_mmtrack(
     telemetry = None
     supplementary_paths = []
     output_paths = []
+    output_kinds = []
     if config is None:
         config = {}
     try:
@@ -727,6 +728,8 @@ def run_mmtrack(
                 supplementary_paths.extend(node.module.supplementary_paths())
             if node.module.enabled and hasattr(node.module, "output_paths"):
                 output_paths.extend(node.module.output_paths())
+            if node.module.enabled and hasattr(node.module, "output_kinds"):
+                output_kinds.extend(node.module.output_kinds())
     return RecordingArtifacts(
         telemetry.path if telemetry is not None else None,
         tuple(dict.fromkeys(supplementary_paths)),
@@ -736,4 +739,5 @@ def run_mmtrack(
             and aspen_net.shared["hm_ui_process"].stop_requested
         ),
         tuple(dict.fromkeys(output_paths)),
+        tuple(dict.fromkeys(output_kinds)),
     )

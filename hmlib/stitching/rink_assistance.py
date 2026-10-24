@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from hmlib.stitching.rink_projection import panorama_rays, rays_to_sources
+from hmlib.utils.checksum import sha256_file
 
 LOGGER = logging.getLogger(__name__)
 MODEL_SHA256 = "76b96e34a9386267c08e0edc6cb09b2196a94a933b27e2f92fcae5d9f0426a08"
@@ -45,8 +46,7 @@ def model_path():
     )
     if path.is_file():
         if not override:
-            with path.open("rb") as handle:
-                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            digest = sha256_file(path)
             if digest != MODEL_SHA256:
                 raise ValueError(f"Rink landmark model checksum mismatch: {path}")
         return path

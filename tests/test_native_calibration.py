@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ def snapshot(tmp_path):
         (directory / name).write_bytes(data)
         manifest["artifacts"][name] = {
             "size": len(data),
-            "sha256": native.hashlib.sha256(data).hexdigest(),
+            "sha256": hashlib.sha256(data).hexdigest(),
         }
     (directory / "native-calibration.yaml").write_text(yaml.safe_dump(manifest))
     return directory, manifest
@@ -54,6 +55,36 @@ def should_preserve_native_fractional_sync_and_source_order(snapshot):
     }
     with pytest.raises(ValueError, match="different or changed left"):
         result.verify_sources(result.game_directory, swapped)
+
+
+def should_use_selected_game_for_explicit_native_inputs_in_distinct_directories(snapshot, tmp_path):
+    from dataclasses import replace
+
+    from hmlib.cli.hmtrack import _stitching_input_directory
+
+    directory, _ = snapshot
+    native_snapshot = native.load_native_calibration(directory)
+    videos = {}
+    for role in ("left", "right"):
+        folder = tmp_path / (role + "-recordings")
+        folder.mkdir()
+        path = folder / "source.mp4"
+        path.write_bytes(role.encode())
+        videos[role] = [str(path)]
+    native_snapshot = replace(
+        native_snapshot,
+        sources={role: [native._identity(Path(paths[0]))] for role, paths in videos.items()},
+    )
+    inputs = [videos[role][0] for role in ("left", "right")]
+    game = _stitching_input_directory(inputs, native_snapshot.game_directory, native_snapshot)
+    assert Path(game) == native_snapshot.game_directory
+    native_snapshot.verify_sources(Path(game), videos)
+    wrong_game = _stitching_input_directory(inputs, tmp_path, native_snapshot)
+    with pytest.raises(ValueError, match="different game"):
+        native_snapshot.verify_sources(Path(wrong_game), videos)
+    Path(inputs[0]).write_bytes(b"replacement")
+    with pytest.raises(ValueError, match="changed left"):
+        native_snapshot.verify_sources(Path(game), videos)
 
 
 def should_reject_calibration_for_a_different_game(snapshot, tmp_path):
@@ -75,6 +106,12 @@ def should_reject_corrupted_mapping_even_at_the_same_size(snapshot):
     (directory / "mapping_0000_x.tif").write_bytes(b"modified")
     with pytest.raises(ValueError, match="checksum changed"):
         native.load_native_calibration(directory)
+
+
+def should_validate_snapshots_without_python_311_file_digest(snapshot, monkeypatch):
+    directory, _ = snapshot
+    monkeypatch.delattr(hashlib, "file_digest", raising=False)
+    assert native.load_native_calibration(directory).directory == directory
 
 
 def should_reject_artifact_symlinks(snapshot, tmp_path):
@@ -135,7 +172,7 @@ def should_reuse_native_mask_pixels_without_modifying_game(snapshot):
     data = (directory / "rink_mask_0.png").read_bytes()
     manifest["artifacts"]["rink_mask_0.png"] = {
         "size": len(data),
-        "sha256": native.hashlib.sha256(data).hexdigest(),
+        "sha256": hashlib.sha256(data).hexdigest(),
     }
     (directory / "native-calibration.yaml").write_text(yaml.safe_dump(manifest))
     result = native.load_native_calibration(directory)

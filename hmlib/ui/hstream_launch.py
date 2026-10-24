@@ -10,7 +10,7 @@ import os
 import re
 import shlex
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -168,6 +168,16 @@ class LaunchPlan:
     start_frame: int = 0
     limit_seconds: float | None = None
     limit_frames: int | None = None
+    initial_settings: dict = field(default_factory=dict)
+
+    def launch_receipt(self) -> dict:
+        """Tell the desktop which outputs the initial Python invocation resolved."""
+        return {
+            "version": 1,
+            "game_id": self.game.name,
+            "sinks": sorted(self.sinks),
+            "telemetry": bool(self.config["hm_shared_ui"]["telemetry"]),
+        }
 
     def write(self, session: Path, *, seek_seconds: float = 0) -> list[str]:
         config_path = session / "launch.yaml"
@@ -237,6 +247,30 @@ def option_assignments(value: str) -> list[str]:
         raise ValueError(f"Malformed launch options: {value}")
     entries.append(value[start:])
     return entries
+
+
+def _initial_output_routes(settings: dict, sinks: set[str]) -> None:
+    """Apply only explicitly supplied initial settings to the desktop routes."""
+    missing = object()
+    if get_path(settings, "video_out.output_video_path"):
+        sinks.add("ENCODE_FILE")
+    for key, sink in (
+        ("hm_ui.run.save_video", "ENCODE_FILE"),
+        ("video_out.archive_program", "ENCODE_FILE"),
+        ("video_out.archive_stitched", "ENCODE_STITCHED_FILE"),
+        ("video_out.archive_program_4k", "ENCODE_PROGRAM_4K_FILE"),
+        ("video_out.show_youtube", "RTMP"),
+        ("video_out.rtsp_enabled", "RTSP"),
+    ):
+        value = get_path(settings, key, missing)
+        if value is missing or value is None:
+            continue
+        if not isinstance(value, (bool, int)) or value not in (False, True, 0, 1):
+            raise ValueError(f"Initial output setting {key} must be boolean")
+        if value:
+            sinks.add(sink)
+        else:
+            sinks.discard(sink)
 
 
 def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> LaunchPlan:
@@ -362,10 +396,14 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
     set_path(config, "video_out.archive_program_4k", "ENCODE_PROGRAM_4K_FILE" in sinks)
     set_path(config, "video_out.show_youtube", "RTMP" in sinks)
     set_path(config, "video_out.rtsp_enabled", "RTSP" in sinks)
+    initial_settings = {}
     if initial_args is not None:
         for filename in initial_args.config or []:
             path = Path(filename)
-            config = merge(config, read_mapping(path if path.is_absolute() else cwd / path))
+            layer = read_mapping(path if path.is_absolute() else cwd / path)
+            _initial_output_routes(layer, sinks)
+            initial_settings = merge(initial_settings, layer)
+            config = merge(config, layer)
         explicit_names = {
             python_parser._option_string_actions[token.split("=", 1)[0]].dest
             for token in explicit
@@ -375,8 +413,43 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
             config, initial_args, parser=python_parser, explicit_arg_names=explicit_names
         )
         hm_opts.apply_config_overrides(config, initial_args.config_overrides)
+        explicit_settings = {}
+        hm_opts.apply_arg_config_overrides(
+            explicit_settings, initial_args, parser=python_parser, explicit_arg_names=explicit_names
+        )
+        hm_opts.apply_config_overrides(explicit_settings, initial_args.config_overrides)
+        initial_settings = merge(initial_settings, explicit_settings)
+        _initial_output_routes(explicit_settings, sinks)
+        if initial_args.output_video or initial_args.output_file:
+            sinks.add("ENCODE_FILE")
+        if initial_args.no_save_video:
+            sinks.discard("ENCODE_FILE")
         if initial_args.no_audio:
             set_path(config, "pipeline.hmaudio.enable", False)
+            set_path(initial_settings, "pipeline.hmaudio.enable", False)
+        if {"lfo", "rfo"} & explicit_names:
+            if initial_args.lfo is None or initial_args.rfo is None:
+                raise ValueError("Manual synchronization requires both --lfo and --rfo")
+            for layer in (config, initial_settings):
+                set_path(layer, "stitching.sync_method", "manual")
+                set_path(
+                    layer,
+                    "game.stitching.frame_offsets",
+                    {"left": initial_args.lfo, "right": initial_args.rfo},
+                )
+        # Original CLI/config intent precedes generated flags. Freeze the same
+        # routes for worker construction, seek admission and the UI receipt.
+        set_path(config, "hm_ui.run.save_video", "ENCODE_FILE" in sinks)
+        for key, sink in (
+            ("archive_program", "ENCODE_FILE"),
+            ("archive_stitched", "ENCODE_STITCHED_FILE"),
+            ("archive_program_4k", "ENCODE_PROGRAM_4K_FILE"),
+            ("show_youtube", "RTMP"),
+            ("rtsp_enabled", "RTSP"),
+        ):
+            set_path(config, "video_out." + key, sink in sinks)
+        if not sinks:
+            sinks.add("FAKE")
     paths = graph_paths(selected_analysis(config))
     graph_config = {}
     for path in paths:
@@ -472,6 +545,7 @@ def make_plan(args: argparse.Namespace, *, initial: Path | None = None) -> Launc
             else args.time_limit
         ),
         initial_args.max_frames if initial_args else None,
+        initial_settings,
     )
 
 

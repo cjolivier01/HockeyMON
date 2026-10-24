@@ -123,7 +123,7 @@ def should_launch_initial_configured_single_source_with_cli_overrides(
     assert "--play" in launch["command"] and "--game-id=launch-test" in launch["command"]
 
 
-def should_scope_anonymous_initial_sources_to_the_desktop_lifetime(tmp_path, monkeypatch):
+def should_keep_anonymous_game_after_the_desktop_exits(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "relative.mp4").write_bytes(b"fixture")
     arguments = ["--input-video", "relative.mp4", "--camera-ui=1", "-t=2"]
@@ -132,8 +132,10 @@ def should_scope_anonymous_initial_sources_to_the_desktop_lifetime(tmp_path, mon
     assert launch["envelope"]["anonymous"] is True
     assert launch["envelope"]["cwd"] == str(tmp_path)
     assert launch["sources"] == {"source": [str(tmp_path / "relative.mp4")]}
-    assert not Path(launch["environment"]["HM_GAME_DIR"]).exists()
-    assert not (tmp_path / "games").exists()
+    game_root = Path(launch["environment"]["HM_GAME_DIR"])
+    assert game_root == tmp_path / "games"
+    game = game_root / launch["envelope"]["game_id"]
+    assert read_config(game)["game"]["videos"] == launch["sources"]
 
 
 def should_preserve_explicit_initial_input_and_publication_choices(

@@ -34,6 +34,7 @@ class RecordingArtifacts:
     supplementary_paths: tuple[Path, ...] = ()
     stopped: bool = False
     output_paths: tuple[Path, ...] = ()
+    output_kinds: tuple[tuple[Path, str], ...] = ()
 
 
 def configuration_snapshot(value, active=None, path="root"):

@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 
 from hmlib.log import logger
-from hmlib.utils.gpu import unwrap_tensor
+from hmlib.utils.gpu import unwrap_tensor, wrap_tensor
 from hmlib.utils.image import image_height, image_width, make_visible_image, resize_image
 
 # Bumped whenever the spec gains a field the sidecar has to understand. The
@@ -87,6 +87,7 @@ class HmUiProcess:
         self.session_id = uuid.uuid4().hex
         attached_dir = os.environ.get("HM_UI_SESSION_DIR") if tmpdir is None else None
         self._attached = attached_dir is not None
+        self._selected_preview_only = os.environ.get("HM_SHARED_UI_BACKEND") == "1"
         self._tmpdir = (
             Path(attached_dir)
             if attached_dir
@@ -635,12 +636,15 @@ class HmUiProcess:
         max_width: int = 1280,
         min_interval_seconds: float | None = None,
         metadata: dict | list[dict] | None = None,
+        snapshot: bool = False,
     ) -> None:
         if self._closed:
             return
         if name not in self.preview_paths:
             return
         if self._selected_preview_name == "none":
+            return
+        if self._selected_preview_only and name != self._selected_preview_name:
             return
         if min_interval_seconds is None:
             min_interval_seconds = 1.0 / 15.0 if name == self._selected_preview_name else 1.0
@@ -652,6 +656,24 @@ class HmUiProcess:
                 return
             if now - self._last_preview_write_monotonic[name] < min_interval_seconds:
                 return
+            if snapshot:
+                # Source tabs must retain decoded pixels before the processing
+                # graph can grade/draw on them. Own only a bounded frame, and
+                # keep tensor resizing on its GPU before the worker readback.
+                frame = unwrap_tensor(img)
+                if frame.ndim == 4:
+                    frame = frame[-1]
+                width = image_width(frame)
+                if max_width > 0 and width > max_width:
+                    height = max(1, round(image_height(frame) * max_width / width))
+                    frame = (
+                        cv2.resize(frame, (max_width, height), interpolation=cv2.INTER_AREA)
+                        if isinstance(frame, np.ndarray)
+                        else resize_image(frame, new_width=max_width, new_height=height)
+                    )
+                else:
+                    frame = frame.copy() if isinstance(frame, np.ndarray) else frame.clone()
+                img = frame if isinstance(frame, np.ndarray) else wrap_tensor(frame)
             # Keep one pending frame per stream. Replacing a queued frame makes
             # preview publication lossy and bounded instead of slowing tracking.
             self._pending_preview_jobs[name] = _PreviewJob(

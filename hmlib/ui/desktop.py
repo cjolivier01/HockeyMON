@@ -64,8 +64,10 @@ def launch_desktop(
                 "game_id": game_id,
             }
             if not game_id:
-                game_id = _anonymous_game(directory, arguments or [])
-                environment["HM_GAME_DIR"] = str(directory / "games")
+                game_root = Path(environment.get("HM_GAME_DIR", str(Path.home() / "Videos")))
+                game_root = game_root.expanduser().resolve()
+                game_id = _anonymous_game(game_root, arguments or [])
+                environment["HM_GAME_DIR"] = str(game_root)
                 launch["game_id"] = game_id
                 launch["anonymous"] = True
             request = directory / "launch.json"
@@ -79,7 +81,7 @@ def launch_desktop(
         return subprocess.call(command, env=environment)
 
 
-def _anonymous_game(directory: Path, arguments: list[str]) -> str:
+def _anonymous_game(game_root: Path, arguments: list[str]) -> str:
     import yaml
 
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
@@ -96,16 +98,17 @@ def _anonymous_game(directory: Path, arguments: list[str]) -> str:
     for path in paths:
         if not path.is_file():
             raise FileNotFoundError(path)
-    game_id = "session-input"
-    game = directory / "games" / game_id
-    game.mkdir(parents=True)
+    game_root.mkdir(parents=True, exist_ok=True)
+    # Recordings, calibration and telemetry belong to a durable game. Only the
+    # initial launch envelope is temporary; closing the UI never removes a run.
+    game = Path(tempfile.mkdtemp(prefix="session-input-", dir=game_root))
     names = ["source"] if len(paths) == 1 else ["left", "right"]
     videos = {name: [str(path)] for name, path in zip(names, paths)}
     (game / "config.yaml").write_text(
         yaml.safe_dump({"game": {"videos": videos}, "stitching": {"enabled": len(paths) == 2}}),
         encoding="utf-8",
     )
-    return game_id
+    return game.name
 
 
 def use_desktop(camera_ui: int) -> bool:

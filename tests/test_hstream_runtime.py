@@ -146,19 +146,35 @@ def should_activate_preview_after_owner_receipt_and_encode_png(runtime, tmp_path
     ui.publish_runtime(frame=20, fps=10)
     Image.new("RGB", (32, 20), "red").save(tmp_path / "preview-stitched.jpg")
     write_document(tmp_path / "preview-stitched.json", {"width": 320, "height": 200})
-    assert protocol.handle_line("@set-preview-active stitched 1")
+    assert protocol.handle_line("@set-preview-active stitched 2")
     protocol.poll()
     assert not any("channel=stitched status=ready" in line for line in messages)
     ui.apply_runtime_requests(lambda: True)
     protocol.poll()
     assert ui._selected_preview_name == "Stitched"
-    assert any("channel=stitched status=activated generation=1" in line for line in messages)
-    assert any("channel=stitched status=ready generation=1" in line for line in messages)
+    assert any("channel=stitched status=activated generation=2" in line for line in messages)
+    assert any("channel=stitched status=ready generation=2" in line for line in messages)
     destination = tmp_path / "captured.png"
     assert protocol.handle_line(f"@capture-preview-frame stitched {destination}")
     with Image.open(destination) as captured:
         assert captured.format == "PNG"
         assert captured.size == (32, 20)
+
+
+@pytest.mark.parametrize("channel,name", [("program", "Final"), ("stitched", "Stitched")])
+def should_report_initial_selected_preview_at_the_native_first_generation(
+    runtime, tmp_path, channel, name
+):
+    ui, _, messages = runtime
+    protocol = RuntimeProtocol(tmp_path, messages.append, initial_preview=channel)
+    ui.publish_runtime(frame=1, fps=15)
+    path = ui.preview_paths[name]
+    Image.new("RGB", (32, 20), "blue").save(path)
+    write_document(path.with_suffix(".json"), {"width": 32, "height": 20})
+    protocol.poll()
+    assert f"HSTREAM_PREVIEW_RUNTIME status=ready channel={channel} generation=1" in messages
+    assert protocol.replay_state["preview"] == name
+    assert not protocol.handle_line(f"@set-preview-active {channel} 1")
 
 
 def should_report_native_seek_errors_and_absolute_frame_progress(runtime):

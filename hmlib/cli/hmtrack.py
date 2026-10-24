@@ -1529,6 +1529,20 @@ def is_stitching(input_video: str) -> bool:
     return len(input_video_files) == 2 or os.path.isdir(input_video)
 
 
+def _stitching_input_directory(input_files: list[str], game_directory, native_calibration) -> str:
+    """Resolve storage ownership separately from the locations of source media."""
+    if native_calibration is not None:
+        if not game_directory:
+            raise ValueError("Shared native calibration requires the selected game directory")
+        return str(Path(game_directory).resolve())
+    if len(input_files) == 2:
+        parents = {Path(path).resolve().parent for path in input_files}
+        if len(parents) != 1:
+            raise ValueError("Python calibration requires both inputs in one directory")
+        return str(parents.pop())
+    return input_files[0]
+
+
 class _StitchRotationController:
     def __init__(self, game_config: dict[str, Any] | None = None) -> None:
         self._config = game_config
@@ -1647,7 +1661,9 @@ def _main(args, num_gpu):
                         args.input_video = game_video_dir
 
         work_dir_id = args.game_id or "input-video"
-        results_folder = os.path.join(".", "output_workdirs", work_dir_id)
+        results_folder = os.environ.get("HM_SHARED_WORK_DIR") or os.path.join(
+            ".", "output_workdirs", work_dir_id
+        )
         os.makedirs(results_folder, exist_ok=True)
         args.work_dir = results_folder
         # The rink plugin snapshots the mask it actually loads this run.
@@ -2046,21 +2062,37 @@ def _main(args, num_gpu):
                     )
                 project_file_name = "hm_project.pto"
 
+                from hmlib.stitching.native_calibration import shared_native_calibration
+
+                native_calibration = shared_native_calibration()
+                dir_name = _stitching_input_directory(
+                    input_video_files, args.game_dir, native_calibration
+                )
+
                 game_videos = {}
 
                 if len(input_video_files) == 2:
-                    vl = input_video_files[0]
-                    vr = input_video_files[1]
-                    dir_name = os.path.dirname(vl)
-                    assert dir_name == os.path.dirname(vr)
+                    vl = str(Path(input_video_files[0]).resolve())
+                    vr = str(Path(input_video_files[1]).resolve())
                     game_videos = {"left": [vl], "right": [vr]}
                 elif os.path.isdir(args.input_video):
-                    game_videos = configure_game_videos(
-                        game_id=args.game_id,
-                        inference_scale=getattr(args, "ice_rink_inference_scale", None),
-                    )
-                    dir_name = args.input_video
-                    assert dir_name
+                    if native_calibration is not None:
+                        game_videos = {
+                            role: [
+                                str(
+                                    Path(path)
+                                    if Path(path).is_absolute()
+                                    else Path(dir_name) / path
+                                )
+                                for path in native_calibration.config["game"]["videos"][role]
+                            ]
+                            for role in ("left", "right")
+                        }
+                    else:
+                        game_videos = configure_game_videos(
+                            game_id=args.game_id,
+                            inference_scale=args.ice_rink_inference_scale,
+                        )
                     input_video_files = game_videos
 
                 source_video_paths = list(game_videos["left"]) + list(game_videos["right"])
@@ -2099,9 +2131,6 @@ def _main(args, num_gpu):
                 if not args.max_frames and args.max_time:
                     args.max_frames = time_to_frame(time_str=args.max_time, fps=left_vid.fps)
 
-                from hmlib.stitching.native_calibration import shared_native_calibration
-
-                native_calibration = shared_native_calibration()
                 if native_calibration is not None:
                     native_calibration.verify_sources(Path(dir_name), game_videos)
                     pto_project_file = native_calibration.directory / "hm_project.pto"
@@ -2491,6 +2520,7 @@ def _main(args, num_gpu):
         telemetry_path = None
         supplementary_paths = ()
         recorded_output_paths = None
+        recorded_output_kinds = ()
         if not args.audio_only:
 
             if not args.no_play_tracking:
@@ -2534,6 +2564,7 @@ def _main(args, num_gpu):
             telemetry_path = recording_artifacts.telemetry_path
             supplementary_paths = recording_artifacts.supplementary_paths
             recorded_output_paths = recording_artifacts.output_paths
+            recorded_output_kinds = recording_artifacts.output_kinds
             is_truncated_run = is_truncated_run or recording_artifacts.stopped
 
     except Exception as ex:
@@ -2573,6 +2604,7 @@ def _main(args, num_gpu):
         telemetry_path=telemetry_path,
         supplementary_paths=supplementary_paths,
         recorded_output_paths=recorded_output_paths,
+        recorded_output_kinds=recorded_output_kinds,
     )
     logger.info("Completed")
     return telemetry_path
@@ -2588,8 +2620,23 @@ def _deploy_output_artifacts(
     telemetry_path: Path | None = None,
     supplementary_paths: tuple[Path, ...] = (),
     recorded_output_paths: tuple[Path, ...] | None = None,
+    recorded_output_kinds: tuple[tuple[Path, str], ...] = (),
 ) -> Path | None:
     """Publish a completed run with one suffix for its video, CSVs, and rink mask."""
+    output_kinds = {path.resolve(): kind for path, kind in recorded_output_kinds}
+    if telemetry_path is not None:
+        output_kinds[telemetry_path.resolve()] = "telemetry"
+    if output_video_path:
+        output_kinds.setdefault(Path(output_video_path).resolve(), "program")
+
+    def publish(sources, directory, **kwargs):
+        kinds = {
+            name: output_kinds[Path(path).resolve()]
+            for name, path in sources.items()
+            if Path(path).resolve() in output_kinds
+        }
+        return publish_artifacts(sources, directory, kinds=kinds, **kwargs)
+
     sources = {}
     if target_deploy_dir:
         sources = {
@@ -2641,13 +2688,13 @@ def _deploy_output_artifacts(
             )
             video_sources = dict(sources) if same_directory else {}
             video_sources[destination.name] = source_video
-            result = publish_artifacts(
+            result = publish(
                 video_sources,
                 destination.parent,
                 generation_directories=[target_deploy_dir] if target_deploy_dir else (),
             )
             if target_deploy_dir and not same_directory:
-                publish_artifacts(
+                publish(
                     {artifact_name(name, result.suffix): path for name, path in sources.items()},
                     target_deploy_dir,
                     exact=True,
@@ -2665,19 +2712,19 @@ def _deploy_output_artifacts(
         if target_deploy_dir and destination.parent.resolve() == Path(target_deploy_dir).resolve():
             if destination.resolve() != source_video.resolve():
                 csv_sources[destination.name] = source_video
-            publish_artifacts(csv_sources, target_deploy_dir, exact=True)
+            publish(csv_sources, target_deploy_dir, exact=True)
         else:
             if destination.resolve() != source_video.resolve():
-                publish_artifacts({destination.name: source_video}, destination.parent, exact=True)
+                publish({destination.name: source_video}, destination.parent, exact=True)
             if target_deploy_dir:
-                publish_artifacts(csv_sources, target_deploy_dir, exact=True)
+                publish(csv_sources, target_deploy_dir, exact=True)
         return destination
     if target_deploy_dir:
         video_name = None
         if source_video is not None:
             video_name = str(add_game_id_prefix_to_filename(source_video.name, game_id, sep="-"))
             sources[video_name] = source_video
-        result = publish_artifacts(sources, target_deploy_dir)
+        result = publish(sources, target_deploy_dir)
         return result.files.get(video_name)
     return None
 

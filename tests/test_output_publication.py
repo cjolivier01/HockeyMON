@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -197,6 +198,48 @@ def should_deploy_video_and_csvs_as_one_generation(tmp_path):
     assert published_video.name == "game-tracking_output-with-audio-3.mp4"
     assert published_video.read_bytes() == b"video"
     assert (destination / "tracking-3.csv").read_bytes() == sources["tracking.csv"].read_bytes()
+
+
+@pytest.mark.parametrize("game_id", ["rink-4k", "stitched-rink"])
+@pytest.mark.parametrize(
+    "explicit_name", [None, "stitched-4k-custom.mkv", "stitched-4k-custom-9.mkv"]
+)
+def should_publish_logical_roles_with_exact_automatic_and_custom_paths(
+    tmp_path, monkeypatch, game_id, explicit_name
+):
+    from hmlib.cli.hmtrack import _deploy_output_artifacts
+
+    work = tmp_path / "work"
+    work.mkdir()
+    primary, stitched, four_k = [
+        work / name for name in ("tracking_output.mkv", "side-view.mkv", "large-view.mkv")
+    ]
+    for path in (primary, stitched, four_k):
+        path.write_bytes(path.name.encode())
+    receipt = tmp_path / "receipt.json"
+    monkeypatch.setenv("HM_BACKEND_PUBLICATION_FILE", str(receipt))
+    game = tmp_path / game_id
+    result = _deploy_output_artifacts(
+        output_video_path=str(primary),
+        output_video=str(game / explicit_name) if explicit_name else None,
+        results_folder=str(work),
+        target_deploy_dir=str(game),
+        game_id=game_id,
+        supplementary_paths=(stitched, four_k),
+        recorded_output_paths=(primary, stitched, four_k),
+        recorded_output_kinds=(
+            (primary, "program"),
+            (stitched, "stitched"),
+            (four_k, "program-4k"),
+        ),
+    )
+    records = json.loads(receipt.read_text())
+    by_kind = {record["kind"]: record for record in records}
+    assert set(by_kind) == {"program", "stitched", "program-4k"}
+    assert by_kind["program"]["path"] == str(result)
+    assert Path(by_kind["stitched"]["path"]).read_bytes() == stitched.read_bytes()
+    assert Path(by_kind["program-4k"]["path"]).read_bytes() == four_k.read_bytes()
+    assert len({record["version"] for record in records}) == 1
 
 
 def should_publish_current_segments_without_republishing_a_stale_primary(tmp_path):

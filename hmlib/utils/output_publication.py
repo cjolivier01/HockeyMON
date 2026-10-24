@@ -86,6 +86,7 @@ def publish_artifacts(
     suffix: int | None = None,
     exact: bool = False,
     generation_directories: Sequence[str | Path] = (),
+    kinds: Mapping[str, str] | None = None,
 ) -> PublishedArtifacts:
     """Copy a generation into destination storage and publish tracking last.
 
@@ -106,9 +107,21 @@ def publish_artifacts(
     Additional ``generation_directories`` contribute their existing numbers
     when an explicit video is saved separately from its game-directory CSVs.
     Exact companion publication still rejects concurrent destination collisions.
+    ``kinds`` carries the producer's logical video/telemetry roles into the
+    desktop receipt; filenames and game IDs never determine those roles.
     """
     directory = Path(directory)
     names = list(sources)
+    kinds = {} if kinds is None else dict(kinds)
+    if set(kinds) - set(sources) or set(kinds.values()) - {
+        "program",
+        "stitched",
+        "program-4k",
+        "telemetry",
+    }:
+        raise ValueError(
+            "Publication kinds must identify selected artifacts with supported logical roles"
+        )
     literal_names = exact and suffix is None
     if literal_names:
         versions = set()
@@ -252,7 +265,12 @@ def publish_artifacts(
             path = Path(receipt)
             records = json.loads(path.read_text()) if path.exists() else []
             records.extend(
-                {"name": name, "path": str(target.resolve()), "version": suffix}
+                {
+                    "name": name,
+                    "path": str(target.resolve()),
+                    "version": suffix,
+                    **({"kind": kinds[name]} if name in kinds else {}),
+                }
                 for name, target in candidates.items()
             )
             write_json(path, records)

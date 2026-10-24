@@ -67,7 +67,16 @@ backend. Installing HockeyMON's wheel alone does not install HStream or Qt.
 Original `hmtrack` and `hmstitch` arguments travel in a private launch document,
 including the invocation directory used for relative paths. The document applies
 to the first launch and is removed when the desktop closes. A launch with explicit
-input files and no game ID uses a private temporary game for that desktop session.
+input files and no game ID creates a uniquely named `session-input-*` game under
+the selected `HM_GAME_DIR`/`--root` directory (default: `$HOME/Videos`). Its saved
+configuration, calibration, recordings and telemetry remain after the desktop
+closes. Only the initial launch envelope is temporary.
+
+Python working outputs use a unique
+`${HM_OUTPUT_WORK_DIR:-$HOME/hstream_output}/<game>/runs/hockeymon-*` directory.
+Failed runs retain that directory for recovery. Default desktop workers start
+there; an original CLI launch retains its working directory for relative
+arguments while writing its processing outputs to the durable run directory.
 
 ## Processing and workflow ownership
 

@@ -734,6 +734,13 @@ class StitchingPlugin(Plugin):
                     logger.warning("Source color statistics unavailable: %s", error)
                     pre_stats_list.append(None)
 
+        # Source tabs show decoded pixels before downstream color/stitch work.
+        # The bridge queues only the selected channel in shared desktop runs.
+        ui = context.get("shared", {}).get("hm_ui_process")
+        if ui is not None and not ui.closed:
+            for index, source in enumerate(imgs[:2], start=1):
+                ui.publish_preview(wrap_tensor(source), name=f"Camera {index}", snapshot=True)
+
         if self._left_color_pipeline is not None:
             try:
                 data_0 = {"img": imgs[0]}
@@ -754,13 +761,6 @@ class StitchingPlugin(Plugin):
                 logger.warning(
                     "Right stitch color pipeline failed; using unadjusted input", exc_info=True
                 )
-
-        ui = context.get("shared", {}).get("hm_ui_process")
-        if ui is not None and not ui.closed:
-            for index, source in enumerate(imgs[:2], start=1):
-                name = f"Camera {index}"
-                if name in ui.preview_paths:
-                    ui.publish_preview(wrap_tensor(source), name=name)
 
         device = imgs[0].device
         self._create_stitcher(context=context, imgs=imgs, device=device)

@@ -44,8 +44,12 @@ Normal launches accept the shared desktop's game, source/sink, time, model and
 settings arguments. Transport settings that describe the native mux are checked
 against their supported values; unknown settings fail visibly. Original `hmtrack`
 arguments and working directory travel in a private initial-launch envelope and
-apply only to that first run. An initial `hmstitch` envelope is translated into
-the native calibration workflow. Python-only processing arguments that have no
+apply only to that first run. Explicit initial output requests override the UI’s
+starting route choices. Before processing, `HM_BACKEND_LAUNCH` reports the resolved
+routes so the desktop displays them, disables incompatible seeks and requires
+the correct publication artifacts. An initial `hmstitch` envelope is translated into
+the native calibration workflow. Explicit initial settings also override generated
+UI options during native preparation. Python-only processing arguments that have no
 native calibration meaning are rejected with an explanation.
 
 Native `--settings-overlay` carries structured one-run settings without rewriting
@@ -61,18 +65,27 @@ scoreboard selection and output rotation follow the shared native protocol.
 Seek replaces the worker, clears stale preview/control files and restores only
 acknowledged controls, overlays and selected preview. Seeking is refused while
 archives, streams or telemetry are recording, matching the desktop's admission
-rules.
+rules. The desktop sends Python Stop through the supervisor’s `q` command so
+archive and telemetry finalization can finish before forced process-group cleanup.
+A Stop during native preparation produces a cancelled-before-processing receipt;
+requested outputs are shown as having no file.
 
 On Linux, a small process guard owns each worker and audio player, reaps their
 decoder descendants after crashes or parent death, and bounds forced shutdown.
 It stays in the desktop's process group so pause and resume cover the complete
 processing tree. Seeking retains the original start-frame/time origin and stops
 local audio until the replacement worker produces its first frame.
+The desktop's thirty-second Stop deadline still escalates
+to termination of the process group if shutdown does not finish.
 
 Python preview frames use bounded JPEG files read by the existing Qt preview
 surfaces. Preview-only players/play/rink drawings use immutable metadata and the
 actual image transforms; they do not change archive overlays. Full source images
-are not copied to the UI every frame. The single-source scoreboard selector saves
+are not copied to the UI every frame. Only the selected channel is published,
+at most fifteen times per second. Camera 1 covers single-source games and the
+left camera; Camera 2 covers the right camera. Their raw decoded frames are
+copied at preview resolution before downstream color or drawing changes.
+The single-source scoreboard selector saves
 one reference canvas, including when the scoreboard is initially disabled;
 dual-source selection uses the native-owned canvas and its provenance.
 

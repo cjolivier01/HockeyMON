@@ -89,6 +89,17 @@ class Supervisor:
             HM_SHARED_RENDER_REALTIME="1" if args.render_realtime else "0",
             HM_BACKEND_PUBLICATION_FILE=str(session / "publication.json"),
         )
+        output_root = Path(
+            self.environment.get("HM_OUTPUT_WORK_DIR", str(Path.home() / "hstream_output"))
+        ).expanduser()
+        if not output_root.is_absolute():
+            output_root = self.plan.cwd / output_root
+        runs = output_root.resolve() / self.plan.game.name / "runs"
+        self.environment["HM_OUTPUT_WORK_DIR"] = str(output_root.resolve())
+        runs.mkdir(parents=True, exist_ok=True)
+        self.working_directory = Path(tempfile.mkdtemp(prefix="hockeymon-", dir=runs))
+        self.worker_cwd = self.plan.cwd if self.initial else self.working_directory
+        self.environment["HM_SHARED_WORK_DIR"] = str(self.working_directory)
         source_info = [_media_info(paths) for paths in self.plan.sources.values()]
         self.source_info = dict(zip(self.plan.sources, source_info))
         from hmlib.ui.hstream_launch import get_path, set_path
@@ -137,6 +148,7 @@ class Supervisor:
             graph=self.plan.graph,
             total_ns=round(self.duration * 1e9),
             start_ns=round(self.plan.start_seconds * 1e9),
+            initial_preview=args.ui_preview_active,
         )
         self.child = None
         self.phase = "preparing"
@@ -159,6 +171,15 @@ class Supervisor:
         self._old_handlers = {}
         for kind in (signal.SIGINT, signal.SIGTERM):
             self._old_handlers[kind] = signal.signal(kind, self._stop_signal)
+        if parent := self.environment.get("HSTREAM_UI_PARENT_PID"):
+            import ctypes
+
+            libc = ctypes.CDLL(None, use_errno=True)
+            if libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error))
+            if not parent.isdecimal() or int(parent) != os.getppid():
+                raise ValueError("HockeyMON backend has a stale or invalid HSTREAM_UI_PARENT_PID")
         try:
             self.selector.register(sys.stdin.fileno(), selectors.EVENT_READ, "stdin")
         except PermissionError as error:
@@ -254,9 +275,14 @@ class Supervisor:
             "--enable-sinks=FAKE",
             "--time-limit=1",
         ]
+        from hmlib.ui.hstream_initial import prefer_initial_settings
+
+        args = prefer_initial_settings(args, self.plan.initial_settings)
         self._spawn([self.native, *args], phase="calibration")
         code = self._pump()
-        if code != 0 or self.stop_requested:
+        if self.stop_requested:
+            return
+        if code != 0:
             raise RuntimeError(f"Shared calibration stopped with status {code}")
         from hmlib.stitching.native_calibration import prepare_native_calibration
 
@@ -320,7 +346,7 @@ class Supervisor:
         write_document(self.session / "replay-controls.json", self.protocol.replay_state)
         command = self.plan.write(self.session, seek_seconds=offset_ns / 1e9)
         command[command.index("hmlib.cli.hmtrack")] = "hmlib.cli.hstream_worker"
-        self._spawn(command, phase="python", cwd=self.plan.cwd)
+        self._spawn(command, phase="python", cwd=self.worker_cwd)
         self.stop_deadline = None
 
     def seek(self, target_ns: int, generation: int) -> None:
@@ -386,12 +412,12 @@ class Supervisor:
         self.protocol.graph = plan.graph
 
     def _line(self, line: str) -> None:
-        if self.phase == "calibration":
+        if line in {"q", "quit"}:
+            self.stop_requested = True
+        elif self.phase == "calibration":
             if self.child and self.child.poll() is None:
                 self.child.stdin.write((line + "\n").encode())
                 self.child.stdin.flush()
-        elif line in {"q", "quit"}:
-            self.stop_requested = True
         else:
             self.protocol.handle_line(line)
 
@@ -460,7 +486,22 @@ class Supervisor:
     def run(self) -> int:
         try:
             (self.session / "publication.json").unlink(missing_ok=True)
+            emit("HM_BACKEND_LAUNCH " + json.dumps(self.plan.launch_receipt()))
             self._prepare()
+            if self.stop_requested:
+                emit(
+                    "HM_BACKEND_PUBLICATION "
+                    + json.dumps(
+                        {
+                            "version": 1,
+                            "status": "cancelled",
+                            "stage": "preparing",
+                            "game_id": self.plan.game.name,
+                            "artifacts": [],
+                        }
+                    )
+                )
+                return 0
             self._prepare_audio()
             self._python()
             while True:
@@ -492,18 +533,14 @@ class Supervisor:
             records = json.loads(receipt.read_text()) if receipt.is_file() else []
             artifacts = []
             for record in records:
-                path = Path(record["path"])
-                if path.suffix == ".db":
-                    kind = "telemetry"
-                elif path.suffix.lower() in {".mp4", ".mkv", ".mov"}:
-                    kind = (
-                        "program-4k"
-                        if "4k" in path.name.lower()
-                        else "stitched" if "stitched" in path.name else "program"
-                    )
-                else:
+                kind = record.get("kind")
+                if kind is None:
+                    if Path(record["path"]).suffix.lower() in {".mp4", ".mkv", ".mov", ".db"}:
+                        raise ValueError("Published media artifact has no logical kind")
                     continue
-                artifacts.append({**record, "kind": kind})
+                if kind not in {"program", "stitched", "program-4k", "telemetry"}:
+                    raise ValueError(f"Unknown published artifact kind: {kind}")
+                artifacts.append(record)
             emit(
                 "HM_BACKEND_PUBLICATION "
                 + json.dumps(

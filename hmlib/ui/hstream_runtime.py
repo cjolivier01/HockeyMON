@@ -141,6 +141,7 @@ class RuntimeProtocol:
         graph: dict | None = None,
         total_ns: int | None = None,
         start_ns: int = 0,
+        initial_preview: str = "program",
         request_timeout: float = 5.0,
     ) -> None:
         self.session = Path(session)
@@ -161,9 +162,11 @@ class RuntimeProtocol:
         self._generation = 0
         self._pause_generation = 0
         self._progress_generation = 0
-        self._preview_generation = 0
-        self._preview_requested_generation = 0
-        self._active_channel = "program"
+        if initial_preview not in PREVIEW_NAMES or initial_preview == "main":
+            raise ValueError(f"Unknown initial preview channel: {initial_preview}")
+        self._preview_generation = 1
+        self._preview_requested_generation = 1
+        self._active_channel = initial_preview
         self._preview_ready_identity: tuple | None = None
         self._runtime_mtime: int | None = None
         self._last_position_ns = 0

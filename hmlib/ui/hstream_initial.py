@@ -8,7 +8,53 @@ from pathlib import Path
 
 import yaml
 
-from hmlib.ui.hstream_launch import native_application_config, seconds, set_path, strip_options
+from hmlib.ui.hstream_launch import (
+    get_path,
+    native_application_config,
+    option_assignments,
+    seconds,
+    set_path,
+    strip_options,
+)
+
+
+def prefer_initial_settings(arguments: list[str], explicit: dict) -> list[str]:
+    """Keep generated UI options only when the original invocation did not own them."""
+    aliases = {
+        "hstream_ui.camera_controls.Exposure_x100": "rink.camera.color.exposure_ev",
+        "hstream_ui.camera_controls.Bring_Up_Shadows": "rink.camera.color.shadow_lift",
+        "hstream_ui.camera_controls.Lift_Shadow_Black_Point": "rink.camera.color.shadow_lift_black_point",
+    }
+    missing = object()
+    result, index = [], 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token.split("=", 1)[0] != "--options":
+            result.append(token)
+            index += 1
+            continue
+        if "=" in token:
+            value = token.split("=", 1)[1]
+            index += 1
+        else:
+            value = arguments[index + 1]
+            index += 2
+        retained = []
+        for assignment in option_assignments(value):
+            key = assignment.partition("=")[0]
+            if (
+                get_path(explicit, key, missing) is missing
+                and get_path(explicit, aliases.get(key, key), missing) is missing
+            ):
+                retained.append(assignment)
+        if retained:
+            result.append("--options=" + ",".join(retained))
+    reference_time = get_path(explicit, "stitching.stitch_frame_time", missing)
+    if reference_time is not missing:
+        result = strip_options(result, {"--stitch-frame-time"})
+        if reference_time is not None:
+            result.append("--stitch-frame-time=" + str(reference_time))
+    return result
 
 
 def calibration_arguments(
@@ -81,6 +127,11 @@ def calibration_arguments(
     )
     hm_opts.apply_arg_config_overrides(config, opts, parser=parser, explicit_arg_names=names)
     hm_opts.apply_config_overrides(config, opts.config_overrides)
+    explicit_settings = {}
+    hm_opts.apply_arg_config_overrides(
+        explicit_settings, opts, parser=parser, explicit_arg_names=names
+    )
+    hm_opts.apply_config_overrides(explicit_settings, opts.config_overrides)
     if opts.input_video:
         paths = [(cwd / value).resolve(strict=True) for value in opts.input_video.split(",")]
         if len(paths) == 2 and all(path.is_file() for path in paths):
@@ -98,6 +149,7 @@ def calibration_arguments(
             raise ValueError("Manual synchronization requires both --lfo and --rfo")
         set_path(config, "game.stitching.frame_offsets", {"left": opts.lfo, "right": opts.rfo})
         set_path(config, "stitching.sync_method", "manual")
+        set_path(explicit_settings, "stitching.sync_method", "manual")
     if opts.output_video:
         set_path(config, "pipeline.sink5.output-file", str((cwd / opts.output_video).resolve()))
         arguments = strip_options(arguments, {"--enable-sinks"}) + [
@@ -113,6 +165,7 @@ def calibration_arguments(
         ]
     if opts.no_audio:
         set_path(config, "pipeline.hmaudio.enable", False)
+        set_path(explicit_settings, "pipeline.hmaudio.enable", False)
     if opts.start_frame_time:
         arguments = strip_options(arguments, {"--start-time", "-s"}) + [
             "--start-time=" + opts.start_frame_time
@@ -132,5 +185,6 @@ def calibration_arguments(
     overlay.write_text(yaml.safe_dump(config, sort_keys=False))
     if not any(value.split("=", 1)[0] in {"-c", "--config"} for value in arguments):
         arguments += ["-c", str(native_application_config(runner))]
+    arguments = prefer_initial_settings(arguments, explicit_settings)
     arguments += ["--settings-overlay=" + str(overlay)]
     return arguments, cwd

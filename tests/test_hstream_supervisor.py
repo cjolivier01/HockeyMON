@@ -113,10 +113,30 @@ while True: time.sleep(.02)
             parent.wait(timeout=2)
 
 
+def should_bind_native_parent_identity_to_the_immediate_guard(tmp_path, monkeypatch):
+    monkeypatch.setenv("HSTREAM_UI_PARENT_PID", "99999999")
+    result = subprocess.run(
+        guarded_command(
+            [
+                sys.executable,
+                "-c",
+                "import os; assert int(os.environ['HSTREAM_UI_PARENT_PID']) == os.getppid()",
+            ]
+        ),
+        capture_output=True,
+        text=True,
+        timeout=8,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.fixture
 def supervisor(tmp_path, monkeypatch):
     from hmlib.cli import hstream_backend
     from hmlib.ui import hstream_launch
+
+    monkeypatch.setenv("HM_OUTPUT_WORK_DIR", str(tmp_path / "work"))
 
     game = tmp_path / "game"
     game.mkdir()
@@ -172,6 +192,38 @@ def should_keep_resolved_frame_origin_precision_and_effective_config_during_nati
     assert captured[0]["stitching"]["dtype"] == "float32"
     assert supervisor.plan.start_seconds == 1
     assert supervisor.plan.limit_seconds == 4
+
+
+def should_keep_default_worker_files_in_durable_output_storage(supervisor, monkeypatch):
+    work = supervisor.working_directory
+    assert work.is_dir()
+    assert work.parent == supervisor.session / "work" / "game" / "runs"
+    assert supervisor.worker_cwd == work
+    assert supervisor.environment["HM_SHARED_WORK_DIR"] == str(work)
+    (work / "incomplete.mkv").write_bytes(b"recoverable working recording")
+
+    def fail():
+        raise RuntimeError("native startup failed")
+
+    monkeypatch.setattr(supervisor, "_prepare", fail)
+    with pytest.raises(RuntimeError, match="native startup failed"):
+        supervisor.run()
+    assert (work / "incomplete.mkv").read_bytes() == b"recoverable working recording"
+
+
+def should_preserve_initial_argument_cwd_while_using_durable_working_outputs(
+    supervisor, monkeypatch
+):
+    monkeypatch.setenv("HM_UI_INITIAL_LAUNCH", str(supervisor.session / "initial.json"))
+    instance = Supervisor(supervisor.args, [], supervisor.session)
+    try:
+        assert instance.worker_cwd == instance.plan.cwd
+        assert instance.environment["HM_SHARED_WORK_DIR"] == str(instance.working_directory)
+        assert instance.working_directory != supervisor.working_directory
+    finally:
+        instance.selector.close()
+        for kind, handler in instance._old_handlers.items():
+            signal.signal(kind, handler)
 
 
 def should_clear_previous_worker_artifacts_and_replay_acknowledged_controls(
@@ -279,3 +331,73 @@ def should_finish_other_cleanup_even_when_worker_cleanup_fails(supervisor, monke
         with pytest.raises(RuntimeError, match="cleanup failed"):
             supervisor.run()
     assert cleaned == ["child", "audio", "protocol"]
+
+
+@pytest.mark.parametrize("command", ["q", "quit"])
+def should_stop_native_preparation_without_starting_a_python_worker(
+    supervisor, monkeypatch, capfd, command
+):
+    marker = supervisor.session / "native-stopped"
+    native = supervisor.session / "native-runner"
+    native.write_text(
+        f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\nfor line in sys.stdin:\n    if line.strip() == 'q':\n        Path({str(marker)!r}).write_text('stopped')\n        break\n"
+    )
+    native.chmod(0o755)
+    supervisor.native = str(native)
+    supervisor.args.config = ["native.yaml"]
+    spawn = supervisor._spawn
+
+    def start_and_stop(*args, **kwargs):
+        spawn(*args, **kwargs)
+        supervisor._line(command)
+
+    monkeypatch.setattr(supervisor, "_spawn", start_and_stop)
+    monkeypatch.setattr(
+        supervisor,
+        "_python",
+        lambda: pytest.fail("Python must not start after stopping calibration"),
+    )
+    assert supervisor.run() == 0
+    assert marker.read_text() == "stopped"
+    assert supervisor.snapshot is None
+    output = capfd.readouterr().out
+    assert output.count("HM_BACKEND_LAUNCH ") == 1
+    receipt = json.loads(
+        next(
+            line.split(" ", 1)[1]
+            for line in output.splitlines()
+            if line.startswith("HM_BACKEND_PUBLICATION ")
+        )
+    )
+    assert receipt["status"] == "cancelled" and receipt["stage"] == "preparing"
+    assert receipt["artifacts"] == []
+
+
+@pytest.mark.parametrize("game_id", ["rink-4k", "stitched-rink"])
+def should_report_producer_output_kinds_without_interpreting_filenames(
+    supervisor, monkeypatch, capsys, game_id
+):
+    supervisor.plan.game = supervisor.session / game_id
+    records = [
+        {
+            "name": "stitched-4k-custom.mkv",
+            "path": str(supervisor.plan.game / "stitched-4k-custom-1.mkv"),
+            "version": 1,
+            "kind": "program",
+        }
+    ]
+    monkeypatch.setattr(supervisor, "_prepare", lambda: None)
+    monkeypatch.setattr(supervisor, "_prepare_audio", lambda: None)
+    monkeypatch.setattr(
+        supervisor,
+        "_python",
+        lambda: (supervisor.session / "publication.json").write_text(json.dumps(records)),
+    )
+    monkeypatch.setattr(supervisor, "_pump", lambda: 0)
+    assert supervisor.run() == 0
+    line = next(
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.startswith("HM_BACKEND_PUBLICATION ")
+    )
+    assert json.loads(line.split(" ", 1)[1])["artifacts"] == records
