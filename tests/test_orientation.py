@@ -1,7 +1,9 @@
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
-import hmlib.orientation as orientation
+import pytest
+
+from hmlib import orientation
 
 
 def should_configure_cameras_with_different_chapter_counts(monkeypatch, tmp_path):
@@ -12,7 +14,7 @@ def should_configure_cameras_with_different_chapter_counts(monkeypatch, tmp_path
         "left": {index: str(path) for index, path in enumerate(left_files, start=1)},
         "right": {index: str(path) for index, path in enumerate(right_files, start=1)},
     }
-    saved: Dict[str, Any] = {}
+    saved: dict[str, Any] = {}
 
     monkeypatch.setattr(orientation, "get_game_dir", lambda game_id: str(game_dir))
     monkeypatch.setattr(
@@ -47,3 +49,35 @@ def should_configure_cameras_with_different_chapter_counts(monkeypatch, tmp_path
             }
         },
     }
+
+
+def should_use_selected_sources_before_discovered_aliases(monkeypatch, tmp_path):
+    monkeypatch.setattr(orientation, "get_game_dir", lambda game_id: str(tmp_path))
+    monkeypatch.setattr(
+        orientation,
+        "get_game_config_private",
+        lambda game_id: {
+            "game": {"videos": {"left": ["selected-left.mp4"], "right": ["selected-right.mp4"]}}
+        },
+    )
+
+    def discovery_must_not_run(**kwargs):
+        raise AssertionError("Removed recordings must not be rediscovered")
+
+    monkeypatch.setattr(orientation, "get_available_videos", discovery_must_not_run)
+    assert orientation.configure_game_videos("game") == {
+        "left": [str(tmp_path / "selected-left.mp4")],
+        "right": [str(tmp_path / "selected-right.mp4")],
+    }
+
+
+def should_require_reimport_after_removing_an_explicit_source(monkeypatch, tmp_path):
+    monkeypatch.setattr(orientation, "get_game_dir", lambda game_id: str(tmp_path))
+    monkeypatch.setattr(
+        orientation,
+        "get_game_config_private",
+        lambda game_id: {"game": {"videos": {"left": [], "right": ["right.mp4"]}}},
+    )
+    (tmp_path / "left.mp4").write_bytes(b"preserved original")
+    with pytest.raises(ValueError, match="Import both left and right"):
+        orientation.configure_game_videos("game")

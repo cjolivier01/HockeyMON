@@ -6,7 +6,7 @@ Aspen pipelines to prepare frames for downstream models.
 @see @ref hmlib.hm_opts.hm_opts "hm_opts" for CLI flags that configure video-frame behavior.
 """
 
-from typing import Any, Dict, List, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -45,7 +45,7 @@ class HmCropToVideoFrame:
         self._enabled = enabled
         self._pass: int = 0
 
-    def __call__(self, results: Dict[str, Any]) -> Dict[str, Any]:
+    def __call__(self, results: dict[str, Any]) -> dict[str, Any]:
         if not self._enabled:
             return results
         self._pass += 1
@@ -63,13 +63,13 @@ class HmCropToVideoFrame:
             video_frame_cfg["output_frame_height"] = image_height(images)
             return results
         current_boxes = results["camera_box"]
-        cropped_images: List[torch.Tensor] = []
+        cropped_images: list[torch.Tensor] = []
         src_image_height = image_height(images)
         src_image_width = image_width(images)
         images = unwrap_tensor(images)
         if not torch.is_floating_point(images):
             images = to_float_image(images, dtype=torch.float)
-        for img, bbox in zip(images, current_boxes):
+        for index, (img, bbox) in enumerate(zip(images, current_boxes)):
             # box_h = height(bbox)
             # box_w = width(bbox)
             # box_ar = box_w / box_h
@@ -111,6 +111,19 @@ class HmCropToVideoFrame:
             img = crop_image(img, x1, y1, x2, y2)
             video_frame_width = int(video_frame_cfg["output_frame_width"])
             video_frame_height = int(video_frame_cfg["output_frame_height"])
+            if results.get("shared_preview_metadata") is not None:
+                from hmlib.ui.preview_overlays import compose_transform
+
+                scale_x = video_frame_width / (x2 - x1)
+                scale_y = video_frame_height / (y2 - y1)
+                transform = np.array(
+                    [
+                        [scale_x, 0, (0.5 - x1) * scale_x - 0.5],
+                        [0, scale_y, (0.5 - y1) * scale_y - 0.5],
+                        [0, 0, 1],
+                    ]
+                )
+                compose_transform(results["shared_preview_metadata"], index, transform)
             image_h = image_height(img)
             image_w = image_width(img)
             # Make sure they have the same aspect ratio
@@ -146,7 +159,7 @@ class HmUnsharpMask:
         self._enabled = enabled
         self._image_label = image_label
 
-    def __call__(self, results: Dict[str, Any]) -> Dict[str, Any]:
+    def __call__(self, results: dict[str, Any]) -> dict[str, Any]:
         if self._enabled:
             results[self._image_label] = unsharp_mask(results[self._image_label])
         return results
@@ -165,13 +178,15 @@ class HmMakeVisibleImage:
     @param enabled: If ``True``, apply the conversion to each call.
     """
 
-    def __init__(self, enabled: bool = True, image_labels: list[str] = ["img", "ez_img"]) -> None:
+    def __init__(
+        self, enabled: bool = True, image_labels: tuple[str, ...] = ("img", "ez_img")
+    ) -> None:
         self._enabled = enabled
         self._image_labels = image_labels
 
     @staticmethod
     def _make_visible_image(
-        img: Union[torch.Tensor, StreamTensorBase],
+        img: torch.Tensor | StreamTensorBase,
     ) -> torch.Tensor:
         """Convert an input image tensor to a visible uint8 format.
 
@@ -185,7 +200,7 @@ class HmMakeVisibleImage:
         img = img.contiguous()
         return img
 
-    def __call__(self, results: Dict[str, Any]) -> Dict[str, Any]:
+    def __call__(self, results: dict[str, Any]) -> dict[str, Any]:
         if not self._enabled:
             return results
         for label in self._image_labels:

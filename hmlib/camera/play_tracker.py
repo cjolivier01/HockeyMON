@@ -1,13 +1,12 @@
 """High-level play tracker that controls camera pan/zoom from detections."""
 
-from __future__ import absolute_import, division, print_function
-
 import copy
 import csv
 import os
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -47,9 +46,8 @@ from hmlib.utils.gpu import unwrap_tensor, wrap_tensor
 from hmlib.utils.image import image_height, image_width, make_channels_last
 from hmlib.utils.progress_bar import ProgressBar
 from hmlib.utils.shadow_lift import shadow_lift_settings
-from hockeymon.core import AllLivingBoxConfig, BBox, HmLogLevel
+from hockeymon.core import AllLivingBoxConfig, BBox, HmLogLevel, PlayTrackerConfig
 from hockeymon.core import PlayTracker as CppPlayTracker
-from hockeymon.core import PlayTrackerConfig
 
 from .camera_transformer import (
     CameraNorm,
@@ -59,6 +57,7 @@ from .camera_transformer import (
 )
 from .hm_ui_bridge import HmUiDialog, HmUiProcess
 from .living_box import PyLivingBox, from_bbox, to_bbox
+from .operator_controls import OperatorControls
 
 _CPP_BOXES: bool = True
 # _CPP_BOXES: bool = False
@@ -91,12 +90,12 @@ _EXPOSURE_EV_X10_SLIDER_ZERO: int = -_EXPOSURE_EV_X10_MIN  # 40 -> 0.0 EV
 _FIXED_EDGE_ROTATION_X10_MAX: int = 900
 
 
-def _load_cluster_centroids_csv(path: Optional[str]) -> Optional[torch.Tensor]:
+def _load_cluster_centroids_csv(path: str | None) -> torch.Tensor | None:
     if not path:
         return None
     if not os.path.exists(path):
         return None
-    rows: List[List[float]] = []
+    rows: list[list[float]] = []
     try:
         with open(path, "r", encoding="utf-8", newline="") as handle:
             reader = csv.reader(handle)
@@ -111,9 +110,11 @@ def _load_cluster_centroids_csv(path: Optional[str]) -> Optional[torch.Tensor]:
                     continue
                 try:
                     rows.append([float(row[0]), float(row[1])])
-                except Exception:
+                except (ValueError, TypeError) as error:
+                    logger.warning("Skipping invalid cluster centroid row: %s", error)
                     continue
-    except Exception:
+    except (OSError, csv.Error, UnicodeError) as error:
+        logger.warning("Could not read saved cluster centroids: %s", error)
         return None
     if not rows:
         return None
@@ -125,7 +126,8 @@ def _save_cluster_centroids_csv(path: str, centroids: torch.Tensor) -> bool:
         return False
     try:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    except Exception:
+    except OSError as error:
+        logger.warning("Could not create cluster centroid output directory: %s", error)
         return False
     data = centroids.detach().cpu().to(dtype=torch.float32)
     try:
@@ -136,7 +138,8 @@ def _save_cluster_centroids_csv(path: str, centroids: torch.Tensor) -> bool:
                 if len(row) >= 2:
                     writer.writerow([row[0], row[1]])
         return True
-    except Exception:
+    except (OSError, csv.Error, ValueError, TypeError) as error:
+        logger.warning("Could not save cluster centroids: %s", error)
         return False
 
 
@@ -187,23 +190,27 @@ class BreakawayDetection:
 
 @HM.register_module()
 class PlayTracker(torch.nn.Module):
+    _operator_controls: OperatorControls | None = None
+    _rink_guide = None
+    _rink_map = None
+
     def __init__(
         self,
         hockey_mon: HockeyMON,
         play_box: torch.Tensor,
         device: torch.device,
-        original_clip_box: Optional[torch.Tensor],
-        progress_bar: Optional[ProgressBar],
-        game_config: Dict[str, Any],
-        game_id: Optional[str] = None,
+        original_clip_box: torch.Tensor | None,
+        progress_bar: ProgressBar | None,
+        game_config: dict[str, Any],
+        game_id: str | None = None,
         cam_ignore_largest: bool = True,
         no_wide_start: bool = False,
-        track_ids: Optional[Union[str, List[int], Set[int]]] = None,
+        track_ids: str | list[int] | set[int] | None = None,
         debug_play_tracker: bool = False,
         plot_individual_player_tracking: bool = False,
         plot_tracking_circles: bool = False,
         plot_boundaries: bool = False,
-        plot_all_detections: Optional[float] = None,
+        plot_all_detections: float | None = None,
         plot_trajectories: bool = False,
         plot_speed: bool = False,
         plot_jersey_numbers: bool = False,
@@ -211,12 +218,12 @@ class PlayTracker(torch.nn.Module):
         plot_moving_boxes: bool = False,
         camera_ui: int = 0,
         camera_controller: str = "rule",
-        camera_model: Optional[str] = None,
+        camera_model: str | None = None,
         camera_window: int = 8,
         force_stitching: bool = False,
-        stitch_rotation_controller: Optional[Any] = None,
-        cluster_centroids: Optional[torch.Tensor] = None,
-        cluster_centroids_path: Optional[str] = None,
+        stitch_rotation_controller: Any | None = None,
+        cluster_centroids: torch.Tensor | None = None,
+        cluster_centroids_path: str | None = None,
         save_cluster_centroids: bool = False,
         cpp_boxes: bool = _CPP_BOXES,
         cpp_playtracker: bool = _CPP_PLAYTRACKER,
@@ -256,11 +263,11 @@ class PlayTracker(torch.nn.Module):
         @param cpp_boxes: If True, use C++ BBox types internally.
         @param cpp_playtracker: If True, use the C++ PlayTracker backend.
         """
-        super(PlayTracker, self).__init__()
-        self._game_config: Dict[str, Any] = game_config
-        self._open_game_config: Dict[str, Any] = copy.deepcopy(game_config)
-        self._game_id: Optional[str] = game_id
-        self._system_game_config: Dict[str, Any] = copy.deepcopy(game_config)
+        super().__init__()
+        self._game_config: dict[str, Any] = game_config
+        self._open_game_config: dict[str, Any] = copy.deepcopy(game_config)
+        self._game_id: str | None = game_id
+        self._system_game_config: dict[str, Any] = copy.deepcopy(game_config)
         if camera_ui and game_id:
             try:
                 self._system_game_config = get_config(
@@ -285,7 +292,7 @@ class PlayTracker(torch.nn.Module):
             game_config, "rink.tracking.cam_oversized_percent", 100.0
         )
         if not isinstance(self._cam_ignore_oversized, bool):
-            raise ValueError("cam_ignore_oversized must be a boolean")
+            raise ValueError("cam_ignore_oversized must be a boolean")  # noqa: TRY004
         player_size_exclusion_mask(
             torch.empty((0, 4)),
             self._cam_ignore_largest_count,
@@ -301,11 +308,11 @@ class PlayTracker(torch.nn.Module):
         )
         self._plot_tracking_circles: bool = bool(plot_tracking_circles)
         self._plot_boundaries: bool = bool(plot_boundaries)
-        self._plot_all_detections: Optional[float] = plot_all_detections
+        self._plot_all_detections: float | None = plot_all_detections
         self._cpp_boxes = cpp_boxes
         self._cpp_playtracker = cpp_playtracker
-        self._playtracker: Union[PlayTracker, None] = None
-        self._ui_dirty_paths: Set[Tuple[str, ...]] = set()
+        self._playtracker: PlayTracker | None = None
+        self._ui_dirty_paths: set[tuple[str, ...]] = set()
         self._hockey_mon: HockeyMON = hockey_mon
         self._plot_cluster_tracking = plot_cluster_tracking or debug_play_tracker
         self._plot_speed = bool(plot_speed)
@@ -318,8 +325,8 @@ class PlayTracker(torch.nn.Module):
         self._device = device
         self._horizontal_image_gaussian_distribution = None
         self._boundaries = None
-        self._cluster_man: Optional[ClusterMan] = None
-        self._cluster_centroids: Optional[torch.Tensor] = None
+        self._cluster_man: ClusterMan | None = None
+        self._cluster_centroids: torch.Tensor | None = None
         self._cluster_centroids_path = cluster_centroids_path
         self._save_cluster_centroids = bool(save_cluster_centroids)
         self._cluster_centroids_saved = False
@@ -327,7 +334,7 @@ class PlayTracker(torch.nn.Module):
         self._original_clip_box = original_clip_box
         self._progress_bar = progress_bar
         self._camera_ui_enabled = bool(camera_ui)
-        self._hm_ui_process: Optional[HmUiProcess] = None
+        self._hm_ui_process: HmUiProcess | None = None
         self._ui_window_name = "Tracker Controls"
         self._ui_inited = False
         self._ui_color_window_name = "Tracker Controls (Color)"
@@ -337,13 +344,14 @@ class PlayTracker(torch.nn.Module):
         self._ui_color_left_inited = False
         self._ui_color_right_inited = False
         # Per-window slider defaults: {window_name: {slider_name: default_value}}
-        self._ui_defaults: Dict[str, Dict[str, int]] = {}
-        self._ui_dialogs: Dict[str, HmUiDialog] = {}
+        self._ui_defaults: dict[str, dict[str, int]] = {}
+        self._ui_dialogs: dict[str, HmUiDialog] = {}
         self._ui_controls_dirty = True
         self._ui_action_retry_after_monotonic = 0.0
         self._ui_action_retry_delay_seconds = 0.0
-        self._fixed_edge_rotation_last_sliders: Tuple[int, int] = (0, 0)
+        self._fixed_edge_rotation_last_sliders: tuple[int, int] = (0, 0)
         self._stitch_rotation_controller = stitch_rotation_controller
+        self._shared_precision_reported = False
         self._force_stitching: bool = bool(force_stitching)
         self._stitch_slider_enabled = False
 
@@ -351,12 +359,12 @@ class PlayTracker(torch.nn.Module):
         self._camera_controller = (
             "gpt" if camera_controller == "drivegpt" else camera_controller or "rule"
         )
-        self._camera_model: Optional[CameraPanZoomTransformer] = None
-        self._camera_norm: Optional[CameraNorm] = None
+        self._camera_model: CameraPanZoomTransformer | None = None
+        self._camera_norm: CameraNorm | None = None
         self._camera_window: int = int(camera_window)
         self._camera_feat_buf: deque = deque(maxlen=self._camera_window)
-        self._camera_prev_center: Optional[Tuple[float, float]] = None
-        self._camera_prev_h: Optional[float] = None
+        self._camera_prev_center: tuple[float, float] | None = None
+        self._camera_prev_h: float | None = None
         self._camera_aspect = float(self._final_aspect_ratio)
 
         if cluster_centroids is None and self._cluster_centroids_path:
@@ -374,12 +382,12 @@ class PlayTracker(torch.nn.Module):
                 self._cluster_centroids_path
                 and self._save_cluster_centroids
                 and not self._cluster_centroids_saved
-            ):
-                if _save_cluster_centroids_csv(self._cluster_centroids_path, centroids_tensor):
-                    self._cluster_centroids_saved = True
+            ) and _save_cluster_centroids_csv(self._cluster_centroids_path, centroids_tensor):
+                self._cluster_centroids_saved = True
 
         self._jersey_tracker = JerseyTracker(show=bool(plot_jersey_numbers))
         self._action_tracker = ActionTracker(show=bool(plot_actions))
+        self._current_jersey_labels = None
         # Cache for rink_profile (combined_mask, centroid, etc.) pulled from data samples meta
         self._rink_profile_cache = None
 
@@ -413,7 +421,7 @@ class PlayTracker(torch.nn.Module):
         self._validate_required_camera_config()
 
         # Tracking specific ids
-        self._track_ids: Set[int] = set()
+        self._track_ids: set[int] = set()
         if track_ids:
             if isinstance(track_ids, str):
                 ids_iter = (int(i) for i in track_ids.split(",") if i)
@@ -603,7 +611,7 @@ class PlayTracker(torch.nn.Module):
                 #
                 # Initialize `_current_roi` MovingBox with `current_roi_config`
                 #
-                self._current_roi: Union[MovingBox, PyLivingBox] = PyLivingBox(
+                self._current_roi: MovingBox | PyLivingBox = PyLivingBox(
                     "Current ROI",
                     to_bbox(start_box, self._cpp_boxes),
                     current_roi_config,
@@ -612,7 +620,7 @@ class PlayTracker(torch.nn.Module):
                 )
 
                 # Initialize `_current_roi_aspect` MovingBox with `current_roi_aspect_config`
-                self._current_roi_aspect: Union[MovingBox, PyLivingBox] = PyLivingBox(
+                self._current_roi_aspect: MovingBox | PyLivingBox = PyLivingBox(
                     "AspectRatio",
                     to_bbox(start_box, self._cpp_boxes),
                     current_roi_aspect_config,
@@ -635,23 +643,22 @@ class PlayTracker(torch.nn.Module):
                 try:
                     scaled_max_positions = max(
                         2,
-                        int(round(float(pt_config.play_detector.max_positions) * fps_speed_scale)),
+                        round(float(pt_config.play_detector.max_positions) * fps_speed_scale),
                     )
                     scaled_max_vel_positions = max(
                         2,
-                        int(
-                            round(
-                                float(pt_config.play_detector.max_velocity_positions)
-                                * fps_speed_scale
-                            )
+                        round(
+                            float(pt_config.play_detector.max_velocity_positions) * fps_speed_scale
                         ),
                     )
-                    if scaled_max_vel_positions > scaled_max_positions:
-                        scaled_max_vel_positions = scaled_max_positions
+                    scaled_max_vel_positions = min(scaled_max_vel_positions, scaled_max_positions)
                     pt_config.play_detector.max_positions = int(scaled_max_positions)
                     pt_config.play_detector.max_velocity_positions = int(scaled_max_vel_positions)
-                except Exception:
-                    pass
+                except (ValueError, TypeError, AttributeError, OverflowError) as error:
+                    logger.warning(
+                        "Could not scale play-detector cadence; retaining configured values: %s",
+                        error,
+                    )
 
                 pt_config.ignore_outlier_players = True  # EXPERIMENTAL
                 pt_config.ignore_left_and_right_extremes = False  # EXPERIMENTAL
@@ -689,6 +696,11 @@ class PlayTracker(torch.nn.Module):
                 self._breakaway_detection = None
 
                 self._playtracker = CppPlayTracker(BBox(0, 0, play_width, play_height), pt_config)
+                self._native_replay_base = (
+                    self._playtracker.replay_checkpoint()
+                    if os.environ.get("HM_SHARED_UI_BACKEND") == "1"
+                    else None
+                )
                 self._current_roi = None
                 self._current_roi_aspect = None
         else:
@@ -731,7 +743,7 @@ class PlayTracker(torch.nn.Module):
                 float(self._camera_cfg().get("resizing_time_to_dest_stop_speed_threshold", 0.0))
             )
 
-            self._current_roi: Union[MovingBox, PyLivingBox] = MovingBox(
+            self._current_roi: MovingBox | PyLivingBox = MovingBox(
                 label="Current ROI",
                 bbox=start_box.clone(),
                 arena_box=self.get_arena_box(),
@@ -767,7 +779,7 @@ class PlayTracker(torch.nn.Module):
             post_nonstop = self._scale_frames_for_fps(
                 int(self._require_breakaway_value("post_nonstop_stop_delay_count"))
             )
-            self._current_roi_aspect: Union[MovingBox, PyLivingBox] = MovingBox(
+            self._current_roi_aspect: MovingBox | PyLivingBox = MovingBox(
                 label="AspectRatio",
                 bbox=start_box.clone(),
                 arena_box=self.get_arena_box(),
@@ -812,6 +824,27 @@ class PlayTracker(torch.nn.Module):
 
         self._apply_zoom_in_aggressiveness(self._require_camera_value("zoom_in_aggressiveness"))
 
+        framing = get_nested_value(self._game_config, "rink.camera.rink_framing", {}) or {}
+        if framing.get("enabled") or framing.get("show_map"):
+            from hmlib.camera.rink_framing import RinkCameraGuide
+            from hmlib.config import get_game_dir
+            from hmlib.ui.calibration_workspace import prepare_rink_map
+
+            if not game_id:
+                raise ValueError("Rink framing requires a saved game and reviewed rink map")
+            self._rink_map = prepare_rink_map(get_game_dir(game_id))
+            if self._rink_map is None:
+                raise ValueError("Rink framing requires a reviewed map in Workspace → Rink map")
+            if framing.get("enabled"):
+                if not any(
+                    framing.get(key, key == "anticipate")
+                    for key in ("anticipate", "frame_goals", "adaptive_zoom")
+                ):
+                    raise ValueError("Enable a rink framing adjustment or turn rink framing off")
+                self._rink_guide = RinkCameraGuide(
+                    self._rink_map, framing, tuple(self._rink_map["image_size"])
+                )
+
         if self._camera_ui_enabled:
             self._init_ui_controls()
 
@@ -832,7 +865,15 @@ class PlayTracker(torch.nn.Module):
                 logger.info(
                     f"Loaded camera transformer from {cm_path} (window={self._camera_window})"
                 )
-            except Exception as ex:
+            except (
+                OSError,
+                RuntimeError,
+                ValueError,
+                TypeError,
+                KeyError,
+                EOFError,
+                ImportError,
+            ) as ex:
                 logger.warning(
                     f"Failed to load camera model at {cm_path}: {ex}. Falling back to rule controller."
                 )
@@ -854,7 +895,7 @@ class PlayTracker(torch.nn.Module):
         return self._play_box.clone()
 
     @staticmethod
-    def _sample_track_mask(video_data_sample, ids: torch.Tensor) -> Optional[torch.Tensor]:
+    def _sample_track_mask(video_data_sample, ids: torch.Tensor) -> torch.Tensor | None:
         meta = getattr(video_data_sample, "metainfo", None)
         if not isinstance(meta, dict):
             return None
@@ -869,7 +910,7 @@ class PlayTracker(torch.nn.Module):
         track_inst: Any,
         video_data_sample: Any,
         frame_id: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         ids = unwrap_tensor(track_inst.instances_id)
         bboxes_tlbr = unwrap_tensor(track_inst.bboxes)
         if ids.ndim == 0:
@@ -952,15 +993,15 @@ class PlayTracker(torch.nn.Module):
         self,
         online_tlwhs: torch.Tensor,
         online_ids: torch.Tensor,
-        cluster_counts: List[int],
-        centroids: Optional[torch.Tensor] = None,
+        cluster_counts: list[int],
+        centroids: torch.Tensor | None = None,
     ):
         if centroids is None:
             centroids = self._cluster_centroids
 
         if self._cluster_man is None:
 
-            if False and centroids is None:
+            if False:
                 # DEBUGGING ONLY
                 centroids = torch.tensor(
                     [[1607.35034, 391.35437], [2095.76343, 359.94247], [2361.51660, 388.40149]],
@@ -991,7 +1032,7 @@ class PlayTracker(torch.nn.Module):
                     self._cluster_centroids_saved = True
                 # Recreate cluster manager to use the saved centroids moving forward.
                 self._cluster_man = None
-        boxes_map = dict()
+        boxes_map = {}
         boxes_list = []
         for cluster_count in cluster_counts:
             largest_cluster_ids = self._cluster_man.prune_not_in_largest_cluster(
@@ -1009,11 +1050,17 @@ class PlayTracker(torch.nn.Module):
             return {}, None
         return boxes_map, torch.stack(boxes_list)
 
-    def process_jerseys_info(self, frame_index: int, frame_id: int, data: Dict[str, Any]) -> None:
+    def process_jerseys_info(self, frame_index: int, frame_id: int, data: dict[str, Any]) -> None:
+        from hmlib.aspen.player_semantics import SettledJerseys
+
+        self._current_jersey_labels = None
         jersey_results = data.get("jersey_results")
         if not jersey_results:
             return
         jersey_results = jersey_results[frame_index]
+        if isinstance(jersey_results, SettledJerseys):
+            self._current_jersey_labels = jersey_results
+            return
         if not jersey_results:
             return
         for current_info in jersey_results:
@@ -1021,21 +1068,31 @@ class PlayTracker(torch.nn.Module):
                 frame_id=frame_id, info=current_info
             )
 
-    def process_actions_info(self, frame_index: int, frame_id: int, data: Dict[str, Any]) -> None:
+    def process_actions_info(self, frame_index: int, frame_id: int, data: dict[str, Any]) -> None:
+        from hmlib.aspen.player_semantics import SettledActions
+
         action_results = data.get("action_results")
         if not action_results:
             return
         action_results = action_results[frame_index]
+        if isinstance(action_results, SettledActions):
+            # Native inference owns consensus and source-time expiry. Replace
+            # the complete drawing state, including on a gap/reset/empty frame.
+            self._action_tracker.replace(frame_id=frame_id, infos=action_results)
+            return
         if not action_results:
             return
         # action_results is a list of dicts per frame
         self._action_tracker.observe(frame_id=frame_id, infos=action_results)
 
     # @torch.jit.script
-    def forward(self, results: Dict[str, Any]):
+    def forward(self, results: dict[str, Any]):
         track_data_sample = results["data_samples"]
 
         original_images = unwrap_tensor(results.pop("original_images"))
+
+        if self._stitch_rotation_controller is None:
+            self._publish_hm_ui_preview(original_images, name="Camera 1")
 
         # Figure out what device this image should be on
         image_device = self._device
@@ -1046,17 +1103,27 @@ class PlayTracker(torch.nn.Module):
         if original_images.device != image_device:
             original_images = original_images.to(device=image_device, non_blocking=True)
 
-        frame_ids_list: List[torch.Tensor] = []
-        current_box_list: List[torch.Tensor] = []
-        current_fast_box_list: List[torch.Tensor] = []
-        camera_policy_events: List[Dict[str, Any]] = []
-        online_images: List[torch.Tensor] = []
+        if os.environ.get("HM_SHARED_UI_BACKEND") == "1" and not self._shared_precision_reported:
+            from hmlib.ui.hstream_runtime import publish_precision_status
+
+            publish_precision_status(original_images)
+            self._shared_precision_reported = True
+
+        frame_ids_list: list[torch.Tensor] = []
+        current_box_list: list[torch.Tensor] = []
+        current_fast_box_list: list[torch.Tensor] = []
+        native_current_box_list: list[torch.Tensor] = []
+        camera_policy_events: list[dict[str, Any]] = []
+        native_replay = []
+        online_images: list[torch.Tensor] = []
+        shared_preview_metadata = [] if os.environ.get("HSTREAM_UI_BACKEND_SESSION") else None
         # Per-frame player footprint centers (bottom of bbox midpoints) and ids
-        player_bottom_points_list: List[torch.Tensor] = []
-        player_ids_list: List[torch.Tensor] = []
+        player_bottom_points_list: list[torch.Tensor] = []
+        player_ids_list: list[torch.Tensor] = []
+        rink_map_points = []
 
         # Make the original images into a list so that we can release the batched one
-        original_images_list: List[Optional[torch.Tensor]] = []
+        original_images_list: list[torch.Tensor | None] = []
         for i in range(original_images.shape[0]):
             original_images_list.append(original_images[i])
         del original_images
@@ -1076,18 +1143,20 @@ class PlayTracker(torch.nn.Module):
                 frame_id=scalar_frame_id,
             )
 
+            preview_ids = online_ids
+
             self.process_jerseys_info(
                 frame_index=frame_index, frame_id=scalar_frame_id, data=results
             )
 
             # Cache rink_profile once if available in metainfo
             try:
-                if self._rink_profile_cache is None and hasattr(video_data_sample, "metainfo"):
+                if hasattr(video_data_sample, "metainfo"):
                     rp = video_data_sample.metainfo.get("rink_profile", None)
                     if rp is not None:
                         self._rink_profile_cache = rp
-            except Exception:
-                pass
+            except (AttributeError, TypeError, KeyError) as error:
+                logger.warning("Rink profile metadata unavailable: %s", error)
 
             self._frame_counter += 1
 
@@ -1100,10 +1169,10 @@ class PlayTracker(torch.nn.Module):
             #
             cluster_counts = [3, 2]
 
-            vis_ignored_tracking_ids: Union[Set[int], None] = set()
-            cluster_boxes_map: Dict[int, Union[BBox, torch.Tensor]] = {}
-            cluster_enclosing_box: Optional[torch.Tensor] = None
-            removed_cluster_outlier_box: Dict[int, Union[BBox, torch.Tensor]] = {}
+            vis_ignored_tracking_ids: set[int] | None = set()
+            cluster_boxes_map: dict[int, BBox | torch.Tensor] = {}
+            cluster_enclosing_box: torch.Tensor | None = None
+            removed_cluster_outlier_box: dict[int, BBox | torch.Tensor] = {}
 
             # Optionally use transformer-based controller
             use_transformer = (
@@ -1112,6 +1181,12 @@ class PlayTracker(torch.nn.Module):
 
             # Always sync camera UI controls so sliders affect tracking even without plotting.
             self._apply_ui_controls()
+            if os.environ.get("HM_SHARED_UI_BACKEND") == "1" and self._hm_ui_process is not None:
+                self._hm_ui_process.wait_for_shared_frame(
+                    int(scalar_frame_id),
+                    self._hockey_mon.fps_speed_scale * HockeyMON.BASE_FPS,
+                    self._apply_ui_controls,
+                )
             policy_event = self._record_camera_policy(
                 int(scalar_frame_id),
                 (image_width(online_im), image_height(online_im)),
@@ -1122,8 +1197,8 @@ class PlayTracker(torch.nn.Module):
 
             if self._playtracker is not None:
                 assert not use_transformer, "Cannot use transformer with C++ PlayTracker"
-                tracking_ids: List[int] = []
-                online_bboxes: List[BBox] = []
+                tracking_ids: list[int] = []
+                online_bboxes: list[BBox] = []
                 for tid, bbox in zip(online_ids.detach().cpu().tolist(), online_bboxes_tlbr.cpu()):
                     if tid < 0:
                         # Invalid ID
@@ -1137,12 +1212,43 @@ class PlayTracker(torch.nn.Module):
                             float(bbox[3].item()),
                         )
                     )
+                if self._native_replay_base is not None:
+                    angles = get_nested_value(
+                        self._game_config, "rink.camera.fixed_edge_rotation_angle", 0
+                    )
+                    if not isinstance(angles, (tuple, list)):
+                        angles = [angles, angles]
+                    # Python advances its native tracker even before the first
+                    # detection. Replay's wrapper therefore starts active too.
+                    native_replay.append(
+                        {
+                            "arena": self._playtracker.replay_arena(),
+                            "stepped": True,
+                            "has_received_tracks": True,
+                            "edge_rotation": [float(angle) for angle in angles],
+                            "tracks": [
+                                [tid, box.left, box.top, box.right, box.bottom]
+                                for tid, box in zip(tracking_ids, online_bboxes)
+                            ],
+                            "checkpoint": (
+                                self._playtracker.replay_checkpoint()
+                                if self._frame_counter % 60 == 1 or policy_event is not None
+                                else None
+                            ),
+                            "base_checkpoint": (
+                                self._native_replay_base
+                                if self._frame_counter % 60 == 1 or policy_event is not None
+                                else None
+                            ),
+                        }
+                    )
                 playtracker_results = self._playtracker.forward(tracking_ids, online_bboxes)
                 for msg in getattr(playtracker_results, "log_messages", []):
                     try:
                         text = msg.message
                         level = msg.level
-                    except Exception:
+                    except (AttributeError, TypeError) as error:
+                        logger.warning("Skipping malformed play-tracker status message: %s", error)
                         continue
                     if level == HmLogLevel.DEBUG:
                         logger.debug(text)
@@ -1361,8 +1467,8 @@ class PlayTracker(torch.nn.Module):
                         mask = cy > ry
                         rep_y = torch.where(mask, cy, by)
                         rep_x = cx
-                except Exception:
-                    pass
+                except (ValueError, TypeError, KeyError, RuntimeError, AttributeError) as error:
+                    logger.warning("Could not seed camera from rink profile: %s", error)
                 foot_points = torch.stack([rep_x, rep_y], dim=1).to(torch.float32)
             else:
                 foot_points = torch.empty((0, 2), dtype=torch.float32)
@@ -1487,9 +1593,17 @@ class PlayTracker(torch.nn.Module):
                 frame_id=frame_id.item() if torch.is_tensor(frame_id) else int(frame_id),
                 data=results,
             )
-            online_im = self._jersey_tracker.draw(
-                image=online_im, tracking_ids=online_ids, bboxes=online_tlwhs
-            )
+            if self._current_jersey_labels is not None:
+                if self._jersey_tracker._show:
+                    from hmlib.vis.player_labels import draw_current_jerseys
+
+                    online_im = draw_current_jerseys(
+                        online_im, online_ids, online_tlwhs, self._current_jersey_labels
+                    )
+            else:
+                online_im = self._jersey_tracker.draw(
+                    image=online_im, tracking_ids=online_ids, bboxes=online_tlwhs
+                )
             online_im = self._action_tracker.draw(
                 image=online_im, tracking_ids=online_ids, bboxes_tlwh=online_tlwhs
             )
@@ -1601,6 +1715,78 @@ class PlayTracker(torch.nn.Module):
                             thickness=2,
                         )
 
+            if self._rink_map is not None:
+                from hmlib.ui.calibration_workspace import (
+                    project_rink_points,
+                    unproject_rink_points,
+                )
+
+                rotation_changed = False
+                if self._rink_map.get("native"):
+                    frame_geometry = results["camera_input_geometry"]
+                    rotation = float(frame_geometry["post_stitch_rotate_degrees"])
+                    projection = self._rink_map["projection"]
+                    rotation_changed = projection["rotation_degrees"] != rotation
+                    projection["rotation_degrees"] = rotation
+                boxes = online_tlwhs.detach().cpu().numpy().copy()
+                boxes[:, 2:] += boxes[:, :2]
+                points = np.column_stack(((boxes[:, 0] + boxes[:, 2]) / 2, boxes[:, 3]))
+                size = (image_width(online_im), image_height(online_im))
+                rink_map_points.append(
+                    project_rink_points(
+                        points.tolist(), self._rink_map, image_size=size, allow_missing=True
+                    )
+                )
+                if self._rink_guide is not None:
+                    native_current_box_list.append(current_box_list[-1].clone())
+                    if self._rink_guide.image_size != size or rotation_changed:
+                        # Pixel histories and goal anchors belong to the frame's
+                        # projection, which may predate a newly accepted UI epoch.
+                        self._rink_guide.previous_time = None
+                        self._rink_guide.history.clear()
+                        self._rink_guide.image_size = size
+                        goal_inset = self._rink_map.get("layout", {}).get("goal_inset", 3.3528)
+                        self._rink_guide.goals = unproject_rink_points(
+                            [
+                                [goal_inset, self._rink_map["rink_size"][1] / 2],
+                                [
+                                    self._rink_map["rink_size"][0] - goal_inset,
+                                    self._rink_map["rink_size"][1] / 2,
+                                ],
+                            ],
+                            self._rink_map,
+                            image_size=size,
+                        )
+                    mask = (
+                        player_size_exclusion_mask(
+                            online_tlwhs,
+                            self._cam_ignore_largest_count if self._cam_ignore_largest else 0,
+                            self._cam_ignore_oversized,
+                            self._cam_oversized_percent,
+                        )
+                        .detach()
+                        .cpu()
+                        .numpy()
+                        if self._playtracker is not None
+                        else np.ones(len(boxes), dtype=bool)
+                    )
+                    guided = self._rink_guide.step(
+                        int(scalar_frame_id)
+                        / (HockeyMON.BASE_FPS * self._hockey_mon.fps_speed_scale),
+                        current_box_list[-1].detach().cpu().numpy(),
+                        self._play_box.detach().cpu().numpy(),
+                        boxes[mask],
+                        online_ids.detach().cpu().numpy()[mask],
+                        (
+                            cluster_enclosing_box.detach().cpu().numpy()
+                            if isinstance(cluster_enclosing_box, torch.Tensor)
+                            else None
+                        ),
+                    )
+                    current_box_list[-1] = torch.as_tensor(
+                        guided, dtype=current_box_list[-1].dtype, device=current_box_list[-1].device
+                    )
+
             if self._plot_speed:
                 vis.plot_frame_id_and_speeds(
                     online_im,
@@ -1616,15 +1802,43 @@ class PlayTracker(torch.nn.Module):
                 if online_im.ndim == 4 and online_im.shape[0] == 1:
                     online_im = online_im.squeeze(0)
             assert online_im.device == image_device
+            if shared_preview_metadata is not None:
+                shared_preview_metadata.append(
+                    {
+                        "matrix": np.eye(3),
+                        "boxes": online_bboxes_tlbr.detach().clone(),
+                        "ids": preview_ids.detach().clone(),
+                        "play_box": current_box_list[-1].detach().clone(),
+                        "fast_box": current_fast_box_list[-1].detach().clone(),
+                        "rink_mask": (self._rink_profile_cache or {}).get("combined_mask"),
+                    }
+                )
             online_images.append(make_channels_last(online_im))
 
         results["frame_ids"] = wrap_tensor(torch.stack(frame_ids_list))
         results["current_box"] = wrap_tensor(torch.stack(current_box_list))
         results["current_fast_box_list"] = wrap_tensor(torch.stack(current_fast_box_list))
+        if native_current_box_list:
+            results["native_current_box"] = wrap_tensor(torch.stack(native_current_box_list))
         results["camera_policy_events"] = camera_policy_events
+        if native_replay:
+            results["native_replay"] = native_replay
         # Attach per-frame player bottom points and ids for downstream overlays
         results["player_bottom_points"] = player_bottom_points_list
         results["player_ids"] = player_ids_list
+        if self._rink_map is not None and get_nested_value(
+            self._game_config, "rink.camera.rink_framing.show_map", False
+        ):
+            results["rink_map_overlay"] = {
+                "points": rink_map_points,
+                "size": self._rink_map["rink_size"],
+                "map_size": get_nested_value(
+                    self._game_config, "rink.camera.rink_framing.map_size", "standard"
+                ),
+                "position": get_nested_value(
+                    self._game_config, "rink.camera.rink_framing.position", "upper-right"
+                ),
+            }
         if self._rink_profile_cache is not None:
             results["rink_profile"] = self._rink_profile_cache
         # print(f"FAST: {current_fast_box_list}")
@@ -1638,7 +1852,9 @@ class PlayTracker(torch.nn.Module):
         img = wrap_tensor(img)
         img._verbose = True
         results["img"] = img
-        self._publish_hm_ui_preview(img)
+        if shared_preview_metadata is not None:
+            results["shared_preview_metadata"] = shared_preview_metadata
+        self._publish_hm_ui_preview(img, metadata=shared_preview_metadata)
 
         return results
 
@@ -1646,17 +1862,18 @@ class PlayTracker(torch.nn.Module):
     def _kelvin_slider_value(self, value: Any) -> int:
         try:
             sval = str(value).lower()
-            if sval.endswith("k"):
-                sval = sval[:-1]
+            sval = sval.removesuffix("k")
             return int(max(1000, min(15000, float(sval))))
-        except Exception:
+        except (ValueError, TypeError, OverflowError) as error:
+            logger.warning("Invalid white-balance temperature; using 6500 K: %s", error)
             return 6500
 
     def _exposure_ev_to_slider(self, value: Any) -> int:
         """Convert an exposure EV value (stops) to the 0..N slider position."""
         try:
-            ev_x10 = int(round(float(value) * 10.0))
-        except Exception:
+            ev_x10 = round(float(value) * 10.0)
+        except (ValueError, TypeError, OverflowError) as error:
+            logger.warning("Invalid exposure value; using neutral exposure: %s", error)
             ev_x10 = 0
         ev_x10 = max(_EXPOSURE_EV_X10_MIN, min(_EXPOSURE_EV_X10_MAX, ev_x10))
         return int(ev_x10 - _EXPOSURE_EV_X10_MIN)
@@ -1665,7 +1882,8 @@ class PlayTracker(torch.nn.Module):
         """Convert 0..N slider position back to exposure EV (stops)."""
         try:
             pos = int(position)
-        except Exception:
+        except (ValueError, TypeError, OverflowError) as error:
+            logger.warning("Invalid exposure slider position; using neutral exposure: %s", error)
             pos = _EXPOSURE_EV_X10_SLIDER_ZERO
         pos = max(0, min(_EXPOSURE_EV_X10_SLIDER_MAX, pos))
         ev_x10 = pos + _EXPOSURE_EV_X10_MIN
@@ -1679,8 +1897,8 @@ class PlayTracker(torch.nn.Module):
         self,
         window_name: str,
         *,
-        initial_size: Tuple[int, int],
-        position: Optional[Tuple[int, int]] = None,
+        initial_size: tuple[int, int],
+        position: tuple[int, int] | None = None,
     ):
         if self._hm_ui_process is None:
             title = "HM UI"
@@ -1688,8 +1906,13 @@ class PlayTracker(torch.nn.Module):
                 title = f"HM UI - {self._game_id}"
             self._hm_ui_process = HmUiProcess(
                 title=title,
-                preview_names=("Stitched", "Final"),
+                preview_names=(
+                    ("Stitched", "Final", "Camera 1", "Camera 2")
+                    if self._stitch_rotation_controller is not None
+                    else ("Stitched", "Final", "Camera 1")
+                ),
             )
+            self._hm_ui_process.enable_playback()
         dialog = HmUiDialog(
             self._hm_ui_process,
             window_name,
@@ -1723,12 +1946,14 @@ class PlayTracker(torch.nn.Module):
         if self._hm_ui_process.closed:
             raise RuntimeError("hm-ui was closed")
 
-    def _publish_hm_ui_preview(self, img) -> None:
+    def _publish_hm_ui_preview(self, img, *, name="Stitched", metadata=None) -> None:
         if not self._camera_ui_enabled or self._hm_ui_process is None:
             return
         try:
-            self._hm_ui_process.publish_preview(img, name="Stitched")
-        except Exception as ex:
+            self._hm_ui_process.publish_preview(
+                img, name=name, metadata=metadata, snapshot=name.startswith("Camera ")
+            )
+        except (OSError, RuntimeError, ValueError, TypeError) as ex:
             logger.warning("Failed to publish hm-ui preview frame: %s", ex)
 
     def close_ui(self) -> None:
@@ -1743,7 +1968,7 @@ class PlayTracker(torch.nn.Module):
             and not self._hm_ui_process.closed
         )
 
-    def hm_ui_process(self) -> Optional[HmUiProcess]:
+    def hm_ui_process(self) -> HmUiProcess | None:
         if not self.hm_ui_preview_active():
             return None
         return self._hm_ui_process
@@ -1758,8 +1983,8 @@ class PlayTracker(torch.nn.Module):
         return float(90 - position)
 
     def _fixed_edge_rotation_slider_defaults(
-        self, config: Optional[Dict[str, Any]] = None
-    ) -> Tuple[int, int, int]:
+        self, config: dict[str, Any] | None = None
+    ) -> tuple[int, int, int]:
         source_config = self._game_config if config is None else config
         value = get_nested_value(source_config, "rink.camera.fixed_edge_rotation_angle", 0.0)
         linked = 1
@@ -1782,7 +2007,7 @@ class PlayTracker(torch.nn.Module):
             left_x10 = right_x10 = 0
         return linked, left_x10, right_x10
 
-    def _apply_fixed_edge_rotation_controls(self) -> Union[float, List[float]]:
+    def _apply_fixed_edge_rotation_controls(self) -> float | list[float]:
         fixed_linked = bool(
             self._ui_slider_value(
                 self._ui_window_name,
@@ -1813,7 +2038,7 @@ class PlayTracker(torch.nn.Module):
                 "Right_Fixed_Edge_Rotation_Angle_x10",
                 fixed_right_x10,
             )
-            fixed_edge_rotation_angle: Union[float, List[float]] = float(fixed_left_x10) / 10.0
+            fixed_edge_rotation_angle: float | list[float] = float(fixed_left_x10) / 10.0
         else:
             fixed_edge_rotation_angle = [
                 float(fixed_left_x10) / 10.0,
@@ -1826,7 +2051,7 @@ class PlayTracker(torch.nn.Module):
         )
         return fixed_edge_rotation_angle
 
-    def _current_stitch_rotation_degrees(self) -> Optional[float]:
+    def _current_stitch_rotation_degrees(self) -> float | None:
         """Read the current post-stitch rotation from controller or config."""
         ctrl = self._stitch_rotation_controller
         if ctrl is not None:
@@ -1838,16 +2063,26 @@ class PlayTracker(torch.nn.Module):
                 if callable(val):
                     val = val()
                 return val
-            except Exception:
-                pass
+            except (AttributeError, RuntimeError, ValueError, TypeError) as error:
+                logger.warning(
+                    "Stitch rotation controller unavailable; reading configured rotation: %s", error
+                )
         try:
             return get_nested_value(self._game_config, "stitching.post_stitch_rotate_degrees")
         except (KeyError, TypeError, ValueError) as ex:
             logger.warning("Failed to read stitch rotation from runtime config: %s", ex)
             return None
 
-    def _set_stitch_rotation_degrees(self, degrees: Optional[float]) -> None:
+    def _set_stitch_rotation_degrees(self, degrees: float | None) -> None:
         """Apply post-stitch rotation to the controller and keep config in sync."""
+        if (
+            self._rink_map is not None
+            and not self._rink_map.get("native")
+            and float(degrees or 0) != float(self._current_stitch_rotation_degrees() or 0)
+        ):
+            raise ValueError(
+                "Stop playback and update the rink map before changing stitched rotation"
+            )
         ctrl = self._stitch_rotation_controller
         if ctrl is not None:
             try:
@@ -1855,7 +2090,7 @@ class PlayTracker(torch.nn.Module):
                 if callable(setter):
                     setter(degrees)
                 else:
-                    setattr(ctrl, "post_stitch_rotate_degrees", degrees)
+                    ctrl.post_stitch_rotate_degrees = degrees
             except (AttributeError, RuntimeError, TypeError, ValueError) as ex:
                 logger.warning("Failed to apply live stitch rotation: %s", ex)
         self._set_config_value(
@@ -1878,11 +2113,11 @@ class PlayTracker(torch.nn.Module):
             logger.warning("Failed to configure missing camera UI slider: %s", slider_name)
         self._on_ui_control_changed(None)
 
-    def _base_color_slider_defaults(self, color_cfg: Dict[str, Any]) -> Dict[str, int]:
+    def _base_color_slider_defaults(self, color_cfg: dict[str, Any]) -> dict[str, int]:
         shadow, black_point = shadow_lift_settings(
             color_cfg.get("shadow_lift"), color_cfg.get("shadow_lift_black_point")
         )
-        defaults: Dict[str, int] = {
+        defaults: dict[str, int] = {
             "White_Balance_Kelvin_Enable": 0,
             "White_Balance_Kelvin_Temperature": 6500,
             "White_Balance_Red_Gain_x100": 100,
@@ -1890,7 +2125,7 @@ class PlayTracker(torch.nn.Module):
             "White_Balance_Blue_Gain_x100": 100,
             "Brightness_Multiplier_x100": 100,
             "Exposure_EV_x10": _EXPOSURE_EV_X10_SLIDER_ZERO,
-            "Shadow_Lift_Percent": int(round(shadow)),
+            "Shadow_Lift_Percent": round(shadow),
             "Shadow_Lift_Black_Point": int(black_point),
             "Contrast_Multiplier_x100": 100,
             "Gamma_Multiplier_x100": 100,
@@ -1929,11 +2164,11 @@ class PlayTracker(torch.nn.Module):
                     logger.warning("Invalid camera color value %s=%r: %s", cfg_key, val, ex)
         return defaults
 
-    def _color_slider_defaults(self, config: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+    def _color_slider_defaults(self, config: dict[str, Any] | None = None) -> dict[str, int]:
         # Global stitched camera color defaults from top-level + rink camera.
         source_config = self._game_config if config is None else config
         try:
-            base_cfg: Dict[str, Any] = {}
+            base_cfg: dict[str, Any] = {}
             top_camera = source_config.get("camera", {}) if isinstance(source_config, dict) else {}
             if isinstance(top_camera, dict):
                 base_cfg.update(top_camera.get("color", {}) or top_camera)
@@ -1941,17 +2176,17 @@ class PlayTracker(torch.nn.Module):
             if isinstance(rink_camera, dict):
                 base_cfg.update(rink_camera.get("color", {}) or rink_camera)
             color_cfg = base_cfg
-        except Exception as ex:
+        except (AttributeError, ValueError, TypeError, KeyError) as ex:
             logger.warning("Failed to read camera color defaults: %s", ex)
             color_cfg = {}
         return self._base_color_slider_defaults(color_cfg)
 
     def _stitch_side_color_defaults(
-        self, side: str, config: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, int]:
+        self, side: str, config: dict[str, Any] | None = None
+    ) -> dict[str, int]:
         # Per-side stitching defaults under stitching.<side>.color (if present).
         source_config = self._game_config if config is None else config
-        cfg: Dict[str, Any] = {}
+        cfg: dict[str, Any] = {}
         try:
             if isinstance(source_config, dict):
                 stitching = source_config.get("stitching", {})
@@ -1960,12 +2195,12 @@ class PlayTracker(torch.nn.Module):
                     color_sub = side_cfg.get("color", {}) or side_cfg
                     if isinstance(color_sub, dict):
                         cfg.update(color_sub)
-        except Exception as ex:
+        except (AttributeError, ValueError, TypeError, KeyError) as ex:
             logger.warning("Failed to read %s stitch color defaults: %s", side, ex)
         return self._base_color_slider_defaults(cfg)
 
     def _set_ui_color_value_at_prefixes(
-        self, prefixes: List[Tuple[str, ...]], key: str, value: Any
+        self, prefixes: list[tuple[str, ...]], key: str, value: Any
     ):
         for prefix in prefixes:
             self._set_ui_config_value(prefix + (key,), value)
@@ -1979,7 +2214,7 @@ class PlayTracker(torch.nn.Module):
             value=value,
         )
 
-    def _apply_color_window(self, window_name: str, prefixes: List[Tuple[str, ...]]) -> None:
+    def _apply_color_window(self, window_name: str, prefixes: list[tuple[str, ...]]) -> None:
         """Read color sliders from a window and update config under given prefixes."""
         try:
             color_win = window_name
@@ -2009,7 +2244,14 @@ class PlayTracker(torch.nn.Module):
                 self._set_ui_color_value_at_prefixes(prefixes, "white_balance_temp", _MISSING)
             self._set_ui_color_value_at_prefixes(prefixes, "brightness", max(1, br100) / 100.0)
             self._set_ui_color_value_at_prefixes(
-                prefixes, "exposure_ev", self._slider_to_exposure_ev(ev_x10)
+                prefixes,
+                "exposure_ev",
+                (
+                    self._ui_slider_value(color_win, "HStream_Exposure_x100") / 200.0
+                    if os.environ.get("HSTREAM_UI_BACKEND_SESSION")
+                    and color_win == self._ui_color_window_name
+                    else self._slider_to_exposure_ev(ev_x10)
+                ),
             )
             for key, value in (
                 ("shadow_lift", float(shadow)),
@@ -2076,7 +2318,14 @@ class PlayTracker(torch.nn.Module):
                     slider_pos = self._stitch_deg_to_slider(rot_cfg)
                     tb("Stitch_Rotate_Degrees", 180, slider_pos)
                     self._configure_stitch_slider(rot_cfg)
-                except Exception as ex:
+                except (
+                    AttributeError,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                ) as ex:
                     logger.warning("Failed to initialize stitch rotation camera UI control: %s", ex)
                     self._stitch_slider_enabled = False
             fixed_defaults = self._fixed_edge_rotation_slider_defaults()
@@ -2104,26 +2353,26 @@ class PlayTracker(torch.nn.Module):
             tb("Max_Accel_X_x10", 1000, maxx)
             tb("Max_Accel_Y_x10", 1000, maxy)
             # Save defaults for reset (per main controls window)
-            self._ui_defaults[self._ui_window_name] = dict(
-                Stop_Direction_Change_Delay_Frames=stop_dir_delay,
-                Cancel_Stop_On_Opposite_Direction=cancel_stop,
-                Stop_Cancel_Hysteresis_Frames=hyst,
-                Stop_Delay_Cooldown_Frames=cooldown,
-                Overshoot_Stop_Delay_Frames=ov_delay,
-                Post_Nonstop_Stop_Delay_Frames=postns,
-                Overshoot_Speed_Ratio_x100=ov_scale,
-                Time_To_Dest_Speed_Limit_Frames=ttg,
-                Zoom_In_Aggressiveness=int(camera_cfg["zoom_in_aggressiveness"]),
-                Apply_To_Fast_Box=0,
-                Apply_To_Follower_Box=1,
-                Link_Fixed_Edge_Rotation_Left_Right=fixed_linked,
-                Left_Fixed_Edge_Rotation_Angle_x10=fixed_left_x10,
-                Right_Fixed_Edge_Rotation_Angle_x10=fixed_right_x10,
-                Max_Speed_X_x10=msx,
-                Max_Speed_Y_x10=msy,
-                Max_Accel_X_x10=maxx,
-                Max_Accel_Y_x10=maxy,
-            )
+            self._ui_defaults[self._ui_window_name] = {
+                "Stop_Direction_Change_Delay_Frames": stop_dir_delay,
+                "Cancel_Stop_On_Opposite_Direction": cancel_stop,
+                "Stop_Cancel_Hysteresis_Frames": hyst,
+                "Stop_Delay_Cooldown_Frames": cooldown,
+                "Overshoot_Stop_Delay_Frames": ov_delay,
+                "Post_Nonstop_Stop_Delay_Frames": postns,
+                "Overshoot_Speed_Ratio_x100": ov_scale,
+                "Time_To_Dest_Speed_Limit_Frames": ttg,
+                "Zoom_In_Aggressiveness": int(camera_cfg["zoom_in_aggressiveness"]),
+                "Apply_To_Fast_Box": 0,
+                "Apply_To_Follower_Box": 1,
+                "Link_Fixed_Edge_Rotation_Left_Right": fixed_linked,
+                "Left_Fixed_Edge_Rotation_Angle_x10": fixed_left_x10,
+                "Right_Fixed_Edge_Rotation_Angle_x10": fixed_right_x10,
+                "Max_Speed_X_x10": msx,
+                "Max_Speed_Y_x10": msy,
+                "Max_Accel_X_x10": maxx,
+                "Max_Accel_Y_x10": maxy,
+            }
             if self._stitch_slider_enabled:
                 try:
                     stitch_rotation = self._ui_slider_value(
@@ -2152,6 +2401,19 @@ class PlayTracker(torch.nn.Module):
                 tb2("White_Balance_Blue_Gain_x100", 300, 100)
                 tb2("Brightness_Multiplier_x100", 300, 100)
                 tb2("Exposure_EV_x10", _EXPOSURE_EV_X10_SLIDER_MAX, _EXPOSURE_EV_X10_SLIDER_ZERO)
+                if os.environ.get("HSTREAM_UI_BACKEND_SESSION"):
+                    tb2(
+                        "HStream_Exposure_x100",
+                        130,
+                        round(
+                            float(
+                                get_nested_value(
+                                    self._game_config, "rink.camera.color.exposure_ev", 0
+                                )
+                            )
+                            * 200
+                        ),
+                    )
                 tb2("Shadow_Lift_Percent", 100, 0)
                 tb2("Shadow_Lift_Black_Point", 1, 0)
                 tb2("Contrast_Multiplier_x100", 300, 100)
@@ -2167,12 +2429,14 @@ class PlayTracker(torch.nn.Module):
                         logger.warning("Failed to set camera color UI default: %s", ex)
                 self._ui_defaults[self._ui_color_window_name] = dict(color_defaults)
                 self._ui_color_inited = True
-            except Exception as ex:
+            except (AttributeError, OSError, RuntimeError, ValueError, TypeError, KeyError) as ex:
                 logger.warning("Failed to initialize camera color UI controls: %s", ex)
                 self._ui_color_inited = False
 
             # ---- Left/right stitching color controls (optional) ----
-            enable_stitch_side_ui = bool(self._force_stitching)
+            enable_stitch_side_ui = bool(
+                self._force_stitching or self._stitch_rotation_controller is not None
+            )
             if enable_stitch_side_ui:
                 # Left stitching color window
                 try:
@@ -2224,7 +2488,14 @@ class PlayTracker(torch.nn.Module):
                             logger.warning("Failed to set left color UI default: %s", ex)
                     self._ui_defaults[self._ui_color_left_window_name] = dict(left_defaults)
                     self._ui_color_left_inited = True
-                except Exception as ex:
+                except (
+                    AttributeError,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                ) as ex:
                     logger.warning("Failed to initialize left camera color UI controls: %s", ex)
                     self._ui_color_left_inited = False
 
@@ -2278,10 +2549,18 @@ class PlayTracker(torch.nn.Module):
                             logger.warning("Failed to set right color UI default: %s", ex)
                     self._ui_defaults[self._ui_color_right_window_name] = dict(right_defaults)
                     self._ui_color_right_inited = True
-                except Exception as ex:
+                except (
+                    AttributeError,
+                    OSError,
+                    RuntimeError,
+                    ValueError,
+                    TypeError,
+                    KeyError,
+                ) as ex:
                     logger.warning("Failed to initialize right camera color UI controls: %s", ex)
                     self._ui_color_right_inited = False
             self._publish_ui_system_defaults()
+            self._operator_controls = OperatorControls(self)
         except Exception as ex:
             try:
                 self.close_ui()
@@ -2328,7 +2607,7 @@ class PlayTracker(torch.nn.Module):
         _replace(
             "Overshoot_Speed_Ratio_x100",
             breakaway_cfg.get("overshoot_scale_speed_ratio"),
-            lambda value: int(round(float(value) * 100.0)),
+            lambda value: round(float(value) * 100.0),
         )
         _replace(
             "Time_To_Dest_Speed_Limit_Frames", camera_cfg.get("time_to_dest_speed_limit_frames")
@@ -2336,22 +2615,22 @@ class PlayTracker(torch.nn.Module):
         _replace(
             "Max_Speed_X_x10",
             camera_cfg.get("max_speed_ratio_x"),
-            lambda value: int(round(10.0 * self._camera_base_speed_x * float(value))),
+            lambda value: round(10.0 * self._camera_base_speed_x * float(value)),
         )
         _replace(
             "Max_Speed_Y_x10",
             camera_cfg.get("max_speed_ratio_y"),
-            lambda value: int(round(10.0 * self._camera_base_speed_y * float(value))),
+            lambda value: round(10.0 * self._camera_base_speed_y * float(value)),
         )
         _replace(
             "Max_Accel_X_x10",
             camera_cfg.get("max_accel_ratio_x"),
-            lambda value: int(round(10.0 * self._camera_base_accel_x * float(value))),
+            lambda value: round(10.0 * self._camera_base_accel_x * float(value)),
         )
         _replace(
             "Max_Accel_Y_x10",
             camera_cfg.get("max_accel_ratio_y"),
-            lambda value: int(round(10.0 * self._camera_base_accel_y * float(value))),
+            lambda value: round(10.0 * self._camera_base_accel_y * float(value)),
         )
         if "Stitch_Rotate_Degrees" in main:
             rotation = get_nested_value(
@@ -2384,9 +2663,9 @@ class PlayTracker(torch.nn.Module):
     def _record_camera_policy(
         self,
         frame: int,
-        canvas_wh: Tuple[int, int],
-        input_geometry: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
+        canvas_wh: tuple[int, int],
+        input_geometry: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
         # Color changes do not alter the pan/zoom policy. Config snapshots also
         # detect resets/reloads, including changes between forward batches.
         camera = {key: value for key, value in self._camera_cfg().items() if key != "color"}
@@ -2411,7 +2690,7 @@ class PlayTracker(torch.nn.Module):
             return
         try:
             self._render_ui_dialogs()
-        except Exception as ex:
+        except (AttributeError, OSError, RuntimeError, ValueError, TypeError, KeyError) as ex:
             logger.warning("Failed to render camera UI controls: %s", ex)
             self._camera_ui_enabled = False
             try:
@@ -2422,6 +2701,9 @@ class PlayTracker(torch.nn.Module):
         process = self._hm_ui_process
         if process is None:
             return
+        process.apply_runtime_requests(
+            self._apply_current_ui_control_values, self._apply_shared_runtime_operation
+        )
         controls_changed = self._ui_controls_dirty
         rust_controls_changed = process.last_poll_values_changed
         final_values = process.control_values()
@@ -2438,6 +2720,8 @@ class PlayTracker(torch.nn.Module):
                     raise RuntimeError("Failed to apply deferred camera UI values")
             else:
                 for event in events:
+                    if process.apply_playback_action(event.kind):
+                        continue
                     process.apply_control_values(
                         final_values if event.values is None else event.values
                     )
@@ -2460,14 +2744,25 @@ class PlayTracker(torch.nn.Module):
                         if not self._save_ui_config():
                             raise RuntimeError("Failed to save camera UI values")
                 process.apply_control_values(final_values, publish=bool(events))
-                if (controls_changed or events) and final_values != runtime_values:
-                    if not self._apply_current_ui_control_values():
-                        raise RuntimeError("Failed to apply final camera UI values")
+                if (
+                    (controls_changed or events)
+                    and final_values != runtime_values
+                    and not self._apply_current_ui_control_values()
+                ):
+                    raise RuntimeError("Failed to apply final camera UI values")
                 if events:
-                    process.acknowledge_action_events(max(event.seq for event in events))
+                    process.acknowledge_action_events(
+                        max(event.seq for event in events),
+                        message=(
+                            "Saved game settings"
+                            if any(e.kind == "save" for e in events)
+                            else "Applied"
+                        ),
+                    )
                     self._ui_action_retry_after_monotonic = 0.0
                     self._ui_action_retry_delay_seconds = 0.0
         except (OSError, RuntimeError, TypeError, ValueError, KeyError) as ex:
+            process.report_action_error(str(ex))
             self._ui_controls_dirty = True
             delay = (
                 _UI_ACTION_RETRY_INITIAL_SECONDS
@@ -2489,9 +2784,94 @@ class PlayTracker(torch.nn.Module):
             except (OSError, RuntimeError, TypeError, ValueError, KeyError) as restore_ex:
                 logger.warning("Failed to restore final camera UI values: %s", restore_ex)
 
+    def _apply_shared_runtime_operation(self, request: dict) -> None:
+        if request["kind"] == "preview-overlays":
+            layers = request["layers"]
+            if (
+                not isinstance(layers, list)
+                or len(layers) != 3
+                or any(type(value) is not bool for value in layers)
+            ):
+                raise ValueError("Preview overlays require three booleans")
+            self._hm_ui_process.preview_overlay_layers = tuple(layers)
+            return
+        if request["kind"] == "stitched-output-epoch":
+            from hmlib.config import get_game_dir
+            from hmlib.stitching.native_calibration import validate_live_output_epoch
+
+            epoch = validate_live_output_epoch(
+                Path(get_game_dir(self._game_id)), request["serialized"]
+            )
+            rotation = float(epoch["post_stitch_rotate_degrees"])
+            previous_rotation = self._current_stitch_rotation_degrees()
+            if self._stitch_rotation_controller is None:
+                raise ValueError("Live stitching rotation has no Python runtime owner")
+            if (
+                self._rink_map is not None
+                and not self._rink_map.get("native")
+                and rotation != float(previous_rotation or 0)
+            ):
+                raise ValueError(
+                    "Stop playback and update the rink map before changing stitched rotation"
+                )
+            scoreboard = epoch["scoreboard_property_value"]
+            if scoreboard:
+                coordinates = [int(value) for value in scoreboard.split(",")]
+                if len(coordinates) != 8:
+                    raise ValueError("Native output epoch has an invalid scoreboard polygon")
+                scoreboard = [coordinates[index : index + 2] for index in range(0, 8, 2)]
+            process = self._hm_ui_process
+            previous_values = process.control_values()
+            previous_config = copy.deepcopy(self._game_config)
+            try:
+                process._apply_runtime_controls(
+                    request["values"], self._apply_current_ui_control_values
+                )
+                self._stitch_rotation_controller.set_post_stitch_rotate_degrees(rotation)
+                self._game_config.setdefault("stitching", {})[
+                    "post_stitch_rotate_degrees"
+                ] = rotation
+                if scoreboard:
+                    self._game_config.setdefault("rink", {}).setdefault("scoreboard", {})[
+                        "perspective_polygon"
+                    ] = scoreboard
+                self._game_config["hm_shared_runtime"] = {
+                    "output_generation": epoch["output_generation"],
+                    "authorization_id": epoch["authorization_id"],
+                    "post_stitch_rotate_degrees": rotation,
+                }
+            except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+                from hmlib.camera.hm_ui_bridge import RuntimeRollbackError
+
+                try:
+                    self._game_config.clear()
+                    self._game_config.update(previous_config)
+                    self._stitch_rotation_controller.set_post_stitch_rotate_degrees(
+                        previous_rotation
+                    )
+                    process._apply_runtime_controls(
+                        previous_values, self._apply_current_ui_control_values
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError, KeyError) as rollback_error:
+                    raise RuntimeRollbackError(
+                        "Native output epoch rollback failed; pipeline cannot continue"
+                    ) from rollback_error
+                raise
+            return
+        if request["kind"] == "scoreboard":
+            from hmlib.ui.hstream_scoreboard import apply_scoreboard_selection
+
+            apply_scoreboard_selection(
+                self._game_id, self._game_config, request["points"], request["canvas"]
+            )
+            return
+        raise ValueError(f"Unknown shared runtime operation: {request['kind']}")
+
     def _apply_current_ui_control_values(self) -> bool:
         try:
             self._ui_controls_dirty = False
+            if self._operator_controls is not None:
+                self._operator_controls.apply()
             # Read scalable camera controls.
             dir_delay = int(
                 self._ui_slider_value(self._ui_window_name, "Stop_Direction_Change_Delay_Frames")
@@ -2562,7 +2942,7 @@ class PlayTracker(torch.nn.Module):
             )
 
             # Stitch rotation degrees
-            if self._stitch_slider_enabled:
+            if self._stitch_slider_enabled and not os.environ.get("HSTREAM_UI_BACKEND_SESSION"):
                 try:
                     rot_slider = self._ui_slider_value(
                         self._ui_window_name, "Stitch_Rotate_Degrees"
@@ -2681,14 +3061,14 @@ class PlayTracker(torch.nn.Module):
                         )
                         lb.set_translation_constraints(msx, msy, maxx, maxy)
                     self._playtracker.set_breakaway_braking(int(ov_delay_scaled), ov_scal)
-                except Exception as ex:
+                except (AttributeError, RuntimeError, ValueError, TypeError, KeyError) as ex:
                     logger.warning("Failed to apply camera UI values to C++ play tracker: %s", ex)
             # For Python-only breakaway values, we read from self._game_config in calculate_breakaway
             # Record the sampled target selectors, not a later UI snapshot. The
             # other effective values are already written into _camera_cfg().
             self._applied_camera_targets = {"fast": apply_fast, "follower": apply_follower}
             return True
-        except Exception as ex:
+        except (AttributeError, OSError, RuntimeError, ValueError, TypeError, KeyError) as ex:
             # If we failed to read UI, try again next frame
             self._ui_controls_dirty = True
             logger.warning("Failed to read/apply camera UI controls: %s", ex)
@@ -2744,7 +3124,7 @@ class PlayTracker(torch.nn.Module):
                 (255, 255, 255),
                 thickness=2,
             )
-        except Exception as ex:
+        except (AttributeError, RuntimeError, ValueError, TypeError, KeyError, IndexError) as ex:
             logger.warning("Failed to draw camera UI status overlay: %s", ex)
         return img
 
@@ -2755,13 +3135,13 @@ class PlayTracker(torch.nn.Module):
             return abs(float(a) - float(b)) < 1e-6
         return a == b
 
-    def _camera_cfg(self) -> Dict[str, Any]:
+    def _camera_cfg(self) -> dict[str, Any]:
         cfg = self._game_config.get("rink", {}).get("camera")
         if not isinstance(cfg, dict):
             raise KeyError("Missing rink.camera configuration")
         return cfg
 
-    def _breakaway_cfg(self) -> Dict[str, Any]:
+    def _breakaway_cfg(self) -> dict[str, Any]:
         camera_cfg = self._camera_cfg()
         bkd = camera_cfg.get("breakaway_detection")
         if not isinstance(bkd, dict):
@@ -2772,30 +3152,34 @@ class PlayTracker(torch.nn.Module):
         """Scale a frame-count tuned for BASE_FPS to the current video FPS."""
         try:
             frames_i = int(frames)
-        except Exception:
+        except (ValueError, TypeError, OverflowError) as error:
+            logger.warning("Invalid camera frame count; using zero: %s", error)
             return 0
         if frames_i <= 0:
             return frames_i
         try:
             scale = float(self._hockey_mon.fps_speed_scale)
-        except Exception:
+        except (AttributeError, ValueError, TypeError, OverflowError) as error:
+            logger.warning("FPS speed scale unavailable; using 1.0: %s", error)
             scale = 1.0
         if not scale or scale <= 0:
             return frames_i
-        scaled = int(round(float(frames_i) * scale))
+        scaled = round(float(frames_i) * scale)
         return max(1, scaled)
 
     def _scale_speed_threshold_for_fps(self, speed: float) -> float:
         """Scale a px/frame threshold tuned for BASE_FPS to current FPS."""
         try:
             v = float(speed)
-        except Exception:
+        except (ValueError, TypeError, OverflowError) as error:
+            logger.warning("Invalid speed threshold; using zero: %s", error)
             return 0.0
         if abs(v) <= 1e-12:
             return v
         try:
             scale = float(self._hockey_mon.fps_speed_scale)
-        except Exception:
+        except (AttributeError, ValueError, TypeError, OverflowError) as error:
+            logger.warning("FPS speed scale unavailable; using 1.0: %s", error)
             scale = 1.0
         if not scale or scale <= 0:
             return v
@@ -2862,15 +3246,15 @@ class PlayTracker(torch.nn.Module):
 
     def _set_config_value(
         self,
-        root: Dict[str, Any],
-        path: Tuple[str, ...],
+        root: dict[str, Any],
+        path: tuple[str, ...],
         value: Any,
         *,
         mark_dirty: bool = False,
         cleanup_empty: bool = False,
     ) -> bool:
         cur = root
-        parents: List[Tuple[Dict[str, Any], str]] = []
+        parents: list[tuple[dict[str, Any], str]] = []
         for key in path[:-1]:
             if key not in cur or not isinstance(cur[key], dict):
                 if value is _MISSING:
@@ -2903,14 +3287,14 @@ class PlayTracker(torch.nn.Module):
             self._ui_dirty_paths.add(path)
         return True
 
-    def _set_ui_config_value(self, path: Tuple[str, ...], value: Any):
+    def _set_ui_config_value(self, path: tuple[str, ...], value: Any):
         self._set_config_value(self._game_config, path, value, mark_dirty=True)
 
-    def _get_config_path_value(self, path: Tuple[str, ...]):
+    def _get_config_path_value(self, path: tuple[str, ...]):
         return self._get_path_value(self._game_config, path)
 
     @staticmethod
-    def _get_path_value(config: Dict[str, Any], path: Tuple[str, ...]):
+    def _get_path_value(config: dict[str, Any], path: tuple[str, ...]):
         cur: Any = config
         for key in path:
             if not isinstance(cur, dict) or key not in cur:
@@ -2918,14 +3302,18 @@ class PlayTracker(torch.nn.Module):
             cur = cur[key]
         return cur
 
-    def _set_priv_path(self, priv: Dict[str, Any], path: Tuple[str, ...], value: Any) -> bool:
+    def _set_priv_path(self, priv: dict[str, Any], path: tuple[str, ...], value: Any) -> bool:
         return self._set_config_value(priv, path, value, mark_dirty=False, cleanup_empty=True)
 
-    def _delete_priv_path(self, priv: Dict[str, Any], path: Tuple[str, ...]) -> bool:
+    def _delete_priv_path(self, priv: dict[str, Any], path: tuple[str, ...]) -> bool:
         return self._set_config_value(priv, path, _MISSING, mark_dirty=False, cleanup_empty=True)
 
-    def _ui_managed_config_paths(self) -> Set[Tuple[str, ...]]:
-        paths: Set[Tuple[str, ...]] = set()
+    def _ui_managed_config_paths(self) -> set[tuple[str, ...]]:
+        paths: set[tuple[str, ...]] = (
+            self._operator_controls.managed_paths()
+            if self._operator_controls is not None
+            else set()
+        )
         if self._ui_inited:
             paths.update(
                 {
@@ -2980,18 +3368,20 @@ class PlayTracker(torch.nn.Module):
             paths.update(("stitching", "right", "color", key) for key in color_keys)
         return paths
 
-    def _restore_ui_managed_config(self, source: Dict[str, Any]) -> None:
+    def _restore_ui_managed_config(self, source: dict[str, Any]) -> None:
         for path in self._ui_managed_config_paths():
             self._set_ui_config_value(path, self._get_path_value(source, path))
         stitch_path = ("stitching", "post_stitch_rotate_degrees")
         stitch_value = self._get_path_value(source, stitch_path)
         if stitch_value is not _MISSING and self._stitch_slider_enabled:
             self._set_stitch_rotation_degrees(float(stitch_value))
+        if self._operator_controls is not None:
+            self._operator_controls.restore(source)
 
     def _restore_final_ui_reset_config(
         self,
-        events: List[Any],
-        final_values: Dict[str, Dict[str, int]],
+        events: list[Any],
+        final_values: dict[str, dict[str, int]],
     ) -> None:
         for event in reversed(events):
             event_values = final_values if event.values is None else event.values
@@ -3015,10 +3405,10 @@ class PlayTracker(torch.nn.Module):
 
             # If the stitched rotation angle changed, clear cached rink geometry
             # that would become stale under a new rotation.
-            stitch_path: Tuple[str, ...] = ("stitching", "post_stitch_rotate_degrees")
+            stitch_path: tuple[str, ...] = ("stitching", "post_stitch_rotate_degrees")
             if stitch_path in self._ui_dirty_paths:
                 # Helper: read a nested value from the private config.
-                def _get_priv_path(path: Tuple[str, ...]):
+                def _get_priv_path(path: tuple[str, ...]):
                     cur: Any = priv
                     for key in path:
                         if not isinstance(cur, dict) or key not in cur:
@@ -3030,7 +3420,11 @@ class PlayTracker(torch.nn.Module):
                 old_val = _get_priv_path(stitch_path)
                 try:
                     changed = not self._values_equal(new_val, old_val)
-                except Exception:
+                except (ValueError, TypeError, RuntimeError) as error:
+                    logger.warning(
+                        "Could not compare stored camera setting; persisting current value: %s",
+                        error,
+                    )
                     changed = True
                 if changed:
                     for path in (
@@ -3061,17 +3455,17 @@ class PlayTracker(torch.nn.Module):
                 save_private_config(game_id=game_id, data=priv, verbose=True)
             self._ui_dirty_paths.clear()
             return True
-        except Exception:
+        except (OSError, ValueError, TypeError, RuntimeError, KeyError):
             logger.exception("Failed to save camera UI values to private config")
             return False
 
     def calculate_breakaway(
         self,
         current_box: torch.Tensor,
-        online_im: Union[torch.Tensor, np.ndarray],
+        online_im: torch.Tensor | np.ndarray,
         speed_adjust_box: MovingBox,
         average_current_box: bool,
-    ) -> Tuple[torch.Tensor, Union[torch.Tensor, np.ndarray]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | np.ndarray]:
         #
         # BEGIN Breakway detection
         #

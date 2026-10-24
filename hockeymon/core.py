@@ -41,6 +41,7 @@ If you need details not covered here, inspect `hockeymon/src/PythonBindings.cpp`
 from __future__ import annotations
 
 import ctypes
+import inspect
 from pathlib import Path
 
 
@@ -55,10 +56,7 @@ def _preload_torch_shared_libraries() -> None:
     available for the extension module to resolve.
     """
 
-    try:
-        import torch
-    except Exception:
-        return
+    import torch
 
     torch_lib_dir = Path(torch.__file__).resolve().parent / "lib"
     if not torch_lib_dir.is_dir():
@@ -129,10 +127,7 @@ from ._hockeymon import (
     show_cuda_tensor,
 )
 
-try:
-    from ._hockeymon import EnBlender
-except Exception:
-    EnBlender = None
+EnBlender = getattr(_native_hockeymon, "EnBlender", None)
 
 
 # REMOVEME(colivier)
@@ -234,56 +229,59 @@ def create_affine_ransac_maps(
 
 
 __all__ = [
-    "ImageRemapper",
-    "ImageBlender",
-    "ImageBlenderMode",
-    "CudaStitchPanoU8",
-    "CudaStitchPanoF32",
-    "CudaStitchPano3U8",
-    "CudaStitchPano3F32",
-    "CudaStitchPanoNU8",
-    "CudaStitchPanoNF32",
-    "BlenderConfig",
+    "AllLivingBoxConfig",
     "AspenGraphSampler",
-    "ImageStitcher",
-    "RemapImageInfo",
-    "HmTracker",
+    "BBox",
+    "BlenderConfig",
+    "CudaStitchPano3F32",
+    "CudaStitchPano3U8",
+    "CudaStitchPanoF32",
+    "CudaStitchPanoNF32",
+    "CudaStitchPanoNU8",
+    "CudaStitchPanoU8",
+    "EnBlender",
+    "GrowShrink",
+    "HmByteTrackConfig",
     "HmByteTracker",
     "HmByteTrackerCuda",
     "HmByteTrackerCudaStatic",
     "HmDcfTrackerCudaStatic",
-    "HmByteTrackConfig",
-    "RemapperConfig",
-    "HmTrackerPredictionMode",
     "HmLogLevel",
     "HmLogMessage",
-    "StitchImageInfo",
-    "EnBlender",
+    "HmTracker",
+    "HmTrackerPredictionMode",
+    "ImageBlender",
+    "ImageBlenderMode",
+    "ImageRemapper",
+    "ImageStitcher",
+    "LivingBox",
     "PlayTracker",
     "PlayTrackerConfig",
-    "AllLivingBoxConfig",
-    "BBox",
-    "LivingBox",
+    "RemapImageInfo",
+    "RemapperConfig",
+    "StitchImageInfo",
     "WHDims",
-    "GrowShrink",
+    "bgr_to_i420_cuda",
     "compute_kmeans_clusters",
     "create_affine_ransac_maps",
     "create_homography_maps",
     "detect_akaze_features",
-    "bgr_to_i420_cuda",
     "show_cuda_tensor",
 ]
 
 
 def _doc(target, text: str):  # pragma: no cover - trivial helper
     """Attach a docstring to a pybind11 exported object if possible."""
-    try:
-        if getattr(target, "__doc__", None):  # keep original at end
-            target.__doc__ = text.rstrip() + "\n\nOriginal:\n" + target.__doc__
-        else:
-            target.__doc__ = text
-    except Exception:
-        pass
+    # CPython builtin function descriptors have read-only documentation.
+    if inspect.isbuiltin(target) or inspect.ismethoddescriptor(target):
+        return target
+    descriptor = inspect.getattr_static(target, "__doc__", None)
+    if isinstance(descriptor, property) and descriptor.fset is None:
+        return target
+    if target.__doc__:  # keep original at end
+        target.__doc__ = text.rstrip() + "\n\nOriginal:\n" + target.__doc__
+    else:
+        target.__doc__ = text
     return target
 
 
@@ -482,7 +480,15 @@ _doc(
 )
 _doc(
     PlayTracker,
-    """High‑level play detector that aggregates object tracks into semantic plays.""",
+    """High-level play detector that aggregates object tracks into semantic plays.
+
+    replay_checkpoint() exports the complete native camera policy and temporal
+    state as a versioned JSON string; from_replay_checkpoint(state) restores an
+    independent tracker for deterministic replay. replay_arena() returns the
+    current arena rectangle [left, top, right, bottom]. These APIs preserve the shared
+    HStream Camera Experiments contract without reconstructing native state in
+    Python. Malformed or incompatible checkpoints raise.
+    """,
 )
 
 _doc(

@@ -13,9 +13,9 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import asdict, replace
 from pathlib import Path
-from typing import Callable
 
 import yaml
 from PIL import Image
@@ -78,7 +78,9 @@ def run_hugin(command, *, input=None):
         raise RuntimeError(f"Required Hugin tool is unavailable: {command[0]}")
     command = [binary, *command[1:]]
     try:
-        result = subprocess.run(command, input=input, capture_output=True, text=True, timeout=180)
+        result = subprocess.run(
+            command, input=input, capture_output=True, text=True, timeout=180, check=False
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"Could not run {command[0]}: {exc}") from exc
     if result.returncode:
@@ -125,8 +127,24 @@ class LevelingSession:
                     raise ValueError(
                         "The calibration has no valid rotation provenance; recalibrate first"
                     ) from exc
+                # Automatic optics are resolved from original recording
+                # metadata during calibration and retained by its source PTO.
+                for attribute, enabled in (
+                    ("horizontal_fov", self.settings.camera_auto_fov),
+                    ("vertical_fov", self.settings.camera_auto_fov),
+                ):
+                    if enabled and attribute in published:
+                        self.settings = replace(self.settings, **{attribute: published[attribute]})
+                if self.settings.camera_auto_lens and "input_lens" in published:
+                    from hmlib.stitching.input_lens import read_input_lens
+
+                    self.settings = replace(
+                        self.settings, input_lens=read_input_lens(published["input_lens"])
+                    )
                 rotation_delta(self.published_rotation, self.settings.framing.rotation_degrees)
-                current = asdict(self.settings)
+                # Compare the serialized provenance on both sides. Nested lens
+                # coefficients are tuples in memory and arrays in JSON.
+                current = json.loads(self.settings.manifest()["calibration_settings"])
                 # Framing can be previewed from registered poses; different
                 # source lenses, matchers or optimizers require fresh poses.
                 framing_fields = {
@@ -156,6 +174,14 @@ class LevelingSession:
                     self.config_path,
                     *self.sources,
                 )
+                self._source_videos = tuple(
+                    source["path"] for source in json.loads(manifest.get("source_videos", "[]"))
+                )
+                if self._source_videos:
+                    from hmlib.stitching.configure_stitching import _file_provenance
+
+                    if _file_provenance(self._source_videos) != manifest["source_videos"]:
+                        raise ValueError("Source recordings changed; recalibrate before leveling")
                 self._fingerprint = self._snapshot()
                 self.source_images = []
                 for source, size in zip(self.sources, self.leveling_project.image_sizes):
@@ -181,6 +207,8 @@ class LevelingSession:
         return stitching_lock(self.game_dir, blocking=False)
 
     def _snapshot(self):
+        from hmlib.stitching.configure_stitching import _file_provenance
+
         config = self.config_loader()
         return (
             tuple(_digest(path) for path in self._paths),
@@ -188,6 +216,7 @@ class LevelingSession:
             # Include inherited settings outside StitchingSettings too (for
             # example frame offsets and source-video selection).
             yaml.safe_dump(config, sort_keys=True),
+            _file_provenance(self._source_videos),
         )
 
     def _check_fresh(self):
@@ -208,6 +237,87 @@ class LevelingSession:
                 for path, size in zip(self.sources, self.leveling_project.image_sizes)
             ],
         }
+
+    def _rink_marks(self):
+        mapping = self.config.get("rink", {}).get("workspace_map") or {}
+        return mapping.get("observations", []) if mapping.get("version") == 2 else []
+
+    @staticmethod
+    def _draw_marks(image, marks):
+        from PIL import ImageDraw
+
+        draw = ImageDraw.Draw(image)
+        for label, pixels, arc, enabled in marks:
+            color = "#7cfa7c" if enabled else "#ffaa55"
+            if arc and len(pixels) == 3:
+                import numpy as np
+
+                first, middle, last = np.asarray(pixels, dtype=float)
+                control = 2 * middle - (first + last) / 2
+                pixels = [
+                    tuple((1 - t) ** 2 * first + 2 * t * (1 - t) * control + t**2 * last)
+                    for t in np.linspace(0, 1, 65)
+                ]
+            if len(pixels) > 1:
+                draw.line(pixels, fill=color, width=max(2, image.width // 700))
+            for x, y in pixels if not arc else (pixels[0], pixels[len(pixels) // 2], pixels[-1]):
+                draw.ellipse((x - 4, y - 4, x + 4, y + 4), outline=color, width=2)
+            if pixels:
+                draw.text(pixels[0], label, fill=color)
+
+    def annotate_sources(self, info):
+        """Expose saved evidence in the normal leveling editor, without editing sources."""
+        marks = self._rink_marks()
+        if not marks:
+            return
+        for camera, (source, path) in enumerate(zip(info["sources"], self.sources)):
+            with Image.open(path) as original:
+                image = original.convert("RGB")
+                image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+                sx, sy = image.width / original.width, image.height / original.height
+            selected = [
+                (
+                    mark.get("feature") or mark.get("label", "Landmark"),
+                    [(x * sx, y * sy) for x, y in mark["pixels"]],
+                    mark.get("arc", False),
+                    mark.get("enabled", True),
+                )
+                for mark in marks
+                if mark["camera"] == camera
+            ]
+            self._draw_marks(image, selected)
+            output = self.directory / f"rink-source-{camera}.png"
+            image.save(output)
+            source["path"] = str(output)
+
+    def _annotate_preview(self, output, project):
+        from hmlib.stitching.rink_projection import transform_points
+
+        marks = self._rink_marks()
+        if not marks:
+            return
+        points = [[mark["camera"], *point] for mark in marks for point in mark["pixels"]]
+        projected = transform_points(project.read_text(), points, run=self.run)
+        selected, offset = [], 0
+        for mark in marks:
+            pixels = projected[offset : offset + len(mark["pixels"])]
+            offset += len(mark["pixels"])
+            import numpy as np
+
+            if not np.isfinite(pixels).all():
+                continue  # Source marks outside this preview projection are not drawable.
+            selected.append(
+                (
+                    mark.get("feature") or mark.get("label", "Landmark"),
+                    [tuple(p) for p in pixels],
+                    mark.get("arc", False),
+                    mark.get("enabled", True),
+                )
+            )
+        with Image.open(output) as source:
+            image = source.convert("RGB")
+        self._draw_marks(image, selected)
+        image.save(output)
 
     def estimate(self, posts: list[dict], yaw: float) -> dict:
         points = format_points(posts, self.leveling_project.image_sizes)
@@ -232,7 +342,7 @@ class LevelingSession:
             raise ValueError("Preview requires rotation_degrees, crop, auto_crop and posts")
         posts = state["posts"]
         if not isinstance(posts, list):
-            raise ValueError("Posts must be a list")
+            raise ValueError("Posts must be a list")  # noqa: TRY004
         if posts:
             format_points(posts, self.leveling_project.image_sizes)
         config = copy.deepcopy(self.config)
@@ -296,6 +406,7 @@ class LevelingSession:
                         "Rendered preview dimensions differ from the full panorama canvas"
                     )
                 image.verify()
+            self._annotate_preview(output, project)
             image_bytes = output.read_bytes()
             self._check_fresh()
             self.preview_token = secrets.token_urlsafe(24)
@@ -324,13 +435,15 @@ class LevelingSession:
             if config is None:
                 config = {}
             if not isinstance(config, dict):
-                raise ValueError("The private game config must be a YAML mapping")
+                raise ValueError("The private game config must be a YAML mapping")  # noqa: TRY004
             stitch = config.setdefault("stitching", {})
             if not isinstance(stitch, dict):
-                raise ValueError("Private stitching config must be a mapping")
+                raise ValueError("Private stitching config must be a mapping")  # noqa: TRY004
             framing = stitch.setdefault("projection_framing", {})
             if not isinstance(framing, dict):
-                raise ValueError("Private projection_framing config must be a mapping")
+                raise ValueError(  # noqa: TRY004
+                    "Private projection_framing config must be a mapping"
+                )
             # Preserve rink inheritance when the user only adjusted the crop.
             if settings.framing.rotation_degrees != self.settings.framing.rotation_degrees:
                 framing["rotation_degrees"] = list(settings.framing.rotation_degrees)

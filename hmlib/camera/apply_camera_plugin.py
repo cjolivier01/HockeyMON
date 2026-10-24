@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Dict, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -17,7 +17,7 @@ from hmlib.utils.image import image_height, image_width, make_channels_last
 from hmlib.video.video_stream import MAX_NEVC_VIDEO_WIDTH
 
 
-def _parse_requested_output_dim(value: Any) -> Optional[int]:
+def _parse_requested_output_dim(value: Any) -> int | None:
     if value is None:
         return None
     if isinstance(value, str):
@@ -60,26 +60,27 @@ class ApplyCameraPlugin(Plugin):
     def __init__(
         self,
         enabled: bool = True,
-        video_out_pipeline: Optional[Dict[str, Any]] = None,
+        video_out_pipeline: dict[str, Any] | None = None,
         crop_play_box: bool = False,
         crop_output_image: bool = True,
         end_zones: bool = False,
     ) -> None:
         super().__init__(enabled=enabled)
         self._pipeline_cfg = video_out_pipeline or {}
-        self._pipeline: Optional[Compose] = None
+        self._pipeline: Compose | None = None
         self._color_adjust_tf = None
         self._perspective_rotation_tf = None
-        self._video_frame_cfg: Optional[Dict[str, Any]] = None
-        self._end_zones: Optional[EndZones] = None
-        self._game_config: Optional[Dict[str, Any]] = None
+        self._video_frame_cfg: dict[str, Any] | None = None
+        self._end_zones: EndZones | None = None
+        self._game_config: dict[str, Any] | None = None
         self._iter_num: int = 0
         self._initialized: bool = False
         self._crop_play_box = bool(crop_play_box)
         self._crop_output_image = bool(crop_output_image)
         self._use_end_zones = bool(end_zones)
+        self._archive_camera = None
 
-    def _ensure_initialized(self, context: Dict[str, Any]) -> None:
+    def _ensure_initialized(self, context: dict[str, Any]) -> None:
         if self._initialized:
             return
         shared = context.get("shared", {}) if isinstance(context, dict) else {}
@@ -99,14 +100,14 @@ class ApplyCameraPlugin(Plugin):
 
         if self._crop_play_box:
             if self._crop_output_image:
-                final_h = H if play_box is None else int((play_box[3] - play_box[1]))
+                final_h = H if play_box is None else int(play_box[3] - play_box[1])
                 final_w = int(final_h * ar)
                 if final_w > MAX_NEVC_VIDEO_WIDTH:
                     final_w = MAX_NEVC_VIDEO_WIDTH
                     final_h = int(final_w / ar)
             else:
-                final_h = H if play_box is None else int((play_box[3] - play_box[1]))
-                final_w = W if play_box is None else int((play_box[2] - play_box[0]))
+                final_h = H if play_box is None else int(play_box[3] - play_box[1])
+                final_w = W if play_box is None else int(play_box[2] - play_box[0])
         else:
             if self._crop_output_image:
                 final_h = H
@@ -194,8 +195,8 @@ class ApplyCameraPlugin(Plugin):
         # Ensure any registered pipeline modules/buffers match the image device
         try:
             self.to(img.device)
-        except Exception:
-            logger.exception("ApplyCameraPlugin.to(img.device) failed; continuing on CPU/GPU mix")
+        except (RuntimeError, TypeError) as error:
+            raise RuntimeError(f"Could not move the camera transforms to {img.device}") from error
 
         self._initialized = True
 
@@ -213,7 +214,7 @@ class ApplyCameraPlugin(Plugin):
         #     pass
         return results
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {"img": context.get("img", None)}
         self._ensure_initialized(context)
@@ -232,10 +233,10 @@ class ApplyCameraPlugin(Plugin):
         if isinstance(current_boxes, StreamTensorBase):
             current_boxes = unwrap_tensor(current_boxes)
 
-        results: Dict[str, Any] = {}
+        results: dict[str, Any] = {}
         pano_size_wh = [image_width(img), image_height(img)]
         results["pano_size_wh"] = pano_size_wh
-        pipeline_outputs: Dict[str, Any] = {}
+        pipeline_outputs: dict[str, Any] = {}
 
         if current_boxes is None:
             # Fallback: cover the entire frame
@@ -257,9 +258,45 @@ class ApplyCameraPlugin(Plugin):
             img = img.unsqueeze(0)
         img = make_channels_last(img)
 
+        program_4k = None
+        shared = context.get("shared", {})
+        shared["program_4k_available"] = True
+        live_config = shared.get("game_config", self._game_config)
+        if get_nested_value(live_config, "video_out.archive_program_4k", False):
+            if self._archive_camera is None:
+                self._archive_camera = ApplyCameraPlugin(
+                    video_out_pipeline=self._pipeline_cfg,
+                    crop_play_box=self._crop_play_box,
+                    crop_output_image=self._crop_output_image,
+                    end_zones=self._use_end_zones,
+                )
+            # Reuse the full source-resolution image and identical transforms.
+            # Only the recording dimensions differ; runtime grading remains shared.
+            archive_config = {
+                **self._game_config,
+                "video_out": {
+                    **self._game_config.get("video_out", {}),
+                    "archive_program_4k": False,
+                    "output_width": 3840,
+                    "output_height": 2160,
+                },
+            }
+            archive_context = {
+                **context,
+                "img": img.clone(),
+                "shared": {**context.get("shared", {}), "game_config": archive_config},
+            }
+            self._archive_camera._ensure_initialized(archive_context)
+            self._archive_camera._video_frame_cfg.update(
+                output_frame_width=3840,
+                output_frame_height=2160,
+                output_aspect_ratio=16 / 9,
+            )
+            program_4k = self._archive_camera.forward(archive_context)["img"]
+
         # Optional end-zone camera handling
         if self._end_zones is not None:
-            ez_data: Dict[str, Any] = {
+            ez_data: dict[str, Any] = {
                 "img": img,
                 "pano_size_wh": pano_size_wh,
             }
@@ -367,8 +404,9 @@ class ApplyCameraPlugin(Plugin):
                             ex,
                         )
 
-            pipeline_inputs: Dict[str, Any] = {
+            pipeline_inputs: dict[str, Any] = {
                 "img": img,
+                "game_config": self._game_config,
                 "camera_box": current_boxes,
                 "video_frame_cfg": self._video_frame_cfg,
             }
@@ -377,6 +415,12 @@ class ApplyCameraPlugin(Plugin):
                 if key in context:
                     pipeline_inputs[key] = context[key]
             pipeline_inputs["pano_size_wh"] = pano_size_wh
+            if context.get("shared_preview_metadata") is not None:
+                from hmlib.ui.preview_overlays import copy_metadata
+
+                pipeline_inputs["shared_preview_metadata"] = copy_metadata(
+                    context["shared_preview_metadata"]
+                )
 
             pipeline_outputs = self._pipeline(pipeline_inputs)
             img = pipeline_outputs.pop("img")
@@ -401,6 +445,12 @@ class ApplyCameraPlugin(Plugin):
         #     results["frame_ids"] = frame_ids
         if "end_zone_img" in pipeline_outputs:
             results["end_zone_img"] = pipeline_outputs["end_zone_img"]
+        if context.get("rink_map_overlay") is not None:
+            results["rink_map_overlay"] = context["rink_map_overlay"]
+        if pipeline_outputs.get("shared_preview_metadata") is not None:
+            results["shared_preview_metadata"] = pipeline_outputs["shared_preview_metadata"]
+        if program_4k is not None:
+            results["program_4k_img"] = program_4k
         return results
 
     def input_keys(self) -> set[str]:
@@ -415,6 +465,8 @@ class ApplyCameraPlugin(Plugin):
                 "shared",
                 "dataset_results",
                 "rink_profile",
+                "rink_map_overlay",
+                "shared_preview_metadata",
                 "game_id",
             }
         return self._input_keys
@@ -422,6 +474,9 @@ class ApplyCameraPlugin(Plugin):
     def output_keys(self) -> set[str]:
         return {
             "img",
+            "rink_map_overlay",
+            "shared_preview_metadata",
+            "program_4k_img",
             # "current_box",
             # "frame_ids",
             # "pano_size_wh",

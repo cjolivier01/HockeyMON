@@ -1,102 +1,26 @@
-exports_files([
-    "Cargo.toml",
-])
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
 
-filegroup(
-    name = "sources",
-    srcs = glob([
-        "src/**/*.rs",
-    ], allow_empty = True),
-)
-
-config_setting(
-    name = "portable_hm_ui_enabled",
-    define_values = {"portable_hm_ui": "true"},
-    visibility = ["//visibility:public"],
-)
-
-_BUILD_PREAMBLE = """
-set -eu
-build_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/hm-ui-build.XXXXXX")"
-trap 'rm -rf "$${build_dir}"' EXIT
-cp $(location Cargo.toml) "$${build_dir}/Cargo.toml"
-cp $(location Cargo.lock) "$${build_dir}/Cargo.lock"
-cp -R "$$(dirname $(location Cargo.toml))/src" "$${build_dir}/src"
-export CARGO_HOME="$${build_dir}/.cargo-home"
-export CARGO_TARGET_DIR="$${build_dir}/.cargo-target"
-"""
-
-genrule(
+py_binary(
     name = "hm-ui",
-    srcs = [
-        "Cargo.toml",
-        "Cargo.lock",
-        ":sources",
-    ],
-    outs = ["hm-ui-bin"],
-    cmd = _BUILD_PREAMBLE + """
-cargo build --locked --manifest-path "$${build_dir}/Cargo.toml" --release
-cp "$$CARGO_TARGET_DIR/release/hm-ui" "$@"
-""",
-    executable = True,
+    srcs = ["launcher.py", "hm_bazel_runtime.py"],
+    main = "launcher.py",
+    imports = ["."],
+    data = [":hm-cli"],
+    deps = ["//hmlib:hmlib.lib", "//hockeymon:hockeymon"],
     visibility = ["//visibility:public"],
 )
 
-genrule(
-    name = "hm-ui-portable",
-    srcs = [
-        "Cargo.toml",
-        "Cargo.lock",
-        ":sources",
-        "@ubuntu2204_glibc//:sysroot",
-        "@ubuntu2204_glibc//:.sysroot_marker",
-    ],
-    outs = ["hm-ui-portable-bin"],
-    cmd = _BUILD_PREAMBLE + """
-rust_target="$$(rustc -vV | sed -n 's/^host: //p')"
-rust_target_env="$$(printf '%s' "$${rust_target}" | tr '[:lower:]-' '[:upper:]_')"
-case "$${rust_target}" in
-  x86_64-unknown-linux-gnu)
-    glibc_libdir="x86_64-linux-gnu"
-    ;;
-  aarch64-unknown-linux-gnu)
-    glibc_libdir="aarch64-linux-gnu"
-    ;;
-  *)
-    echo "Unsupported hm-ui Rust target: $${rust_target}" >&2
-    exit 1
-    ;;
-esac
-baseline_sysroot="$$(cd "$$(dirname $(location @ubuntu2204_glibc//:.sysroot_marker))" && pwd)"
-# Link target crates dynamically against the Ubuntu 22.04 (glibc 2.35)
-# sysroot. Target-specific flags leave host-built proc macros unaffected.
-rustflags="-C link-arg=--sysroot=$${baseline_sysroot}"
-rustflags="$${rustflags} -C link-arg=-L$${baseline_sysroot}/usr/lib/$${glibc_libdir}"
-rustflags="$${rustflags} -C link-arg=-L$${baseline_sysroot}/lib/$${glibc_libdir}"
-rustflags="$${rustflags} -C link-arg=-Wl,-rpath-link,$${baseline_sysroot}/lib/$${glibc_libdir}"
-rustflags="$${rustflags} -C link-arg=-Wl,--allow-shlib-undefined"
-export "CARGO_TARGET_$${rust_target_env}_RUSTFLAGS=$${rustflags}"
-cargo build --locked --manifest-path "$${build_dir}/Cargo.toml" --release --target "$${rust_target}"
-cp "$$CARGO_TARGET_DIR/$${rust_target}/release/hm-ui" "$@"
-""",
-    executable = True,
-    tags = ["manual"],
-    target_compatible_with = select({
-        ":portable_hm_ui_enabled": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
-    visibility = ["//visibility:public"],
+py_test(
+    name = "runtime_test",
+    srcs = ["runtime_test.py"],
+    data = [":hm-ui", ":hm-cli"],
 )
 
-sh_test(
-    name = "gui_smoke_test",
-    srcs = ["gui_smoke_test.sh"],
-    args = [
-        "$(rootpath :hm-ui)",
-        "$(rootpath :gui_smoke_spec.json)",
-    ],
-    data = [
-        ":gui_smoke_spec.json",
-        ":hm-ui",
-    ],
+py_binary(
+    name = "hm-cli",
+    srcs = ["backend.py", "hm_bazel_runtime.py"],
+    main = "backend.py",
+    imports = ["."],
+    deps = ["//hmlib:hmlib.lib", "//hockeymon:hockeymon"],
+    visibility = ["//visibility:public"],
 )

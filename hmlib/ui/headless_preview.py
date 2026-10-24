@@ -15,7 +15,7 @@ from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from hmlib.ui.display_env import env_flag, has_local_display_env, sanitize_display_env_for_cv2
@@ -47,7 +47,7 @@ def has_local_display() -> bool:
     return has_local_display_env()
 
 
-def _best_public_host() -> Optional[str]:
+def _best_public_host() -> str | None:
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -65,7 +65,7 @@ def _best_public_host() -> Optional[str]:
 def _normalize_preview_frame(
     img: torch.Tensor | np.ndarray | StreamTensorBase,
     *,
-    show_scaled: Optional[float] = None,
+    show_scaled: float | None = None,
 ) -> np.ndarray:
     visible = make_visible_image(
         unwrap_tensor(img),
@@ -85,7 +85,7 @@ def _normalize_preview_frame(
 
 def _infer_frame_height_width(
     img: torch.Tensor | np.ndarray | StreamTensorBase,
-) -> Optional[tuple[int, int]]:
+) -> tuple[int, int] | None:
     frame = unwrap_tensor(img)
     shape = getattr(frame, "shape", None)
     if shape is None:
@@ -110,7 +110,7 @@ def _browser_preview_auto_scale(
     *,
     max_width: int = DEFAULT_BROWSER_PREVIEW_MAX_WIDTH,
     max_height: int = DEFAULT_BROWSER_PREVIEW_MAX_HEIGHT,
-) -> Optional[float]:
+) -> float | None:
     shape = _infer_frame_height_width(img)
     if shape is None:
         return None
@@ -145,7 +145,7 @@ class _PreviewHttpServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, server_address, request_handler_class, preview: "BrowserPreviewServer"):
+    def __init__(self, server_address, request_handler_class, preview: BrowserPreviewServer):
         super().__init__(server_address, request_handler_class)
         self.preview = preview
 
@@ -153,10 +153,10 @@ class _PreviewHttpServer(ThreadingHTTPServer):
 class _PreviewRequestHandler(BaseHTTPRequestHandler):
     server: _PreviewHttpServer
 
-    def log_message(self, format: str, *args) -> None:  # noqa: A003
+    def log_message(self, format: str, *args) -> None:
         return
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         try:
             preview = self.server.preview
             preview._note_client_activity()
@@ -238,7 +238,7 @@ class _PreviewRequestHandler(BaseHTTPRequestHandler):
             "startPreview();"
             "</script>"
             "</body></html>"
-        ).encode("utf-8")
+        ).encode()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-cache, private")
@@ -296,12 +296,12 @@ class BrowserPreviewServer:
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._active_client_window_seconds = 10.0
-        self._last_client_activity: Optional[float] = None
-        self._server: Optional[_PreviewHttpServer] = None
-        self._thread: Optional[threading.Thread] = None
-        self._publisher: Optional[Any] = None
-        self._output_dir_ctx: Optional[tempfile.TemporaryDirectory[str]] = None
-        self._output_dir: Optional[Path] = None
+        self._last_client_activity: float | None = None
+        self._server: _PreviewHttpServer | None = None
+        self._thread: threading.Thread | None = None
+        self._publisher: Any | None = None
+        self._output_dir_ctx: tempfile.TemporaryDirectory[str] | None = None
+        self._output_dir: Path | None = None
         self._manifest_name = "stream.m3u8"
         self._segment_pattern = "preview-%06d.ts"
         self._announced = False
@@ -320,7 +320,7 @@ class BrowserPreviewServer:
         return self._candidate_urls()
 
     @property
-    def preferred_url(self) -> Optional[str]:
+    def preferred_url(self) -> str | None:
         urls = self.urls
         for url in urls:
             host = urlsplit(url).hostname or ""
@@ -413,7 +413,7 @@ class BrowserPreviewServer:
                     logger=self._logger,
                     profiler=self._profiler,
                 )
-            except Exception as exc:
+            except (ImportError, OSError, RuntimeError, ValueError) as exc:
                 self._logger.warning(
                     "Falling back to raw ffmpeg browser preview for %s because NVENC preview "
                     "initialization failed: %s",
@@ -432,8 +432,8 @@ class BrowserPreviewServer:
     def _effective_show_scale(
         self,
         img: torch.Tensor | np.ndarray | StreamTensorBase,
-        show_scaled: Optional[float],
-    ) -> Optional[float]:
+        show_scaled: float | None,
+    ) -> float | None:
         if show_scaled is not None:
             return show_scaled
         scale = _browser_preview_auto_scale(img)
@@ -461,7 +461,7 @@ class BrowserPreviewServer:
         self,
         img: torch.Tensor | np.ndarray | StreamTensorBase,
         *,
-        show_scaled: Optional[float] = None,
+        show_scaled: float | None = None,
         require_clients: bool = False,
     ) -> bool:
         if self._server is None:
@@ -475,7 +475,7 @@ class BrowserPreviewServer:
             self._publisher.write_frame(img, show_scaled=effective_show_scaled)
         return True
 
-    def resolve_output_path(self, relative_name: str) -> Optional[Path]:
+    def resolve_output_path(self, relative_name: str) -> Path | None:
         if self._output_dir is None:
             return None
         safe_name = Path(relative_name).name
@@ -493,7 +493,7 @@ class BrowserPreviewServer:
             return self._output_dir / safe_name
         return None
 
-    def wait_for_output(self, relative_name: str, timeout: float = 5.0) -> Optional[Path]:
+    def wait_for_output(self, relative_name: str, timeout: float = 5.0) -> Path | None:
         output_path = self.resolve_output_path(relative_name)
         if output_path is None:
             return None
@@ -537,16 +537,15 @@ class BrowserPreviewServer:
 
 def mask_stream_url(url: str) -> str:
     parsed = urlsplit(url)
-    path = parsed.path or ""
-    if path.count("/") >= 2:
-        prefix, _, suffix = path.rpartition("/")
-        if suffix:
-            suffix = suffix[:4] + "..." if len(suffix) > 4 else "***"
-        path = prefix + "/" + suffix
-    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+    if parsed.scheme not in {"rtmp", "rtmps"}:
+        return url
+    prefix, _, suffix = (parsed.path or "").rpartition("/")
+    path = prefix + ("/***" if suffix else "/")
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, host, path, "***" if parsed.query else "", ""))
 
 
-def resolve_youtube_stream_url(base_url: str, stream_key: Optional[str]) -> str:
+def resolve_youtube_stream_url(base_url: str, stream_key: str | None) -> str:
     key = (stream_key or os.environ.get("HM_YOUTUBE_STREAM_KEY") or "").strip()
     if not key:
         key = (os.environ.get("YOUTUBE_STREAM_KEY") or "").strip()
@@ -563,7 +562,7 @@ def validate_youtube_stream_url(url: str) -> None:
     if parsed.scheme not in {"rtmp", "rtmps"}:
         raise ValueError(f"YouTube live preview requires an rtmp:// or rtmps:// URL, got {url!r}")
     path = (parsed.path or "").strip("/")
-    if not path or path.endswith("live2") or path.endswith("live2/"):
+    if not path or path.endswith(("live2", "live2/")):
         raise ValueError(
             "YouTube live preview requires a full publish URL with a stream key. "
             "Provide --youtube-stream-key or set HM_YOUTUBE_STREAM_KEY."
@@ -595,8 +594,8 @@ class _HlsBitstreamMuxer:
         self._profiler = profiler
         self._hls_time = float(hls_time)
         self._hls_list_size = int(hls_list_size)
-        self._process: Optional[subprocess.Popen[bytes]] = None
-        self._stderr_thread: Optional[threading.Thread] = None
+        self._process: subprocess.Popen[bytes] | None = None
+        self._stderr_thread: threading.Thread | None = None
         self._stderr_tail: deque[str] = deque(maxlen=20)
 
     @property
@@ -746,7 +745,7 @@ class _NvencHlsPreviewPublisher:
         self,
         img: torch.Tensor | np.ndarray | StreamTensorBase,
         *,
-        show_scaled: Optional[float] = None,
+        show_scaled: float | None = None,
     ) -> None:
         frame = unwrap_tensor(img)
         if not isinstance(frame, torch.Tensor) or frame.device.type != "cuda":
@@ -826,7 +825,7 @@ class _AmdHlsPreviewPublisher:
         self,
         img: torch.Tensor | np.ndarray | StreamTensorBase,
         *,
-        show_scaled: Optional[float] = None,
+        show_scaled: float | None = None,
     ) -> None:
         frame = unwrap_tensor(img)
         if not isinstance(frame, torch.Tensor) or frame.device.type != "cuda":
@@ -876,11 +875,11 @@ class _RawHlsPreviewPublisher:
         self.fps = float(fps) if fps and fps > 0 else 30.0
         self._logger = logger if logger is not None else get_root_logger()
         self._profiler = profiler
-        self._process: Optional[subprocess.Popen[bytes]] = None
-        self._stderr_thread: Optional[threading.Thread] = None
+        self._process: subprocess.Popen[bytes] | None = None
+        self._stderr_thread: threading.Thread | None = None
         self._stderr_tail: deque[str] = deque(maxlen=20)
-        self._width: Optional[int] = None
-        self._height: Optional[int] = None
+        self._width: int | None = None
+        self._height: int | None = None
 
     @property
     def manifest_path(self) -> Path:
@@ -901,7 +900,7 @@ class _RawHlsPreviewPublisher:
             pipe.close()
 
     def _build_cmd(self, width: int, height: int) -> list[str]:
-        gop = max(1, int(round(self.fps * 0.5)))
+        gop = max(1, round(self.fps * 0.5))
         return [
             shutil.which("ffmpeg") or "ffmpeg",
             "-hide_banner",
@@ -982,7 +981,7 @@ class _RawHlsPreviewPublisher:
         self,
         img: torch.Tensor | np.ndarray | StreamTensorBase,
         *,
-        show_scaled: Optional[float] = None,
+        show_scaled: float | None = None,
     ) -> None:
         with _prof_ctx(self._profiler, "headless_preview.normalize"):
             frame = _normalize_preview_frame(img, show_scaled=show_scaled)
@@ -1026,6 +1025,43 @@ class _RawHlsPreviewPublisher:
             )
 
 
+def _live_transport(command: list[str], output_url: str, audio: dict) -> list[str]:
+    """Use a real source audio stream when supplied and split RTP with tee."""
+    audio_start = command.index("lavfi") - 1
+    audio_end = audio_start + 4
+    if audio.get("file"):
+        inputs = []
+        if audio.get("offset_seconds"):
+            offset = float(audio["offset_seconds"])
+            inputs += ["-ss", str(-offset)] if offset < 0 else ["-itsoffset", str(offset)]
+        inputs += ["-i", str(audio["file"])]
+        command[audio_start:audio_end] = inputs
+        audio_end = audio_start + len(inputs)
+        command[command.index("1:a:0")] = f"1:a:{int(audio.get('stream', 0))}"
+    if urlsplit(output_url).scheme != "rtp":
+        return command
+    if audio.get("file") and audio.get("rtp_url"):
+        command[-3:] = [
+            "-f",
+            "tee",
+            (
+                f"[select=v:f=rtp:payload_type=96]{output_url}|"
+                f"[select=a:f=rtp:payload_type=97]{audio['rtp_url']}"
+            ),
+        ]
+        return command
+    # Video-only RTSP receives no synthetic silence; remove the second input.
+    del command[audio_start:audio_end]
+    audio_map = command.index("-map", command.index("-map") + 1)
+    del command[audio_map : audio_map + 2]
+    for option in ("-c:a", "-b:a", "-ar", "-ac"):
+        index = command.index(option)
+        del command[index : index + 2]
+    command.remove("-shortest")
+    command[-3:] = ["-an", "-f", "rtp", "-payload_type", "96", output_url]
+    return command
+
+
 class _RawVideoLivePublisher:
     """Pipe raw preview frames into ffmpeg for live RTMP(S) publishing."""
 
@@ -1037,17 +1073,19 @@ class _RawVideoLivePublisher:
         fps: float,
         logger: Any = None,
         profiler: Any = None,
+        audio: dict | None = None,
     ) -> None:
         self.output_url = str(output_url)
         self.label = str(label or "Live Preview")
         self.fps = float(fps) if fps and fps > 0 else 30.0
         self._logger = logger if logger is not None else get_root_logger()
         self._profiler = profiler
-        self._process: Optional[subprocess.Popen[bytes]] = None
-        self._stderr_thread: Optional[threading.Thread] = None
+        self._audio = audio or {}
+        self._process: subprocess.Popen[bytes] | None = None
+        self._stderr_thread: threading.Thread | None = None
         self._stderr_tail: deque[str] = deque(maxlen=20)
-        self._width: Optional[int] = None
-        self._height: Optional[int] = None
+        self._width: int | None = None
+        self._height: int | None = None
 
     def _stderr_worker(self, pipe) -> None:
         try:
@@ -1060,8 +1098,8 @@ class _RawVideoLivePublisher:
             pipe.close()
 
     def _build_cmd(self, width: int, height: int) -> list[str]:
-        gop = max(1, int(round(self.fps * 2.0)))
-        return [
+        gop = max(1, round(self.fps * 2.0))
+        command = [
             shutil.which("ffmpeg") or "ffmpeg",
             "-hide_banner",
             "-loglevel",
@@ -1114,6 +1152,7 @@ class _RawVideoLivePublisher:
             "flv",
             self.output_url,
         ]
+        return _live_transport(command, self.output_url, self._audio)
 
     def _ensure_open(self, width: int, height: int) -> None:
         if self._process is not None:
@@ -1146,7 +1185,7 @@ class _RawVideoLivePublisher:
         self,
         img: torch.Tensor | np.ndarray | StreamTensorBase,
         *,
-        show_scaled: Optional[float] = None,
+        show_scaled: float | None = None,
     ) -> None:
         with _prof_ctx(self._profiler, "live_publish.normalize"):
             frame = _normalize_preview_frame(img, show_scaled=show_scaled)
@@ -1215,14 +1254,16 @@ class _BitstreamLiveMuxer:
         label: str,
         logger: Any = None,
         profiler: Any = None,
+        audio: dict | None = None,
     ) -> None:
         self.output_url = str(output_url)
         self.fps = float(fps) if fps and fps > 0 else 30.0
         self.label = str(label or "Live Preview")
         self._logger = logger if logger is not None else get_root_logger()
         self._profiler = profiler
-        self._process: Optional[subprocess.Popen[bytes]] = None
-        self._stderr_thread: Optional[threading.Thread] = None
+        self._audio = audio or {}
+        self._process: subprocess.Popen[bytes] | None = None
+        self._stderr_thread: threading.Thread | None = None
         self._stderr_tail: deque[str] = deque(maxlen=20)
 
     def _stderr_worker(self, pipe) -> None:
@@ -1236,13 +1277,18 @@ class _BitstreamLiveMuxer:
             pipe.close()
 
     def _build_cmd(self) -> list[str]:
-        ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
-        return build_ffmpeg_live_bitstream_publish_cmd(
-            ffmpeg=ffmpeg,
+        command = build_ffmpeg_live_bitstream_publish_cmd(
+            ffmpeg=shutil.which("ffmpeg") or "ffmpeg",
             output_url=self.output_url,
             stream_format="h264",
             fps=self.fps,
         )
+        if urlsplit(self.output_url).scheme == "rtp":
+            command[1:1] = ["-probesize", "32", "-analyzeduration", "0"]
+            # RTSP clients can attach after encoding starts. NVENC emits SPS/PPS
+            # once; repeat the parsed headers at every IDR for late subscribers.
+            command[command.index("-bsf:v") + 1] += ",dump_extra=freq=keyframe"
+        return _live_transport(command, self.output_url, self._audio)
 
     def start(self) -> None:
         if self._process is not None:
@@ -1336,12 +1382,14 @@ class _NvencLivePublisher:
         fps: float,
         logger: Any = None,
         profiler: Any = None,
+        audio: dict | None = None,
     ) -> None:
         self.output_url = str(output_url)
         self.label = str(label or "Live Preview")
         self.fps = float(fps) if fps and fps > 0 else 30.0
         self._logger = logger if logger is not None else get_root_logger()
         self._profiler = profiler
+        self._audio = audio or {}
         self._encoder = None
         self._muxer = _BitstreamLiveMuxer(
             output_url=self.output_url,
@@ -1349,6 +1397,7 @@ class _NvencLivePublisher:
             label=self.label,
             logger=self._logger,
             profiler=self._profiler,
+            audio=self._audio,
         )
 
     def _ensure_open(self, frame: torch.Tensor) -> None:
@@ -1378,7 +1427,7 @@ class _NvencLivePublisher:
         self,
         img: torch.Tensor | np.ndarray | StreamTensorBase,
         *,
-        show_scaled: Optional[float] = None,
+        show_scaled: float | None = None,
     ) -> None:
         frame = unwrap_tensor(img)
         if not isinstance(frame, torch.Tensor) or frame.device.type != "cuda":
@@ -1416,12 +1465,14 @@ class _AmdLivePublisher:
         fps: float,
         logger: Any = None,
         profiler: Any = None,
+        audio: dict | None = None,
     ) -> None:
         self.output_url = str(output_url)
         self.label = str(label or "Live Preview")
         self.fps = float(fps) if fps and fps > 0 else 30.0
         self._logger = logger if logger is not None else get_root_logger()
         self._profiler = profiler
+        self._audio = audio or {}
         self._encoder = None
         self._muxer = _BitstreamLiveMuxer(
             output_url=self.output_url,
@@ -1429,6 +1480,7 @@ class _AmdLivePublisher:
             label=self.label,
             logger=self._logger,
             profiler=self._profiler,
+            audio=self._audio,
         )
 
     def _ensure_open(self, frame: torch.Tensor) -> None:
@@ -1455,7 +1507,7 @@ class _AmdLivePublisher:
         self,
         img: torch.Tensor | np.ndarray | StreamTensorBase,
         *,
-        show_scaled: Optional[float] = None,
+        show_scaled: float | None = None,
     ) -> None:
         frame = unwrap_tensor(img)
         if not isinstance(frame, torch.Tensor) or frame.device.type != "cuda":
@@ -1499,13 +1551,15 @@ class FFmpegLivePublisher:
         fps: float,
         logger: Any = None,
         profiler: Any = None,
+        audio: dict | None = None,
     ) -> None:
         self.output_url = str(output_url)
         self.label = str(label or "Live Preview")
         self.fps = float(fps) if fps and fps > 0 else 30.0
         self._logger = logger if logger is not None else get_root_logger()
         self._profiler = profiler
-        self._backend: Optional[Any] = None
+        self._audio = audio or {}
+        self._backend: Any | None = None
 
     def _select_backend(self, img: torch.Tensor | np.ndarray | StreamTensorBase) -> Any:
         frame = unwrap_tensor(img)
@@ -1518,6 +1572,7 @@ class FFmpegLivePublisher:
                         fps=self.fps,
                         logger=self._logger,
                         profiler=self._profiler,
+                        audio=self._audio,
                     )
                 return _NvencLivePublisher(
                     output_url=self.output_url,
@@ -1525,8 +1580,9 @@ class FFmpegLivePublisher:
                     fps=self.fps,
                     logger=self._logger,
                     profiler=self._profiler,
+                    audio=self._audio,
                 )
-            except Exception as exc:
+            except (ImportError, OSError, RuntimeError, ValueError) as exc:
                 self._logger.warning(
                     "Falling back to raw ffmpeg live publisher for %s because NVENC live "
                     "publisher initialization failed: %s",
@@ -1539,13 +1595,14 @@ class FFmpegLivePublisher:
             fps=self.fps,
             logger=self._logger,
             profiler=self._profiler,
+            audio=self._audio,
         )
 
     def write_frame(
         self,
         img: torch.Tensor | np.ndarray | StreamTensorBase,
         *,
-        show_scaled: Optional[float] = None,
+        show_scaled: float | None = None,
     ) -> None:
         if self._backend is None:
             self._backend = self._select_backend(img)

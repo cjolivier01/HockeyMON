@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from itertools import pairwise
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -23,7 +24,7 @@ from hmlib.utils.path import add_prefix_to_filename
 from .base import Plugin
 
 
-def _ctx_value(context: Dict[str, Any], key: str) -> Optional[Any]:
+def _ctx_value(context: dict[str, Any], key: str) -> Any | None:
     if not key:
         return None
     if key in context:
@@ -34,7 +35,7 @@ def _ctx_value(context: Dict[str, Any], key: str) -> Optional[Any]:
     return None
 
 
-def _output_label(context: Dict[str, Any]) -> Optional[str]:
+def _output_label(context: dict[str, Any]) -> str | None:
     label = _ctx_value(context, "output_label") or _ctx_value(context, "label")
     if label is None:
         return None
@@ -42,14 +43,11 @@ def _output_label(context: Dict[str, Any]) -> Optional[str]:
     return label_str if label_str else None
 
 
-def _apply_output_label(filename: str, context: Dict[str, Any]) -> str:
+def _apply_output_label(filename: str, context: dict[str, Any]) -> str:
     label = _output_label(context)
     if not label:
         return filename
-    try:
-        return str(add_prefix_to_filename(filename, label))
-    except Exception:
-        return filename
+    return str(add_prefix_to_filename(filename, label))
 
 
 def _apply_track_mask(inst, tids, tlbr, scores, labels):
@@ -118,9 +116,9 @@ class SaveDetectionsPlugin(SavePluginBase):
         self._work_dir_key = work_dir_key
         self._output_filename = output_filename
         self._write_interval = write_interval
-        self._detection_dataframe: Optional[DetectionDataFrame] = None
+        self._detection_dataframe: DetectionDataFrame | None = None
 
-    def _ensure_dataframe(self, context: Dict[str, Any]) -> Optional[DetectionDataFrame]:
+    def _ensure_dataframe(self, context: dict[str, Any]) -> DetectionDataFrame | None:
         if self._detection_dataframe is not None:
             return self._detection_dataframe
         work_dir = _ctx_value(context, self._work_dir_key)
@@ -133,7 +131,7 @@ class SaveDetectionsPlugin(SavePluginBase):
         )
         return self._detection_dataframe
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
@@ -158,38 +156,12 @@ class SaveDetectionsPlugin(SavePluginBase):
         video_len = len(track_data_sample)
         for i in range(video_len):
             img_data_sample = track_data_sample[i]
-            inst = getattr(img_data_sample, "pred_instances", None)
-            if inst is None:
-                # No detections: still record an empty frame
-                try:
-                    df.add_frame_sample(frame_id=int(frame_id0 + i), data_sample=img_data_sample)
-                except Exception:
-                    df.add_frame_records(
-                        frame_id=int(frame_id0 + i),
-                        scores=np.empty((0,), dtype=np.float32),
-                        labels=np.empty((0,), dtype=np.int64),
-                        bboxes=np.empty((0, 4), dtype=np.float32),
-                    )
-                continue
-            # Determine frame id
-            fid = img_data_sample.metainfo.get("frame_id", None)
-            try:
-                if isinstance(fid, torch.Tensor):
-                    fid = int(fid.reshape([1])[0].item())
-            except Exception:
-                fid = None
+            fid = img_data_sample.metainfo.get("frame_id")
+            if isinstance(fid, torch.Tensor):
+                fid = int(fid.item())
             if fid is None:
                 fid = frame_id0 + i
-
-            try:
-                df.add_frame_sample(frame_id=int(fid), data_sample=img_data_sample)
-            except Exception:
-                df.add_frame_records(
-                    frame_id=int(fid),
-                    scores=getattr(inst, "scores", np.empty((0,), dtype=np.float32)),
-                    labels=getattr(inst, "labels", np.empty((0,), dtype=np.int64)),
-                    bboxes=getattr(inst, "bboxes", np.empty((0, 4), dtype=np.float32)),
-                )
+            df.add_frame_sample(frame_id=int(fid), data_sample=img_data_sample)
 
         return {"detection_dataframe": df}
 
@@ -229,9 +201,9 @@ class SaveTrackingPlugin(SavePluginBase):
         self._work_dir_key = work_dir_key
         self._output_filename = output_filename
         self._write_interval = write_interval
-        self._tracking_dataframe: Optional[TrackingDataFrame] = None
+        self._tracking_dataframe: TrackingDataFrame | None = None
 
-    def _ensure_dataframe(self, context: Dict[str, Any]) -> Optional[TrackingDataFrame]:
+    def _ensure_dataframe(self, context: dict[str, Any]) -> TrackingDataFrame | None:
         if self._tracking_dataframe is not None:
             return self._tracking_dataframe
         work_dir = _ctx_value(context, self._work_dir_key)
@@ -246,7 +218,7 @@ class SaveTrackingPlugin(SavePluginBase):
         )
         return self._tracking_dataframe
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
@@ -275,26 +247,6 @@ class SaveTrackingPlugin(SavePluginBase):
 
         for i in range(video_len):
             img_data_sample = track_data_sample[i]
-            inst = getattr(img_data_sample, "pred_track_instances", None)
-            if inst is None:
-                # No tracks: still record an empty frame
-                try:
-                    df.add_frame_sample(
-                        frame_id=frame_id0 + i,
-                        data_sample=img_data_sample,
-                        jersey_info=None,
-                        action_info=None,
-                    )
-                except Exception:
-                    df.add_frame_records(
-                        frame_id=frame_id0 + i,
-                        tracking_ids=np.empty((0,), dtype=np.int64),
-                        tlbr=np.empty((0, 4), dtype=np.float32),
-                        scores=np.empty((0,), dtype=np.float32),
-                        labels=np.empty((0,), dtype=np.int64),
-                        jersey_info=None,
-                    )
-                continue
             jersey_results = (
                 jersey_results_all[i]
                 if isinstance(jersey_results_all, list) and i < len(jersey_results_all)
@@ -306,28 +258,13 @@ class SaveTrackingPlugin(SavePluginBase):
                 else None
             )
 
-            try:
-                df.add_frame_sample(
-                    frame_id=frame_id0 + i,
-                    data_sample=img_data_sample,
-                    jersey_info=jersey_results,
-                    action_info=action_results,
-                )
-            except Exception:
-                tids = getattr(inst, "instances_id", np.empty((0,), dtype=np.int64))
-                tlbr = getattr(inst, "bboxes", np.empty((0, 4), dtype=np.float32))
-                scores = getattr(inst, "scores", np.empty((0,), dtype=np.float32))
-                labels = getattr(inst, "labels", np.empty((0,), dtype=np.int64))
-                tids, tlbr, scores, labels = _apply_track_mask(inst, tids, tlbr, scores, labels)
-                df.add_frame_records(
-                    frame_id=frame_id0 + i,
-                    tracking_ids=tids,
-                    tlbr=tlbr,
-                    scores=scores,
-                    labels=labels,
-                    jersey_info=jersey_results,
-                    action_info=action_results,
-                )
+            df.add_frame_sample(
+                frame_id=frame_id0 + i,
+                data_sample=img_data_sample,
+                jersey_info=jersey_results,
+                action_info=action_results,
+            )
+
         return {"tracking_dataframe": df}
 
     def input_keys(self):
@@ -365,9 +302,9 @@ class SavePosePlugin(SavePluginBase):
         self._work_dir_key = work_dir_key
         self._output_filename = output_filename
         self._write_interval = write_interval
-        self._pose_dataframe: Optional[PoseDataFrame] = None
+        self._pose_dataframe: PoseDataFrame | None = None
 
-    def _ensure_dataframe(self, context: Dict[str, Any]) -> Optional[PoseDataFrame]:
+    def _ensure_dataframe(self, context: dict[str, Any]) -> PoseDataFrame | None:
         if self._pose_dataframe is not None:
             return self._pose_dataframe
         work_dir = _ctx_value(context, self._work_dir_key)
@@ -381,51 +318,14 @@ class SavePosePlugin(SavePluginBase):
         )
         return self._pose_dataframe
 
-    @staticmethod
-    def _to_list(x):
-        try:
-            if isinstance(x, torch.Tensor):
-                return x.detach().cpu().tolist()
-            if isinstance(x, np.ndarray):
-                return x.tolist()
-        except Exception:
-            pass
-        return x
-
-    @classmethod
-    def _simplify_pose_item(cls, pose_result_item: Any) -> Dict[str, Any]:
-        preds = None
-        try:
-            preds = pose_result_item.get("predictions")
-        except Exception:
-            preds = None
-        out_preds: List[Dict[str, Any]] = []
-        if isinstance(preds, list):
-            for ds in preds:
-                inst = getattr(ds, "pred_instances", None)
-                item: Dict[str, Any] = {}
-                if inst is not None:
-                    for k in (
-                        "bboxes",
-                        "scores",
-                        "bbox_scores",
-                        "labels",
-                        "keypoints",
-                        "keypoint_scores",
-                    ):
-                        if hasattr(inst, k):
-                            item[k] = cls._to_list(getattr(inst, k))
-                out_preds.append(item)
-        return {"predictions": out_preds}
-
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
         df = self._ensure_dataframe(context)
         if df is None:
             return {}
 
-        pose_results: Optional[List[Any]] = context.get("pose_results")
+        pose_results: list[Any] | None = context.get("pose_results")
 
         frame_id0: int = int(context.get("frame_id", -1))
         # If pose_results is missing, write empty entries for each frame
@@ -442,12 +342,7 @@ class SavePosePlugin(SavePluginBase):
                 )
         else:
             for i, item in enumerate(pose_results):
-                # Prefer direct PoseDataSample storage
-                try:
-                    df.add_frame_sample(frame_id=frame_id0 + i, pose_item=item)
-                except Exception:
-                    simp = self._simplify_pose_item(item)
-                    df.add_frame_records(frame_id=frame_id0 + i, pose_json=json.dumps(simp))
+                df.add_frame_sample(frame_id=frame_id0 + i, pose_item=item)
         return {"pose_dataframe": df}
 
     def input_keys(self):
@@ -493,9 +388,9 @@ class SaveActionsPlugin(SavePluginBase):
         self._work_dir_key = work_dir_key
         self._output_filename = output_filename
         self._write_interval = write_interval
-        self._action_dataframe: Optional[ActionDataFrame] = None
+        self._action_dataframe: ActionDataFrame | None = None
 
-    def _ensure_action_dataframe(self, context: Dict[str, Any]) -> Optional[ActionDataFrame]:
+    def _ensure_action_dataframe(self, context: dict[str, Any]) -> ActionDataFrame | None:
         if self._action_dataframe is not None:
             return self._action_dataframe
         work_dir = _ctx_value(context, self._work_dir_key)
@@ -508,11 +403,15 @@ class SaveActionsPlugin(SavePluginBase):
         )
         return self._action_dataframe
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
         df = context.get("tracking_dataframe")
+        if df is not None and not df.output_file:
+            # Reuse exposes an input-only reader, not a sink for new inference.
+            # SaveTrackingPlugin owns telemetry; the action CSV is independent.
+            df = None
         action_df = context.get("action_dataframe") or self._ensure_action_dataframe(context)
         if df is None and action_df is None:
             return {}
@@ -555,13 +454,7 @@ class SaveActionsPlugin(SavePluginBase):
                 )
             # Optionally write dedicated action dataframe
             if action_df is not None and actions is not None:
-                try:
-                    # Build list of ActionDataSample-like dicts (tracking_id, label_index/label, score)
-                    action_df.add_frame_sample(frame_id=frame_id0 + i, data_samples=actions)
-                except Exception:
-                    action_df.add_frame_records(
-                        frame_id=frame_id0 + i, action_json=json.dumps(actions)
-                    )
+                action_df.add_frame_sample(frame_id=frame_id0 + i, data_samples=actions)
         return {"action_dataframe": action_df} if action_df is not None else {}
 
     def input_keys(self):
@@ -608,13 +501,13 @@ class SaveCameraPlugin(SavePluginBase):
         self._fast_output_filename = fast_output_filename
         self._save_fast = bool(save_fast)
         self._write_interval = write_interval
-        self._camera_dataframe: Optional[CameraTrackingDataFrame] = None
-        self._camera_fast_dataframe: Optional[CameraTrackingDataFrame] = None
-        self._camera_policy_dataframes: List[CameraPolicyDataFrame] = []
-        self._last_policy_frame: Optional[int] = None
-        self._last_camera_frame: Optional[int] = None
+        self._camera_dataframe: CameraTrackingDataFrame | None = None
+        self._camera_fast_dataframe: CameraTrackingDataFrame | None = None
+        self._camera_policy_dataframes: list[CameraPolicyDataFrame] = []
+        self._last_policy_frame: int | None = None
+        self._last_camera_frame: int | None = None
 
-    def _ensure_dataframe(self, context: Dict[str, Any]) -> Optional[CameraTrackingDataFrame]:
+    def _ensure_dataframe(self, context: dict[str, Any]) -> CameraTrackingDataFrame | None:
         if self._camera_dataframe is not None:
             return self._camera_dataframe
         work_dir = _ctx_value(context, self._work_dir_key)
@@ -629,7 +522,7 @@ class SaveCameraPlugin(SavePluginBase):
         self._camera_dataframe.write_interval = self._write_interval
         return self._camera_dataframe
 
-    def _ensure_fast_dataframe(self, context: Dict[str, Any]) -> Optional[CameraTrackingDataFrame]:
+    def _ensure_fast_dataframe(self, context: dict[str, Any]) -> CameraTrackingDataFrame | None:
         if not self._save_fast:
             return None
         if self._camera_fast_dataframe is not None:
@@ -648,7 +541,7 @@ class SaveCameraPlugin(SavePluginBase):
         self._camera_fast_dataframe.write_interval = self._write_interval
         return self._camera_fast_dataframe
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
@@ -665,7 +558,7 @@ class SaveCameraPlugin(SavePluginBase):
         current_box = context.get("current_box")
         current_fast_box = context.get("current_fast_box_list")
 
-        def _to_tlbr_array(box_obj: Any) -> Optional[np.ndarray]:
+        def _to_tlbr_array(box_obj: Any) -> np.ndarray | None:
             if box_obj is None:
                 return None
             box_obj = unwrap_tensor(box_obj)
@@ -712,7 +605,7 @@ class SaveCameraPlugin(SavePluginBase):
             for i in range(int(tlbr.shape[0])):
                 dataframe.add_frame_records(frame_id=frame_ids[i], tlbr=tlbr[i : i + 1])
 
-        out: Dict[str, Any] = {}
+        out: dict[str, Any] = {}
         if df is not None:
             out["camera_dataframe"] = df
         if fast_df is not None:
@@ -721,20 +614,20 @@ class SaveCameraPlugin(SavePluginBase):
 
     def _save_policy_events(
         self,
-        events: List[Dict[str, Any]],
-        frame_ids: List[int],
-        cameras: List[CameraTrackingDataFrame],
+        events: list[dict[str, Any]],
+        frame_ids: list[int],
+        cameras: list[CameraTrackingDataFrame],
     ) -> None:
         if not isinstance(events, list):
-            raise ValueError("Camera policy events must be a list")
-        if any(right <= left for left, right in zip(frame_ids, frame_ids[1:])) or (
+            raise TypeError("Camera policy events must be a list")
+        if any(right <= left for left, right in pairwise(frame_ids)) or (
             self._last_camera_frame is not None and frame_ids[0] <= self._last_camera_frame
         ):
             raise ValueError("Camera policy export requires increasing source frame IDs")
         last = self._last_policy_frame
         for event in events:
             if not isinstance(event, dict):
-                raise ValueError("Invalid camera policy event")
+                raise TypeError("Invalid camera policy event")
             frame = event.get("frame")
             if (
                 isinstance(frame, bool)

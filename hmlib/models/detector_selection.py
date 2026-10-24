@@ -352,7 +352,17 @@ def configure_detector_selection(args, game_config: dict) -> None:
     for backend, field, extension in (("trt", "engine", "engine"), ("onnx", "path", "onnx")):
         options = params.setdefault(backend, {})
         path = Path(options.get(field) or f"output_workdirs/{args.game_id}/detector.{extension}")
-        options[field] = str(path.with_name(f"{path.stem}-{identity}{path.suffix}"))
+        # A prepared artifact already carries this identity. Preserve it when
+        # reopening that exact model, including its calibrated INT8 variant.
+        if path.stem.endswith((f"-{identity}", f"-{identity}.int8")):
+            options[field] = str(path)
+        elif path.stem.endswith(".int8") and (path.parent / "ready.json").is_file():
+            raise ValueError(
+                "The prepared INT8 detector does not match the selected model; "
+                "prepare the selected model before running it"
+            )
+        else:
+            options[field] = str(path.with_name(f"{path.stem}-{identity}{path.suffix}"))
     if not args.compare_detectors:
         return
     # `distilled` and `hockeyref` are opt-in: both need a locally trained

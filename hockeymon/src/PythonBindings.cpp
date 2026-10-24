@@ -28,6 +28,7 @@
 #include "hockeymon/csrc/df/DfTrackerCudaStatic.h"
 #include "hockeymon/csrc/kmeans/kmeans.h"
 #include "hockeymon/csrc/play_tracker/BoxUtils.h"
+#include "hockeymon/csrc/play_tracker/PlayTrackerSnapshot.h"
 #include "hockeymon/csrc/play_tracker/LivingBoxImpl.h"
 #include "hockeymon/csrc/play_tracker/PlayTracker.h"
 #include "hockeymon/csrc/play_tracker/ResizingBox.h"
@@ -2027,6 +2028,20 @@ void init_play_tracker(::pybind11::module_& m) {
           py::arg("tracking_boxes"),
           py::arg("debug_to_stdout") = false,
           py::call_guard<py::gil_scoped_release>())
+      .def("replay_checkpoint", [](const PlayTracker& tracker) {
+        return hm::play_tracker::serialize_snapshot(tracker.snapshot());
+      })
+      .def("replay_arena", [](const PlayTracker& tracker) {
+        const auto snapshot = tracker.snapshot();
+        if (snapshot.living_boxes.empty() || !snapshot.living_boxes.front().config.arena_box)
+          throw std::runtime_error("Native replay requires a bounded camera arena");
+        const auto& box = *snapshot.living_boxes.front().config.arena_box;
+        return std::array<float, 4>{box.left, box.top, box.right, box.bottom};
+      })
+      .def_static("from_replay_checkpoint", [](const std::string& state) {
+        return std::shared_ptr<PlayTracker>(PlayTracker::from_snapshot(
+            hm::play_tracker::deserialize_snapshot(state)));
+      })
       .def("get_live_box", &PlayTracker::get_live_box, py::arg("index"))
       .def("set_bboxes", &PlayTracker::set_bboxes, py::arg("bboxes"))
       .def(

@@ -7,10 +7,11 @@ import gc
 import hashlib
 import os
 import re
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any
 
 import cv2
 import mmcv
@@ -41,8 +42,10 @@ from hmlib.utils.image import (
     make_channels_first,
     make_channels_last,
 )
+from hmlib.utils.model_registry import model_registry_scope
 
 DEFAULT_SCORE_THRESH = 0.3
+_CPU_DEVICE = torch.device("cpu")
 
 if TYPE_CHECKING:
     from mmdet.models.detectors.base import BaseDetector
@@ -57,7 +60,7 @@ def _game_dir_for_id(game_id: str, assert_exists: bool = True) -> str:
     return str(Path(base_dir) / game_id)
 
 
-def _get_first_frame(video_path: str) -> Optional[torch.Tensor]:
+def _get_first_frame(video_path: str) -> torch.Tensor | None:
     video_reader = mmcv.VideoReader(str(video_path))
     frame = video_reader.read()
     if frame is None:
@@ -118,7 +121,7 @@ def scale_images_nn(images: torch.Tensor, scale: float) -> torch.Tensor:
 
 def find_extreme_points(
     mask: torch.Tensor,
-) -> Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int], Tuple[int, int]]:
+) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int], tuple[int, int]]:
     """
     Find the extreme points in a binary mask where the bit is set.
 
@@ -147,7 +150,7 @@ def find_extreme_points(
     return min_x_pos, max_x_pos, min_y_pos, max_y_pos
 
 
-def enclosing_bbox(bboxes: Union[torch.Tensor, np.ndarray]) -> torch.Tensor:
+def enclosing_bbox(bboxes: torch.Tensor | np.ndarray) -> torch.Tensor:
     if isinstance(bboxes, np.ndarray):
         bboxes = torch.from_numpy(bboxes)
 
@@ -178,7 +181,7 @@ def result_to_polygons(
     category_id: int = 1,
     score_thr: float = 0,
     show: bool = False,
-) -> Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]]:
+) -> dict[str, list[list[tuple[int, int]]] | list[Polygon] | list[np.ndarray]]:
     """
     Theoretically, could return more than one polygon, especially if there's an obstruction
     """
@@ -210,8 +213,8 @@ def result_to_polygons(
 
     masks = segms
 
-    contours_list: List[np.ndarray] = []
-    mask_list: List[np.ndarray] = []
+    contours_list: list[np.ndarray] = []
+    mask_list: list[np.ndarray] = []
     combined_mask = None
 
     combined_bbox = enclosing_bbox(bboxes)
@@ -235,7 +238,7 @@ def result_to_polygons(
             # mmcv.imshow(mask_image, "Ice-rink Mask", wait_time=90)
             do_show_image("Ice-rink", mask_image)
 
-    results: Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]] = {}
+    results: dict[str, list[list[tuple[int, int]]] | list[Polygon] | list[np.ndarray]] = {}
     results["contours"] = contours_list
     results["masks"] = [m.cpu() for m in mask_list]
     results["combined_mask"] = combined_mask.cpu()
@@ -246,7 +249,7 @@ def result_to_polygons(
     return results
 
 
-def contours_to_polygons(contours: List[np.ndarray]) -> List[Polygon]:
+def contours_to_polygons(contours: list[np.ndarray]) -> list[Polygon]:
     return [Polygon(c) for c in contours]
 
 
@@ -257,24 +260,24 @@ def _resize_mask(mask: torch.Tensor, height: int, width: int) -> torch.Tensor:
 
 
 def _rescale_rink_results(
-    rink_results: Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]],
+    rink_results: dict[str, list[list[tuple[int, int]]] | list[Polygon] | list[np.ndarray]],
     scale_factor: float,
-    original_size: Tuple[int, int],
-) -> Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]]:
+    original_size: tuple[int, int],
+) -> dict[str, list[list[tuple[int, int]]] | list[Polygon] | list[np.ndarray]]:
     if scale_factor == 1.0:
         return rink_results
 
     inv_scale = 1.0 / scale_factor
     orig_height, orig_width = original_size
 
-    if "contours" in rink_results and rink_results["contours"]:
-        scaled_contours: List[np.ndarray] = []
+    if rink_results.get("contours"):
+        scaled_contours: list[np.ndarray] = []
         for contour in rink_results["contours"]:
             contour_np = np.asarray(contour, dtype=np.float32)
             scaled_contours.append(contour_np * inv_scale)
         rink_results["contours"] = scaled_contours
 
-    if "masks" in rink_results and rink_results["masks"]:
+    if rink_results.get("masks"):
         rink_results["masks"] = [
             _resize_mask(mask, orig_height, orig_width) for mask in rink_results["masks"]
         ]
@@ -314,11 +317,11 @@ def rink_category_id(model: "BaseDetector", default: int = 1) -> int:
 
 
 def detect_ice_rink_mask(
-    image: Union[torch.Tensor, np.ndarray],
+    image: torch.Tensor | np.ndarray,
     model: "BaseDetector",
     show: bool = False,
-    category_id: Optional[int] = None,
-) -> Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]]:
+    category_id: int | None = None,
+) -> dict[str, list[list[tuple[int, int]]] | list[Polygon] | list[np.ndarray]]:
     from mmdet.apis import inference_detector
 
     if isinstance(image, torch.Tensor):
@@ -327,7 +330,8 @@ def detect_ice_rink_mask(
             image = image.squeeze(0)
         image = image.cpu().numpy()
     image = make_channels_last(image)
-    result: "DetDataSample" = inference_detector(model, image)
+    with model_registry_scope("mmdet"):
+        result: DetDataSample = inference_detector(model, image)
 
     if show:
         show_image = image.cpu().unsqueeze(0).numpy() if isinstance(image, torch.Tensor) else image
@@ -346,13 +350,13 @@ def detect_ice_rink_mask(
 
 
 def find_ice_rink_masks(
-    image: Union[torch.Tensor, List[torch.Tensor]],
+    image: torch.Tensor | list[torch.Tensor],
     config_file: str,
     checkpoint: str,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
     show: bool = False,
-    inference_scale: Optional[float] = None,
-) -> List[Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]]]:
+    inference_scale: float | None = None,
+) -> list[dict[str, list[list[tuple[int, int]]] | list[Polygon] | list[np.ndarray]]]:
     from mmdet.apis import init_detector
 
     if device is None:
@@ -371,19 +375,18 @@ def find_ice_rink_masks(
 
     if device.type == "cpu":
         logger.info("Looking for the ice at the rink, this may take awhile...")
-    model = init_detector(config_file, checkpoint, device=device)
+    with model_registry_scope("mmdet"):
+        model = init_detector(config_file, checkpoint, device=device)
     category_id = rink_category_id(model)
     logger.info(
         f"Ice rink detector classes={(getattr(model, 'dataset_meta', None) or {}).get('classes')}, "
         f"using category_id={category_id}"
     )
-    results: List[
-        Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]]
-    ] = []
+    results: list[dict[str, list[list[tuple[int, int]]] | list[Polygon] | list[np.ndarray]]] = []
     for img in image:
         orig_height = image_height(img)
         orig_width = image_width(img)
-        infer_image: Union[np.ndarray, torch.Tensor]
+        infer_image: np.ndarray | torch.Tensor
         if isinstance(img, torch.Tensor):
             infer_image = img.cpu().numpy()
         else:
@@ -391,8 +394,8 @@ def find_ice_rink_masks(
         infer_image = np.ascontiguousarray(infer_image)
 
         if inference_scale and inference_scale != 1.0:
-            new_width = max(1, int(round(orig_width * inference_scale)))
-            new_height = max(1, int(round(orig_height * inference_scale)))
+            new_width = max(1, round(orig_width * inference_scale))
+            new_height = max(1, round(orig_height * inference_scale))
             interpolation = cv2.INTER_AREA if inference_scale < 1.0 else cv2.INTER_LINEAR
             infer_image = cv2.resize(
                 infer_image, (new_width, new_height), interpolation=interpolation
@@ -454,7 +457,7 @@ def load_png_as_boolean_tensor(filename: str) -> torch.Tensor:
     return boolean_tensor
 
 
-def save_boolean_tensor_as_png(tensor: Union[torch.Tensor, np.ndarray], filename: str):
+def save_boolean_tensor_as_png(tensor: torch.Tensor | np.ndarray, filename: str):
     """
     Saves a PyTorch boolean tensor as a PNG image.
 
@@ -475,7 +478,7 @@ def save_boolean_tensor_as_png(tensor: Union[torch.Tensor, np.ndarray], filename
     image.save(filename)
 
 
-def _rink_mask_file_prefix(geometry_revision: Optional[str]) -> str:
+def _rink_mask_file_prefix(geometry_revision: str | None) -> str:
     """Name rink masks after the stitch geometry they were generated for.
 
     Derived on every use and never stored: a second copy of this in the game
@@ -489,7 +492,7 @@ def _rink_mask_file_prefix(geometry_revision: Optional[str]) -> str:
 
 
 def _atomically_save_mask_png(
-    mask: Union[torch.Tensor, np.ndarray], *, game_dir: str, image_file: str
+    mask: torch.Tensor | np.ndarray, *, game_dir: str, image_file: str
 ) -> None:
     """Publish a mask PNG so a concurrent reader never observes a partial file."""
     with tempfile.NamedTemporaryFile(suffix=".png", dir=game_dir, delete=False) as temporary_file:
@@ -532,9 +535,9 @@ def _prune_stale_revision_masks(game_dir: str, *, keep_prefix: str) -> None:
 
 def save_rink_profile_config(
     game_id: str,
-    rink_profile: Dict[str, Union[List[List[Tuple[int, int]]], List[Polygon], List[np.ndarray]]],
-    geometry_revision: Optional[str] = None,
-) -> Dict[str, Any]:
+    rink_profile: dict[str, list[list[tuple[int, int]]] | list[Polygon] | list[np.ndarray]],
+    geometry_revision: str | None = None,
+) -> dict[str, Any]:
     from hmlib.stitching.artifacts import stitching_lock
 
     game_dir = _game_dir_for_id(game_id, assert_exists=False)
@@ -588,7 +591,7 @@ def save_rink_profile_config(
 
 def load_rink_combined_mask(
     game_id: str,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     game_config = get_game_config_private(game_id=game_id)
     if not game_config:
         return None
@@ -619,7 +622,7 @@ def load_rink_combined_mask(
     if centroid is not None:
         centroid = torch.tensor(centroid, dtype=torch.float)
     combined_bbox = get_nested_value(game_config, "rink.ice_contours_combined_bbox", None)
-    results: Dict[str, Any] = {
+    results: dict[str, Any] = {
         "combined_mask": combined_mask,
         "centroid": centroid,
         "combined_bbox": combined_bbox,
@@ -647,7 +650,7 @@ def _resolve_path_override(path_str: str, what: str) -> str:
 
 
 def get_device_to_use_for_rink(
-    gpu_allocator: GpuAllocator, default_device: torch.device = torch.device("cpu")
+    gpu_allocator: GpuAllocator, default_device: torch.device = _CPU_DEVICE
 ) -> torch.device:
     if gpu_allocator is not None and not gpu_allocator.is_single_lowmem_gpu():
         device_index = gpu_allocator.get_largest_mem_gpu()
@@ -658,17 +661,17 @@ def get_device_to_use_for_rink(
 
 def configure_ice_rink_mask(
     game_id: str,
-    expected_shape: Optional[torch.Size],
-    device: Optional[torch.device] = None,
+    expected_shape: torch.Size | None,
+    device: torch.device | None = None,
     force: bool = False,
     show: bool = False,
-    image: Union[torch.Tensor, np.ndarray, StreamTensorBase, None] = None,
-    scale: Optional[float] = None,
+    image: torch.Tensor | np.ndarray | StreamTensorBase | None = None,
+    scale: float | None = None,
     persist: bool = True,
-    checkpoint: Optional[str] = None,
-    model_config: Optional[str] = None,
-    geometry_revision: Optional[str] = None,
-) -> Optional[torch.Tensor]:
+    checkpoint: str | None = None,
+    model_config: str | None = None,
+    geometry_revision: str | None = None,
+) -> torch.Tensor | None:
     if expected_shape is None and image is not None:
         expected_shape = torch.Size((image_height(image), image_width(image)))
     if not force:
@@ -721,7 +724,7 @@ def configure_ice_rink_mask(
     if not game_dir:
         raise AttributeError(f"Could not determine game dir for game_id={game_id}")
     image_file: Path = Path(game_dir) / "s.png"
-    image_frame: Optional[torch.Tensor] = None
+    image_frame: torch.Tensor | None = None
     if image is not None:
         image_frame = image
         if isinstance(image_frame, StreamTensorBase):
@@ -852,7 +855,7 @@ class MaskEdgeDistances:
 
     def distances_to_edges(
         self, x: int, y: int
-    ) -> Optional[Tuple[Optional[int], Optional[int], Optional[int], Optional[int]]]:
+    ) -> tuple[int | None, int | None, int | None, int | None] | None:
         """
         Calculate distances from point (x, y) to the precomputed edges.
 
@@ -881,21 +884,21 @@ class MaskEdgeDistances:
         bottom_edge = self.bottom_edges[x].item()
 
         # Compute vertical distances
-        top_distance: Optional[int] = y - top_edge if top_edge != -1 else None
-        bottom_distance: Optional[int] = bottom_edge - y if bottom_edge != -1 else None
+        top_distance: int | None = y - top_edge if top_edge != -1 else None
+        bottom_distance: int | None = bottom_edge - y if bottom_edge != -1 else None
 
         # Get left and right edges for row y
         left_edge = self.left_edges[y].item()
         right_edge = self.right_edges[y].item()
 
         # Compute horizontal distances
-        left_distance: Optional[int] = x - left_edge if left_edge != -1 else None
-        right_distance: Optional[int] = right_edge - x if right_edge != -1 else None
+        left_distance: int | None = x - left_edge if left_edge != -1 else None
+        right_distance: int | None = right_edge - x if right_edge != -1 else None
 
         return top_distance, bottom_distance, left_distance, right_distance
 
 
-def main(args: argparse.Namespace = None, device: torch.device = torch.device("cpu")) -> None:
+def main(args: argparse.Namespace | None = None, device: torch.device = _CPU_DEVICE) -> None:
     if args is None:
         parser = argparse.ArgumentParser(description="Ice rink segmentation script")
         parser.add_argument("--game-id", "-g", type=str, required=True, help="Game ID to process")
@@ -940,7 +943,7 @@ def main(args: argparse.Namespace = None, device: torch.device = torch.device("c
     stitched_frame_file = str(Path(game_dir) / "s.png")
     if not os.path.exists(stitched_frame_file):
         print(f"Could not find stitched frame image: {stitched_frame_file}")
-        exit(1)
+        sys.exit(1)
 
     image = cv2.imread(stitched_frame_file)
 
@@ -948,7 +951,7 @@ def main(args: argparse.Namespace = None, device: torch.device = torch.device("c
     if mask_scale is None:
         mask_scale = getattr(args, "scale", None)
     if mask_scale is not None:
-        setattr(args, "ice_rink_inference_scale", mask_scale)
+        args.ice_rink_inference_scale = mask_scale
 
     results = configure_ice_rink_mask(
         game_id=args.game_id,

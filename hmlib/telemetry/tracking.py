@@ -5,6 +5,7 @@ import json
 import numpy as np
 import pandas as pd
 
+from hmlib.aspen.player_semantics import JerseyLabel, SettledActions, SettledJerseys
 from hmlib.telemetry.database import completed_runs, read_database
 from hmlib.tracking_utils.tracking_dataframe import TrackingDataFrame
 
@@ -30,6 +31,8 @@ class DatabaseTrackingDataFrame(TrackingDataFrame):
                 (run_id,),
             ).fetchall()
         records = []
+        self._settled_results = set()
+        self._labels = {}
         for row in rows:
             tid = int(row["tracking_id"])
             if not 0 <= tid <= np.iinfo(np.int64).max:
@@ -37,6 +40,8 @@ class DatabaseTrackingDataFrame(TrackingDataFrame):
                     "Tracking ID cannot be represented by HM's signed tracking tensors"
                 )
             attributes = json.loads(row["attributes_json"])
+            self._settled_results.update(attributes.get("settled_results", []))
+            self._labels.setdefault(row["source_frame"], []).append(attributes)
             action = attributes.get("action_results", {})
             records.append(
                 (
@@ -79,4 +84,16 @@ class DatabaseTrackingDataFrame(TrackingDataFrame):
     def get_data_dict_by_frame(self, frame_id):
         if int(frame_id) not in self._frames:
             raise ValueError(f"Source frame {frame_id} is absent from the telemetry recording")
-        return super().get_data_dict_by_frame(frame_id)
+        record = super().get_data_dict_by_frame(frame_id)
+        labels = self._labels.get(int(frame_id), [])
+        if "jersey_results" in self._settled_results:
+            record["jersey_results"] = SettledJerseys(
+                JerseyLabel(**entry["jersey_results"])
+                for entry in labels
+                if entry.get("jersey_results")
+            )
+        actions = [entry["action_results"] for entry in labels if entry.get("action_results")]
+        record["action_results"] = (
+            SettledActions(actions) if "action_results" in self._settled_results else actions
+        )
+        return record

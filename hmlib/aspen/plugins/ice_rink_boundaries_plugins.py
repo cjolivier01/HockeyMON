@@ -3,7 +3,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 from mmengine.structures import InstanceData
@@ -40,20 +40,20 @@ class IceRinkSegmBoundariesPlugin(Plugin):
         lower_bbox_bottom_by_height_ratio: float,
         enabled: bool = True,
         det_thresh: float = 0.05,
-        max_detections_in_mask: Optional[int] = None,
+        max_detections_in_mask: int | None = None,
         plot_ice_mask: bool = False,
         cuda_graph: bool = False,
     ):
         super().__init__(enabled=enabled)
         self._det_thresh = float(det_thresh)
-        self._max_detections_in_mask: Optional[int] = (
+        self._max_detections_in_mask: int | None = (
             int(max_detections_in_mask) if max_detections_in_mask is not None else None
         )
         self._segm = None
         self._default_plot_ice_mask: bool = bool(plot_ice_mask)
         self._cuda_graph_enabled = False
-        self._cg: Optional[CudaGraphCallable] = None
-        self._cg_device: Optional[torch.device] = None
+        self._cg: CudaGraphCallable | None = None
+        self._cg_device: torch.device | None = None
         self._raise_bbox_center_by_height_ratio = raise_bbox_center_by_height_ratio
         self._lower_bbox_bottom_by_height_ratio = lower_bbox_bottom_by_height_ratio
 
@@ -65,13 +65,10 @@ class IceRinkSegmBoundariesPlugin(Plugin):
         self._cuda_graph_enabled = False
         return False
 
-    def _ensure_pipeline(self, context: Dict[str, Any], draw: bool):
+    def _ensure_pipeline(self, context: dict[str, Any], draw: bool):
         if self._segm is not None:
             # Update draw flag dynamically if needed
-            try:
-                self._segm._draw = bool(draw)
-            except Exception:
-                pass
+            self._segm._draw = bool(draw)
             return
         # Lazily create the same logic as pipeline-based IceRinkSegmBoundaries
         from hmlib.tracking_utils.ice_rink_segm_boundaries import IceRinkSegmBoundaries
@@ -127,7 +124,7 @@ class IceRinkSegmBoundariesPlugin(Plugin):
         return torch.tensor([count], device=det_bboxes.device, dtype=torch.int32)
 
     @staticmethod
-    def _num_detections_int(num_detections, total: int) -> Optional[int]:
+    def _num_detections_int(num_detections, total: int) -> int | None:
         if num_detections is None:
             return None
         if isinstance(num_detections, StreamTensorBase):
@@ -148,7 +145,7 @@ class IceRinkSegmBoundariesPlugin(Plugin):
         labels: torch.Tensor,
         scores: torch.Tensor,
         num_detections,
-        max_items: Optional[int],
+        max_items: int | None,
     ):
         total = int(bboxes.shape[0])
         count = IceRinkSegmBoundariesPlugin._num_detections_int(num_detections, total)
@@ -195,7 +192,7 @@ class IceRinkSegmBoundariesPlugin(Plugin):
         num_valid = torch.tensor([kept], device=bboxes.device, dtype=torch.int32)
         return bboxes, labels, scores, num_valid
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
@@ -289,7 +286,7 @@ class IceRinkSegmBoundariesPlugin(Plugin):
                 img_data_sample.pred_instances = new_inst
                 continue
 
-            pd_input: Dict[str, Any] = {
+            pd_input: dict[str, Any] = {
                 "det_bboxes": det_bboxes,
                 "labels": det_labels,
                 "scores": det_scores,
@@ -374,7 +371,7 @@ class IceRinkSegmConfigPlugin(Plugin):
         self._snapshot_mask = None
         self._missing_game_id_warned = False
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
@@ -413,7 +410,17 @@ class IceRinkSegmConfigPlugin(Plugin):
         strict_geometry = revision is not None
         if strict_geometry and (not torch.is_tensor(original_frame) or original_frame.ndim != 3):
             raise ValueError("Proven rink geometry requires the original stitched frame")
+        from hmlib.stitching.rink_mask_sampling import read_mask_frame_time, sample_rink_mask_frame
+
+        sampling_config = context.get("shared", {}).get("game_config") or context.get("game_config")
+        mask_time = read_mask_frame_time(sampling_config) if sampling_config else "auto"
+        mask_revision = (
+            hashlib.sha256(f"{revision}|mask-frame:{mask_time}".encode()).hexdigest()
+            if revision is not None and mask_time != "auto"
+            else revision
+        )
         geometry_key = (
+            mask_time,
             game_id,
             revision,
             tuple(original_frame.shape) if torch.is_tensor(original_frame) else None,
@@ -421,7 +428,7 @@ class IceRinkSegmConfigPlugin(Plugin):
         if geometry_key != self._rink_geometry_key:
             self._rink_profile = None
         if self._rink_profile is None:
-            from hmlib.segm.ice_rink import configure_ice_rink_mask
+            from hmlib.segm.ice_rink import configure_ice_rink_mask, load_rink_combined_mask
 
             # Never certify a saved mask from shape alone. With authoritative
             # live geometry, regenerate in memory from that exact coordinate plane.
@@ -438,19 +445,50 @@ class IceRinkSegmConfigPlugin(Plugin):
                 exp_shape = torch.Size(
                     frame0.shape[:2] if frame0.shape[-1] in (3, 4) else frame0.shape[-2:]
                 )
-            self._rink_profile = configure_ice_rink_mask(
-                game_id=game_id,
-                device=torch.device("cpu"),
-                expected_shape=exp_shape,
-                image=frame0,
-                # A proven revision may reuse the persisted game mask, but
-                # only when configure_ice_rink_mask verifies that exact key
-                # and frame shape.  A changed revision regenerates and saves a
-                # new profile atomically through the normal config path.
-                force=False,
-                persist=True,
-                geometry_revision=revision,
-            )
+            from hmlib.stitching.native_calibration import shared_native_calibration
+
+            native = shared_native_calibration()
+            temporary_source = False
+            if native is None and os.environ.get("HM_SHARED_UI_BACKEND") == "1":
+                from hmlib.ui.hstream_scoreboard import shared_source_owns_saved_game
+
+                temporary_source = not shared_source_owns_saved_game(game_id)
+            current_rotation = float(geometry.get("post_stitch_rotate_degrees", 0.0))
+            if native is not None and current_rotation == native.post_stitch_rotate_degrees:
+                self._rink_profile = native.rink_profile(tuple(exp_shape))
+            if self._rink_profile is None and mask_time != "auto":
+                # Check provenance before opening extra readers or allocating an
+                # independent stitcher. Telemetry batches also exist during live
+                # recording and must not suppress the requested sample time.
+                cached = (
+                    load_rink_combined_mask(game_id=game_id)
+                    if mask_revision and native is None and not temporary_source
+                    else None
+                )
+                if (
+                    cached is not None
+                    and cached.get("geometry_revision") == mask_revision
+                    and torch.is_tensor(cached.get("combined_mask"))
+                    and exp_shape is not None
+                    and tuple(cached["combined_mask"].shape) == tuple(exp_shape)
+                ):
+                    self._rink_profile = cached
+                else:
+                    frame0, _ = sample_rink_mask_frame(context, frame0)
+            if self._rink_profile is None:
+                self._rink_profile = configure_ice_rink_mask(
+                    game_id=game_id,
+                    device=torch.device("cpu"),
+                    expected_shape=exp_shape,
+                    image=frame0,
+                    # A timed sample must replace any unproven cache. Auto
+                    # keeps configure_ice_rink_mask's revision/shape checks.
+                    force=mask_time != "auto" or native is not None or temporary_source,
+                    # A temporary single-source override has a different camera
+                    # plane even when its dimensions match the saved recording.
+                    persist=native is None and not temporary_source,
+                    geometry_revision=mask_revision,
+                )
             if self._rink_profile is not None and strict_geometry:
                 mask = self._rink_profile["combined_mask"]
                 if mask is None or tuple(mask.shape) != tuple(exp_shape):
@@ -473,9 +511,13 @@ class IceRinkSegmConfigPlugin(Plugin):
                 if mask is not None:
                     if self._snapshot_mask is not None:
                         if not torch.equal(mask, self._snapshot_mask):
-                            raise ValueError(
-                                "Rink mask changed during a run with an output snapshot"
-                            )
+                            if native is None or not geometry.get("native_output_authorization_id"):
+                                raise ValueError(
+                                    "Rink mask changed during a run with an output snapshot"
+                                )
+                            # Authenticated live epochs carry their own geometry and
+                            # mask in telemetry. Keep the first-frame sidecar intact.
+                            self._snapshot_mask = mask.clone()
                         return {"rink_profile": self._rink_profile}
                     destination = Path(work_dir) / "rink_mask_0.png"
                     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -502,6 +544,7 @@ class IceRinkSegmConfigPlugin(Plugin):
             "inputs",
             "game_id",
             "camera_input_geometry",
+            "rink_mask_renderer",
             "work_dir",
         }
 

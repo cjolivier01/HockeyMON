@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -169,7 +170,7 @@ def should_terminate_a_cancelled_stitching_tool_promptly():
 class _SelectorSession:
     published_rotation = (17.0, -9.0, 2.0)
     prepared = SimpleNamespace(image_sizes=((160, 100), (160, 100)))
-    source_images = [b"left", b"right"]
+    source_images = (b"left", b"right")
 
 
 class _BlockingSelectorSession(_SelectorSession):
@@ -583,6 +584,34 @@ def _fake_hugin(command, *, input=None):
 def _state(session):
     info = session.info()
     return {key: info[key] for key in ("rotation_degrees", "crop", "auto_crop")} | {"posts": []}
+
+
+def should_preserve_imported_lens_provenance_and_refuse_changed_recordings(tmp_path):
+    from hmlib.stitching.input_lens import InputLens
+
+    config = _game(tmp_path)
+    config["stitching"]["camera_automation"] = {"fov": True, "lens": True}
+    published = replace(
+        read_stitching_settings(config),
+        horizontal_fov=125,
+        input_lens=InputLens(projection="full-frame-fisheye", distortion=(0.01, 0.02, 0.03)),
+    )
+    recording = tmp_path / "original.mp4"
+    recording.write_bytes(b"recording provenance fixture")
+    manifest = published.manifest()
+    manifest["source_videos"] = shared_stitching._file_provenance([recording])
+    (tmp_path / ".stitching_artifacts.json").write_text(json.dumps(manifest))
+    session = LevelingSession(tmp_path, lambda: config, run=_fake_hugin)
+    try:
+        assert session.settings.horizontal_fov == 125
+        assert session.settings.input_lens == published.input_lens
+        recording.write_bytes(b"changed recording")
+        with pytest.raises(ValueError, match="changed"):
+            session.preview(_state(session))
+    finally:
+        session.close()
+    with pytest.raises(ValueError, match="Source recordings changed"):
+        LevelingSession(tmp_path, lambda: config, run=_fake_hugin)
 
 
 def should_save_previewed_crop_without_materializing_inherited_rotation(tmp_path):

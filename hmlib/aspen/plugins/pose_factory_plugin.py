@@ -1,12 +1,27 @@
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any
 
 import torch
 
 from hmlib.config import prepend_root_dir
+from hmlib.log import get_logger
+from hmlib.utils.model_registry import model_registry_scope
 from hmlib.utils.numpy_pickle_compat import numpy2_pickle_compat
 from hmlib.utils.torch_tensorrt_runtime import compile_torch_tensorrt
 
 from .base import Plugin
+
+logger = get_logger(__name__)
+
+
+def _decode_pose_predictions(model, features, data_samples):
+    """Preserve MMPose head options and crop-to-image coordinate restoration."""
+    predictions = model.head.predict(features, data_samples, test_cfg=model.test_cfg)
+    if isinstance(predictions, tuple):
+        instances, fields = predictions
+    else:
+        instances, fields = predictions, None
+    return model.add_pred_to_datasample(instances, fields, data_samples)
 
 
 class PoseInferencerFactoryPlugin(Plugin):
@@ -23,41 +38,45 @@ class PoseInferencerFactoryPlugin(Plugin):
 
     def __init__(
         self,
-        pose_config: Optional[str] = None,
-        pose_checkpoint: Optional[str] = None,
-        device: Optional[str] = None,
+        pose_config: str | None = None,
+        pose_checkpoint: str | None = None,
+        device: str | None = None,
         show_progress: bool = False,
-        filter_args: Optional[Dict[str, Any]] = None,
+        filter_args: dict[str, Any] | None = None,
         disable_internal_detector: bool = False,
         enabled: bool = True,
-        onnx: Optional[Dict[str, Any]] = None,
-        trt: Optional[Dict[str, Any]] = None,
+        onnx: dict[str, Any] | None = None,
+        trt: dict[str, Any] | None = None,
+        pose_checkpoint_sha256: str | None = None,
+        shared_model: dict[str, Any] | None = None,
     ):
         super().__init__(enabled=enabled)
         self._pose_config = pose_config
         self._pose_checkpoint = pose_checkpoint
+        self._pose_checkpoint_sha256 = pose_checkpoint_sha256
+        self._shared_model = shared_model
         self._device = device
         self._show_progress = bool(show_progress)
         self._filter_args = dict(filter_args or {})
         self._disable_internal_detector = bool(disable_internal_detector)
         self._inferencer = None
         # ONNX runtime/export options for pose (backbone+neck)
-        self._onnx_cfg: Dict[str, Any] = dict(onnx or {})
-        self._onnx_runner: Optional[_OnnxPoseRunner] = None
+        self._onnx_cfg: dict[str, Any] = dict(onnx or {})
+        self._onnx_runner: _OnnxPoseRunner | None = None
         # TensorRT options for pose (backbone+neck)
-        self._trt_cfg: Dict[str, Any] = dict(trt or {})
-        self._trt_runner: Optional[_TrtPoseRunner] = None
+        self._trt_cfg: dict[str, Any] = dict(trt or {})
+        self._trt_runner: _TrtPoseRunner | None = None
 
-    def _default_filter_args(self, pose_config: Optional[str]) -> Dict[str, Any]:
+    def _default_filter_args(self, pose_config: str | None) -> dict[str, Any]:
         # Defaults taken from hmtrack CLI logic
-        args = dict(bbox_thr=0.2, nms_thr=0.3, pose_based_nms=False)
+        args = {"bbox_thr": 0.2, "nms_thr": 0.3, "pose_based_nms": False}
         if not pose_config:
             return args
         # Customize by model string
         spec = {
-            "yoloxpose": dict(bbox_thr=0.01, nms_thr=0.65, pose_based_nms=True),
-            "rtmo": dict(bbox_thr=0.1, nms_thr=0.65, pose_based_nms=True),
-            "rtmp": dict(kpt_thr=0.3, pose_based_nms=False, disable_norm_pose_2d=False),
+            "yoloxpose": {"bbox_thr": 0.01, "nms_thr": 0.65, "pose_based_nms": True},
+            "rtmo": {"bbox_thr": 0.1, "nms_thr": 0.65, "pose_based_nms": True},
+            "rtmp": {"kpt_thr": 0.3, "pose_based_nms": False, "disable_norm_pose_2d": False},
         }
         for k, v in spec.items():
             if k in pose_config:
@@ -66,51 +85,71 @@ class PoseInferencerFactoryPlugin(Plugin):
         return args
 
     @staticmethod
-    def _wrap_model_test_step(model: Optional[torch.nn.Module], runner: Optional[Any]) -> None:
+    def _wrap_model_test_step(model: torch.nn.Module | None, runner: Any | None) -> None:
         if model is None or runner is None:
-            return
+            raise ValueError("An accelerated pose runner requires a pose model")
         if getattr(model, "_hm_test_step_wrapped", False):
-            return
+            raise ValueError("The pose model already has an accelerator attached")
         orig_test_step = getattr(model, "test_step", None)
         if not callable(orig_test_step):
-            return
-        try:
-            runner.set_fallback_test_step(orig_test_step)
-        except Exception:
-            pass
+            raise TypeError("The pose model does not expose test_step")
 
         def _test_step(data, *args, **kwargs):
-            try:
-                preds = runner.forward(data)
-                if isinstance(preds, (list, tuple)):
-                    return list(preds)
-            except Exception as exc:
-                from hmlib.log import get_logger
+            preds = runner.forward(data)
+            if not isinstance(preds, (list, tuple)):
+                raise TypeError("Accelerated pose inference must return a prediction sequence")
+            return list(preds)
 
-                get_logger(__name__).warning(
-                    "Pose accelerator invocation failed; using the unwrapped "
-                    "PyTorch pose model: %s",
-                    exc,
-                )
-            return orig_test_step(data, *args, **kwargs)
+        model._hm_test_step_wrapped = True
+        model._hm_orig_test_step = orig_test_step
+        model.test_step = _test_step
 
-        setattr(model, "_hm_test_step_wrapped", True)
-        setattr(model, "_hm_orig_test_step", orig_test_step)
-        model.test_step = _test_step  # type: ignore[assignment]
-
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
         if self._inferencer is None:
             from mmpose.apis.inferencers import MMPoseInferencer
 
             cfg = self._pose_config
-            if isinstance(cfg, str) and cfg and "://" not in cfg and not cfg.startswith("/"):
-                if cfg.endswith((".py", ".yaml", ".yml")):
-                    cfg = prepend_root_dir(cfg)
+            if (
+                isinstance(cfg, str)
+                and cfg
+                and "://" not in cfg
+                and not cfg.startswith("/")
+                and cfg.endswith((".py", ".yaml", ".yml"))
+            ):
+                cfg = prepend_root_dir(cfg)
             ckpt = self._pose_checkpoint
+            gpu = None
+            if self._shared_model is not None:
+                from hmlib.models.player_analytics import (
+                    load_model_bundle,
+                    prepare_player_model,
+                    validate_model_gpu,
+                )
+
+                gpu = validate_model_gpu(self._shared_model.get("gpu"))
+                bundle = self._shared_model.get("bundle")
+                if bundle:
+                    path, _ = load_model_bundle("pose", bundle)
+                elif self._shared_model.get("model") == "rtmpose-m-coco17-256x192":
+                    path = prepare_player_model("pose")
+                else:
+                    raise ValueError("A custom shared pose model requires its prepared bundle")
+                self._onnx_cfg = {"enable": True, "path": str(path)}
+                self._trt_cfg = {"enable": False}
             if isinstance(ckpt, str) and ckpt and "://" not in ckpt and not ckpt.startswith("/"):
                 ckpt = prepend_root_dir(ckpt)
+            if self._pose_checkpoint_sha256:
+                from pathlib import Path
+
+                from hmlib.models.detector_selection import download_pinned_checkpoint
+
+                if not isinstance(ckpt, str) or not ckpt.startswith("https://"):
+                    raise ValueError("A pinned pose checkpoint requires its HTTPS source URL")
+                ckpt = download_pinned_checkpoint(
+                    ckpt, self._pose_checkpoint_sha256, Path(ckpt).name
+                )
             dev = self._device
             if dev is None:
                 device_obj = context.get("device")
@@ -119,15 +158,12 @@ class PoseInferencerFactoryPlugin(Plugin):
             # Skip initializing MMPose's own detector when requested or when
             # detections are already provided upstream.
             det_model = None
-            try:
-                if self._disable_internal_detector or bool(
-                    context.get("using_precalculated_detection", False)
-                ):
-                    det_model = "whole_image"
-            except Exception:
-                det_model = None
+            if self._disable_internal_detector or bool(
+                context.get("using_precalculated_detection", False)
+            ):
+                det_model = "whole_image"
 
-            with numpy2_pickle_compat():
+            with model_registry_scope("mmpose"), numpy2_pickle_compat():
                 inferencer = MMPoseInferencer(
                     pose2d=cfg,
                     pose2d_weights=ckpt,
@@ -139,18 +175,19 @@ class PoseInferencerFactoryPlugin(Plugin):
             fa = self._default_filter_args(cfg)
             fa.update(self._filter_args)
             inferencer.filter_args = fa
-            self._inferencer = inferencer
-
-            # Initialize optional accelerators using underlying inferencer's model
-            try:
-                pose_impl = getattr(self._inferencer, "inferencer", None)
-                # Prefer TensorRT if enabled
-                if bool(self._trt_cfg.get("enable", False)):
-                    if (
-                        pose_impl is not None
-                        and getattr(getattr(pose_impl, "cfg", object()), "data_mode", None)
-                        == "topdown"
-                    ):
+            # An explicitly selected accelerator must initialize and attach
+            # successfully before this factory publishes the inferencer.
+            use_trt = bool(self._trt_cfg.get("enable", False))
+            use_onnx = bool(self._onnx_cfg.get("enable", False))
+            backend = "TensorRT" if use_trt else "ONNX"
+            if use_trt or use_onnx:
+                try:
+                    pose_impl = inferencer.inferencer
+                    if getattr(pose_impl.cfg, "data_mode", None) != "topdown":
+                        raise ValueError(
+                            f"{backend} pose acceleration requires a topdown pose model"
+                        )
+                    if use_trt:
                         self._trt_runner = _TrtPoseRunner(
                             model=pose_impl.model,
                             engine_path=str(self._trt_cfg.get("engine", "pose.engine")),
@@ -160,52 +197,33 @@ class PoseInferencerFactoryPlugin(Plugin):
                             calib_frames=int(self._trt_cfg.get("calib_frames", 0)),
                             batch_size=int(self._trt_cfg.get("batch_size", 32)),
                         )
-                        setattr(self._inferencer, "_hm_trt_runner", self._trt_runner)
-                # Otherwise, enable ONNX if requested
-                if self._trt_runner is None and bool(self._onnx_cfg.get("enable", False)):
-                    if (
-                        pose_impl is not None
-                        and getattr(getattr(pose_impl, "cfg", object()), "data_mode", None)
-                        == "topdown"
-                    ):
+                        inferencer._hm_trt_runner = self._trt_runner
+                        runner = self._trt_runner
+                    else:
                         self._onnx_runner = _OnnxPoseRunner(
                             model=pose_impl.model,
                             onnx_path=str(self._onnx_cfg.get("path", "pose.onnx")),
                             force_export=bool(self._onnx_cfg.get("force_export", False)),
                             quantize_int8=bool(self._onnx_cfg.get("quantize_int8", False)),
                             calib_frames=int(self._onnx_cfg.get("calib_frames", 0)),
+                            native_simcc=self._shared_model is not None,
+                            gpu=gpu,
                         )
-                        # Attach for PosePlugin to pick up
-                        setattr(self._inferencer, "_hm_onnx_runner", self._onnx_runner)
-            except Exception as exc:
-                # Non-fatal; fall back to PyTorch model, but surface why the
-                # requested accelerator could not be initialized.
-                from hmlib.log import get_logger
-
-                get_logger(__name__).warning(
-                    "Failed to initialize the requested pose accelerator; "
-                    "falling back to PyTorch: %s",
-                    exc,
-                )
-                self._onnx_runner = None
-                self._trt_runner = None
-            try:
-                pose_impl = getattr(self._inferencer, "inferencer", None)
-                pose_model = getattr(pose_impl, "model", None) if pose_impl is not None else None
-                if self._trt_runner is not None:
-                    setattr(self._inferencer, "_hm_pose_runner", self._trt_runner)
-                    self._wrap_model_test_step(pose_model, self._trt_runner)
-                elif self._onnx_runner is not None:
-                    setattr(self._inferencer, "_hm_pose_runner", self._onnx_runner)
-                    self._wrap_model_test_step(pose_model, self._onnx_runner)
-            except Exception as exc:
-                from hmlib.log import get_logger
-
-                get_logger(__name__).warning(
-                    "Failed to attach the requested pose accelerator; using the "
-                    "unwrapped PyTorch pose model: %s",
-                    exc,
-                )
+                        inferencer._hm_onnx_runner = self._onnx_runner
+                        runner = self._onnx_runner
+                    self._wrap_model_test_step(pose_impl.model, runner)
+                    inferencer._hm_pose_runner = runner
+                    if self._shared_model is not None:
+                        logger.info(
+                            "Shared pose executes prepared SimCC ONNX %s; MMPose supplies "
+                            "preprocessing and coordinate decoding only",
+                            self._onnx_runner.onnx_path,
+                        )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"Failed to initialize requested {backend} pose backend"
+                    ) from exc
+            self._inferencer = inferencer
 
         context["pose_inferencer"] = self._inferencer
         return {"pose_inferencer": self._inferencer}
@@ -249,14 +267,25 @@ class _OnnxPoseRunner:
         force_export: bool = False,
         quantize_int8: bool = False,
         calib_frames: int = 0,
+        native_simcc: bool = False,
+        gpu: int | None = None,
     ):
+        from hmlib.models.player_analytics import validate_model_gpu
+
         self.model = model
+        self.gpu = None if gpu is None else validate_model_gpu(gpu)
+        self.native_simcc = native_simcc
         self.onnx_path = onnx_path
         self.force_export = force_export
         self.quantize_int8 = bool(quantize_int8)
         self.calib_target = int(calib_frames or 0)
-        self._calib_inputs: List[Any] = []
-        self._quantized = False
+        self._calib_inputs: list[Any] = []
+        self._quantized = str(onnx_path).lower().endswith(".int8.onnx")
+        self._quantized_path = onnx_path if self._quantized else None
+        if self._quantized and (force_export or not Path(onnx_path).is_file()):
+            raise ValueError("Supply an existing INT8 pose model without force_export")
+        if self.quantize_int8 and not self._quantized and self.calib_target <= 0:
+            raise ValueError("Pose INT8 quantization requires positive calib_frames")
         self._ort_sess = None
         self._providers = None
         self._use_cuda = False
@@ -273,46 +302,37 @@ class _OnnxPoseRunner:
         self._fallback_test_step = fn
 
     def _init_preprocess(self) -> None:
-        try:
-            dp = getattr(self.model, "data_preprocessor", None)
-            if dp is None:
-                return
-            mean = getattr(dp, "mean", None)
-            std = getattr(dp, "std", None)
-            if mean is not None and not isinstance(mean, torch.Tensor):
-                try:
-                    mean = torch.as_tensor(mean)
-                except Exception:
-                    mean = None
-            if std is not None and not isinstance(std, torch.Tensor):
-                try:
-                    std = torch.as_tensor(std)
-                except Exception:
-                    std = None
-            if isinstance(mean, torch.Tensor):
-                if mean.ndim == 1:
-                    mean = mean.view(1, -1, 1, 1)
-                elif mean.ndim == 3:
-                    mean = mean.unsqueeze(0)
-                elif mean.ndim != 4:
-                    mean = None
-            if isinstance(std, torch.Tensor):
-                if std.ndim == 1:
-                    std = std.view(1, -1, 1, 1)
-                elif std.ndim == 3:
-                    std = std.unsqueeze(0)
-                elif std.ndim != 4:
-                    std = None
-            if isinstance(mean, torch.Tensor) and isinstance(std, torch.Tensor):
-                self._mean = mean.detach().cpu().numpy()
-                self._std = std.detach().cpu().numpy()
-                self._mean_t = mean.detach()
-                self._std_t = std.detach()
-            bgr_to_rgb = bool(getattr(dp, "bgr_to_rgb", False))
-            rgb_to_bgr = bool(getattr(dp, "rgb_to_bgr", False))
-            self._swap_rgb = bool(bgr_to_rgb or rgb_to_bgr)
-        except Exception:
-            pass
+        dp = getattr(self.model, "data_preprocessor", None)
+        if dp is None:
+            return
+        mean = getattr(dp, "mean", None)
+        std = getattr(dp, "std", None)
+        if mean is not None and not isinstance(mean, torch.Tensor):
+            mean = torch.as_tensor(mean)
+        if std is not None and not isinstance(std, torch.Tensor):
+            std = torch.as_tensor(std)
+        if isinstance(mean, torch.Tensor):
+            if mean.ndim == 1:
+                mean = mean.view(1, -1, 1, 1)
+            elif mean.ndim == 3:
+                mean = mean.unsqueeze(0)
+            elif mean.ndim != 4:
+                mean = None
+        if isinstance(std, torch.Tensor):
+            if std.ndim == 1:
+                std = std.view(1, -1, 1, 1)
+            elif std.ndim == 3:
+                std = std.unsqueeze(0)
+            elif std.ndim != 4:
+                std = None
+        if isinstance(mean, torch.Tensor) and isinstance(std, torch.Tensor):
+            self._mean = mean.detach().cpu().numpy()
+            self._std = std.detach().cpu().numpy()
+            self._mean_t = mean.detach()
+            self._std_t = std.detach()
+        bgr_to_rgb = bool(getattr(dp, "bgr_to_rgb", False))
+        rgb_to_bgr = bool(getattr(dp, "rgb_to_bgr", False))
+        self._swap_rgb = bool(bgr_to_rgb or rgb_to_bgr)
 
     @staticmethod
     def _ensure_tensor(x: Any) -> torch.Tensor:
@@ -321,7 +341,7 @@ class _OnnxPoseRunner:
         if isinstance(x, (list, tuple)):
             if len(x) == 0:
                 return torch.empty((0,))
-            tensors: List[torch.Tensor] = []
+            tensors: list[torch.Tensor] = []
             for item in x:
                 t = item if isinstance(item, torch.Tensor) else torch.as_tensor(item)
                 if t.ndim == 4 and t.size(0) == 1:
@@ -396,43 +416,76 @@ class _OnnxPoseRunner:
 
         # Session options with higher optimization level
         so = ort.SessionOptions()
-        try:
-            so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        except Exception:
-            pass
+        so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         so.enable_mem_pattern = True
         so.enable_cpu_mem_arena = True
         avail = ort.get_available_providers()
         if "CUDAExecutionProvider" in avail:
-            self._providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            self._providers = [
+                (
+                    "CUDAExecutionProvider"
+                    if self.gpu is None
+                    else ("CUDAExecutionProvider", {"device_id": self.gpu})
+                ),
+                "CPUExecutionProvider",
+            ]
             self._use_cuda = True
         else:
             self._providers = ["CPUExecutionProvider"]
             self._use_cuda = False
+            if self.native_simcc:
+                logger.warning("Shared pose CUDA provider unavailable; inference runs on CPU")
         self._ort_sess = ort.InferenceSession(self.onnx_path, sess_options=so, providers=self._providers)  # type: ignore
+        if self.native_simcc:
+            if self._use_cuda and "CUDAExecutionProvider" not in self._ort_sess.get_providers():
+                raise RuntimeError(
+                    "Shared pose CUDA initialization failed; refusing provider substitution"
+                )
+            inputs, outputs = self._ort_sess.get_inputs(), self._ort_sess.get_outputs()
+            if (
+                len(inputs) != 1
+                or inputs[0].type != "tensor(float)"
+                or inputs[0].shape[1:] != [3, 256, 192]
+                or len(outputs) != 2
+                or any(
+                    len(node.shape) != 3 or isinstance(node.shape[1], int) and node.shape[1] != 17
+                    for node in outputs
+                )
+                or [node.shape[-1] for node in outputs] != [384, 512]
+                or any(node.type != "tensor(float)" for node in outputs)
+            ):
+                raise ValueError("Shared pose requires the native COCO17 SimCC ONNX tensors")
 
-    def _run_feats(self, x: torch.Tensor) -> Any:
+    def _run_feats(
+        self, x: torch.Tensor, *, preprocessed: bool = False, collect_calibration: bool = True
+    ) -> Any:
         import numpy as np
 
         x = self._ensure_tensor(x)
         if x.ndim == 3:
             x = x.unsqueeze(0)
-        need_calib = self.quantize_int8 and not self._quantized and self.calib_target > 0
+        need_calib = (
+            collect_calibration
+            and self.quantize_int8
+            and not self._quantized
+            and self.calib_target > 0
+        )
         try:
             dev = next(self.model.parameters()).device
         except StopIteration:
             dev = torch.device("cpu")
         if self._use_cuda and x.is_cuda:
-            xc = self._preprocess_gpu(x)
+            xc = x.contiguous() if preprocessed else self._preprocess_gpu(x)
+            if self.gpu is not None:
+                # Preprocessing can belong to another GPU in the Python graph.
+                # Move only these bounded crops to the accepted model device.
+                xc = xc.to(device=torch.device("cuda", self.gpu))
             if need_calib and len(self._calib_inputs) < self.calib_target:
-                try:
-                    x_cpu = xc.detach().to("cpu")
-                    remaining = max(0, self.calib_target - len(self._calib_inputs))
-                    take = min(int(x_cpu.shape[0]), remaining)
-                    for i in range(take):
-                        self._calib_inputs.append(x_cpu[i : i + 1].numpy().copy())
-                except Exception:
-                    pass
+                x_cpu = xc.detach().to("cpu")
+                remaining = max(0, self.calib_target - len(self._calib_inputs))
+                take = min(int(x_cpu.shape[0]), remaining)
+                for i in range(take):
+                    self._calib_inputs.append(x_cpu[i : i + 1].numpy().copy())
             io = self._ort_sess.io_binding()
             input_name = self._ort_sess.get_inputs()[0].name
             io.bind_input(
@@ -444,32 +497,31 @@ class _OnnxPoseRunner:
                 buffer_ptr=int(xc.data_ptr()),
             )
             for out in self._ort_sess.get_outputs():
-                io.bind_output(out.name, device_type="cuda")
+                device = {} if self.gpu is None else {"device_id": self.gpu}
+                io.bind_output(out.name, device_type="cuda", **device)
             self._ort_sess.run_with_iobinding(io)
             ort_outs = io.get_outputs()
-            outs_t: List[torch.Tensor] = []
+            outs_t: list[torch.Tensor] = []
             try:
                 from torch.utils.dlpack import from_dlpack  # type: ignore
 
                 for ov in ort_outs:
                     outs_t.append(from_dlpack(ov.to_dlpack()).to(device=dev))
-            except Exception:
-                for ov in ort_outs:
-                    np_arr = np.array(ov)
-                    outs_t.append(torch.from_numpy(np_arr).to(device=dev))
+            except (AttributeError, RuntimeError, TypeError) as exc:
+                logger.warning(
+                    "Pose ONNX DLPack transfer unavailable; copying outputs through CPU: %s", exc
+                )
+                outs_t = [torch.from_numpy(ov.numpy()).to(device=dev) for ov in ort_outs]
             if len(outs_t) == 1:
                 return outs_t[0]
             return outs_t
         # CPU fallback
-        x_np = self._preprocess(x)
+        x_np = x.detach().cpu().numpy() if preprocessed else self._preprocess(x)
         if need_calib and len(self._calib_inputs) < self.calib_target:
-            try:
-                remaining = max(0, self.calib_target - len(self._calib_inputs))
-                take = min(int(x_np.shape[0]), remaining)
-                for i in range(take):
-                    self._calib_inputs.append(x_np[i : i + 1].copy())
-            except Exception:
-                pass
+            remaining = max(0, self.calib_target - len(self._calib_inputs))
+            take = min(int(x_np.shape[0]), remaining)
+            for i in range(take):
+                self._calib_inputs.append(x_np[i : i + 1].copy())
         outputs = self._ort_sess.run(None, {self._ort_sess.get_inputs()[0].name: x_np})
         if len(outputs) == 1:
             out = torch.from_numpy(outputs[0]).to(device=dev)
@@ -488,9 +540,8 @@ class _OnnxPoseRunner:
                 QuantType,
                 quantize_static,
             )
-        except Exception:
-            self._calib_inputs = []
-            return
+        except ImportError as exc:
+            raise RuntimeError("Pose INT8 quantization requires onnxruntime.quantization") from exc
         input_name = self._ort_sess.get_inputs()[0].name
 
         class _Reader(CalibrationDataReader):  # type: ignore
@@ -504,7 +555,7 @@ class _OnnxPoseRunner:
                 except StopIteration:
                     return None
 
-        q_path = self.onnx_path.replace(".onnx", ".int8.onnx")
+        q_path = str(Path(self.onnx_path).with_suffix(".int8.onnx"))
         try:
             quantize_static(
                 model_input=self.onnx_path,
@@ -519,38 +570,42 @@ class _OnnxPoseRunner:
 
             self._ort_sess = ort.InferenceSession(q_path, providers=self._providers)
             self._quantized = True
-        except Exception:
-            pass
+            self._quantized_path = q_path
+        except Exception as exc:
+            raise RuntimeError(f"Pose INT8 quantization failed: {self.onnx_path}") from exc
         finally:
             self._calib_inputs = []
 
-    def forward(self, proc_inputs: Dict[str, Any]):
-        """Best-effort ONNX-backed forward. Falls back to model if decoding fails."""
+    def forward(self, proc_inputs: dict[str, Any]):
+        """Run the requested ONNX backend and decode with the original pose head."""
         try:
-            inputs = proc_inputs["inputs"]  # Tensor (N,C,H,W)
-            datas = proc_inputs.get("data_samples", None)
-            feats = self._run_feats(inputs)
-            # Decode with model head if available
-            head = getattr(self.model, "head", None)
-            if head is not None and hasattr(head, "predict") and datas is not None:
+            processed = self.model.data_preprocessor(proc_inputs, training=False)
+            inputs = processed["inputs"]
+            datas = processed["data_samples"]
+            feats = self._run_feats(inputs, preprocessed=True)
+            if self.native_simcc:
+                if (
+                    not isinstance(feats, (list, tuple))
+                    or len(feats) != 2
+                    or tuple(feats[0].shape) != (len(inputs), 17, 384)
+                    or tuple(feats[1].shape) != (len(inputs), 17, 512)
+                    or any(not torch.isfinite(value).all() for value in feats)
+                ):
+                    raise ValueError("Shared pose returned invalid COCO17 SimCC predictions")
                 with torch.no_grad():
-                    preds = head.predict(feats, datas)
-                # Quantize after gathering calibration frames
-                self._maybe_quantize_after_calib()
-                return preds
-        except Exception:
-            pass
-        # Fallback: run model directly
-        with torch.no_grad():
-            try:
-                if self._fallback_test_step is not None:
-                    return self._fallback_test_step(proc_inputs)
-                return self.model.test_step(proc_inputs)
-            except Exception:
-                try:
-                    return self.model(**proc_inputs)
-                except Exception:
-                    return []
+                    instances = self.model.head.decode(tuple(feats))
+                    return self.model.add_pred_to_datasample(instances, None, datas)
+            if self.model.test_cfg.get("flip_test", False):
+                flipped = self._run_feats(
+                    inputs.flip(-1), preprocessed=True, collect_calibration=False
+                )
+                feats = [feats, flipped]
+            with torch.no_grad():
+                preds = _decode_pose_predictions(self.model, feats, datas)
+            self._maybe_quantize_after_calib()
+            return preds
+        except Exception as exc:
+            raise RuntimeError(f"Requested ONNX pose execution failed: {self.onnx_path}") from exc
 
 
 class _TrtPoseRunner:
@@ -577,11 +632,10 @@ class _TrtPoseRunner:
         if self.batch_size <= 0:
             raise ValueError("Torch-TensorRT pose batch size must be positive")
         self._trt_module = None
-        self._trt_modules: Dict[Tuple[Tuple[int, ...], torch.dtype, str], torch.nn.Module] = {}
-        self._trt_input_buffers: Dict[Tuple[Tuple[int, ...], torch.dtype, str], torch.Tensor] = {}
+        self._trt_modules: dict[tuple[tuple[int, ...], torch.dtype, str], torch.nn.Module] = {}
+        self._trt_input_buffers: dict[tuple[tuple[int, ...], torch.dtype, str], torch.Tensor] = {}
         self._wrapper_module = None
         self._fallback_test_step = None
-        self._trt_disabled_reason: Optional[str] = None
         self._mean = None
         self._std = None
         self._mean_t = None
@@ -593,52 +647,37 @@ class _TrtPoseRunner:
         self._fallback_test_step = fn
 
     def _init_preprocess(self) -> None:
-        try:
-            dp = getattr(self.model, "data_preprocessor", None)
-            if dp is None:
-                return
-            mean = getattr(dp, "mean", None)
-            std = getattr(dp, "std", None)
-            if mean is not None and not isinstance(mean, torch.Tensor):
-                try:
-                    mean = torch.as_tensor(mean)
-                except Exception:
-                    mean = None
-            if std is not None and not isinstance(std, torch.Tensor):
-                try:
-                    std = torch.as_tensor(std)
-                except Exception:
-                    std = None
-            if isinstance(mean, torch.Tensor):
-                if mean.ndim == 1:
-                    mean = mean.view(1, -1, 1, 1)
-                elif mean.ndim == 3:
-                    mean = mean.unsqueeze(0)
-                elif mean.ndim != 4:
-                    mean = None
-            if isinstance(std, torch.Tensor):
-                if std.ndim == 1:
-                    std = std.view(1, -1, 1, 1)
-                elif std.ndim == 3:
-                    std = std.unsqueeze(0)
-                elif std.ndim != 4:
-                    std = None
-            if isinstance(mean, torch.Tensor) and isinstance(std, torch.Tensor):
-                self._mean = mean.detach().cpu()
-                self._std = std.detach().cpu()
-                self._mean_t = mean.detach()
-                self._std_t = std.detach()
-            bgr_to_rgb = bool(getattr(dp, "bgr_to_rgb", False))
-            rgb_to_bgr = bool(getattr(dp, "rgb_to_bgr", False))
-            self._swap_rgb = bool(bgr_to_rgb or rgb_to_bgr)
-        except Exception as exc:
-            from hmlib.log import get_logger
-
-            get_logger(__name__).warning(
-                "Could not read pose preprocessing metadata; TensorRT inputs "
-                "will not be normalized by the wrapper: %s",
-                exc,
-            )
+        dp = getattr(self.model, "data_preprocessor", None)
+        if dp is None:
+            return
+        mean = getattr(dp, "mean", None)
+        std = getattr(dp, "std", None)
+        if mean is not None and not isinstance(mean, torch.Tensor):
+            mean = torch.as_tensor(mean)
+        if std is not None and not isinstance(std, torch.Tensor):
+            std = torch.as_tensor(std)
+        if isinstance(mean, torch.Tensor):
+            if mean.ndim == 1:
+                mean = mean.view(1, -1, 1, 1)
+            elif mean.ndim == 3:
+                mean = mean.unsqueeze(0)
+            elif mean.ndim != 4:
+                mean = None
+        if isinstance(std, torch.Tensor):
+            if std.ndim == 1:
+                std = std.view(1, -1, 1, 1)
+            elif std.ndim == 3:
+                std = std.unsqueeze(0)
+            elif std.ndim != 4:
+                std = None
+        if isinstance(mean, torch.Tensor) and isinstance(std, torch.Tensor):
+            self._mean = mean.detach().cpu()
+            self._std = std.detach().cpu()
+            self._mean_t = mean.detach()
+            self._std_t = std.detach()
+        bgr_to_rgb = bool(getattr(dp, "bgr_to_rgb", False))
+        rgb_to_bgr = bool(getattr(dp, "rgb_to_bgr", False))
+        self._swap_rgb = bool(bgr_to_rgb or rgb_to_bgr)
 
     @staticmethod
     def _ensure_tensor(x: Any) -> torch.Tensor:
@@ -647,7 +686,7 @@ class _TrtPoseRunner:
         if isinstance(x, (list, tuple)):
             if len(x) == 0:
                 return torch.empty((0,))
-            tensors: List[torch.Tensor] = []
+            tensors: list[torch.Tensor] = []
             for item in x:
                 t = item if isinstance(item, torch.Tensor) else torch.as_tensor(item)
                 if t.ndim == 4 and t.size(0) == 1:
@@ -661,7 +700,7 @@ class _TrtPoseRunner:
             return torch.stack(tensors, dim=0)
         return torch.as_tensor(x)
 
-    def _prepare_inputs(self, x: Any) -> torch.Tensor:
+    def _prepare_inputs(self, x: Any, *, preprocessed: bool = False) -> torch.Tensor:
         x = self._ensure_tensor(x)
         if x.ndim == 3:
             x = x.unsqueeze(0)
@@ -673,9 +712,9 @@ class _TrtPoseRunner:
             dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if x.device != dev:
             x = x.to(device=dev, non_blocking=True)
-        if self._swap_rgb and x.size(1) == 3:
+        if not preprocessed and self._swap_rgb and x.size(1) == 3:
             x = x[:, [2, 1, 0], :, :]
-        if self._mean_t is not None and self._std_t is not None:
+        if not preprocessed and self._mean_t is not None and self._std_t is not None:
             mean = self._mean_t.to(device=x.device, dtype=x.dtype)
             std = self._std_t.to(device=x.device, dtype=x.dtype)
             x = (x - mean) / std
@@ -727,44 +766,30 @@ class _TrtPoseRunner:
                 )
             self._trt_modules[cache_key] = compiled
             self._trt_module = compiled
-        except Exception as ex:
-            self._disable_trt(ex)
-
-    def _disable_trt(self, exc: Exception) -> None:
-        if self._trt_disabled_reason is not None:
-            return
-        self._trt_disabled_reason = str(exc)
-        self._trt_module = None
-        from hmlib.log import get_logger
-
-        get_logger(__name__).warning(
-            "Disabling TensorRT pose path and falling back to PyTorch: %s", exc
-        )
-
-    def _run_feats(self, x: torch.Tensor):
-        if x.dtype != torch.float32:
-            x = x.to(torch.float32)
-        # Use TRT if available, otherwise fallback to PyTorch forward
-        if self._trt_module is not None:
-            with torch.inference_mode():
-                return self._trt_module(x)
-        with torch.inference_mode():
-            if self._wrapper_module is None:
-                self._wrapper_module = _BackboneNeckWrapper(self.model).eval().to(x.device)
-            return self._wrapper_module(x)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Requested TensorRT pose compilation failed: {self.engine_path}"
+            ) from exc
 
     @staticmethod
-    def _slice_feature_batch(feats: Any, valid_count: int) -> Any:
+    def _slice_feature_batch(feats: Any, valid_count: int, *, clone: bool = False) -> Any:
         if isinstance(feats, torch.Tensor):
-            return feats[:valid_count]
+            result = feats[:valid_count]
+            return result.clone() if clone else result
         if isinstance(feats, tuple):
-            return tuple(_TrtPoseRunner._slice_feature_batch(value, valid_count) for value in feats)
+            return tuple(
+                _TrtPoseRunner._slice_feature_batch(value, valid_count, clone=clone)
+                for value in feats
+            )
         if isinstance(feats, list):
-            return [_TrtPoseRunner._slice_feature_batch(value, valid_count) for value in feats]
+            return [
+                _TrtPoseRunner._slice_feature_batch(value, valid_count, clone=clone)
+                for value in feats
+            ]
         raise TypeError(f"Unexpected pose feature output type: {type(feats).__name__}")
 
-    def _predict_trt_chunks(self, inputs: torch.Tensor, datas: Any, head: Any):
-        predictions: List[Any] = []
+    def _predict_trt_chunks(self, inputs: torch.Tensor, datas: Any):
+        predictions: list[Any] = []
         assert self._trt_module is not None
         for start in range(0, inputs.size(0), self.batch_size):
             chunk = inputs[start : start + self.batch_size]
@@ -772,12 +797,22 @@ class _TrtPoseRunner:
             try:
                 with torch.inference_mode():
                     feats = self._trt_module(static_chunk)
+                    flipped = None
+                    if self.model.test_cfg.get("flip_test", False):
+                        # Torch-TensorRT reuses output buffers. Keep the normal
+                        # features before the mirrored pass overwrites them.
+                        feats = self._slice_feature_batch(feats, chunk.size(0), clone=True)
+                        flipped = self._trt_module(static_chunk.flip(-1))
             except Exception as exc:
-                self._disable_trt(exc)
-                return None
+                raise RuntimeError(
+                    f"Requested TensorRT pose execution failed: {self.engine_path}"
+                ) from exc
             feats = self._slice_feature_batch(feats, chunk.size(0))
+            if flipped is not None:
+                feats = [feats, self._slice_feature_batch(flipped, chunk.size(0))]
             with torch.inference_mode():
-                chunk_predictions = head.predict(
+                chunk_predictions = _decode_pose_predictions(
+                    self.model,
                     feats,
                     datas[start : start + chunk.size(0)],
                 )
@@ -788,63 +823,16 @@ class _TrtPoseRunner:
             predictions.extend(chunk_predictions)
         return predictions
 
-    def _fallback(self, proc_inputs: Dict[str, Any]):
-        with torch.no_grad():
-            if self._fallback_test_step is not None:
-                return self._fallback_test_step(proc_inputs)
-            test_step = getattr(self.model, "test_step", None)
-            if callable(test_step):
-                return test_step(proc_inputs)
-            return self.model(**proc_inputs)
-
-    def forward(self, proc_inputs: Dict[str, Any]):
-        try:
-            inputs = self._prepare_inputs(proc_inputs["inputs"])
-        except Exception as exc:
-            from hmlib.log import get_logger
-
-            get_logger(__name__).warning(
-                "Pose preprocessing failed; using the original PyTorch test_step: %s",
-                exc,
-            )
-            return self._fallback(proc_inputs)
-
-        datas = proc_inputs.get("data_samples", None)
-        head = getattr(self.model, "head", None)
-        if head is None or not hasattr(head, "predict") or datas is None:
-            return self._fallback(proc_inputs)
+    def forward(self, proc_inputs: dict[str, Any]):
+        processed = self.model.data_preprocessor(proc_inputs, training=False)
+        inputs = self._prepare_inputs(processed["inputs"], preprocessed=True)
+        datas = processed["data_samples"]
         if inputs.size(0) == 0:
             return []
-
-        if self._trt_disabled_reason is None:
-            self._ensure_trt_engine(inputs)
-        if self._trt_module is not None:
-            try:
-                predictions = self._predict_trt_chunks(inputs, datas, head)
-                if predictions is not None:
-                    return predictions
-            except Exception as exc:
-                from hmlib.log import get_logger
-
-                get_logger(__name__).warning(
-                    "Pose head decode failed; using the original PyTorch test_step "
-                    "for this invocation: %s",
-                    exc,
-                )
-                return self._fallback(proc_inputs)
-
+        self._ensure_trt_engine(inputs)
         try:
-            feats = self._run_feats(inputs)
-            with torch.inference_mode():
-                return head.predict(feats, datas)
+            return self._predict_trt_chunks(inputs, datas)
         except Exception as exc:
-            from hmlib.log import get_logger
-
-            get_logger(__name__).warning(
-                "Split PyTorch pose inference failed; using the original test_step: %s",
-                exc,
-            )
-
-        # Preserve MMPose's complete preprocessing/decode path when the split
-        # backbone/head runner is unavailable or incompatible with the model.
-        return self._fallback(proc_inputs)
+            raise RuntimeError(
+                f"Requested TensorRT pose inference failed: {self.engine_path}"
+            ) from exc

@@ -1,6 +1,6 @@
 import contextlib
 from contextlib import nullcontext
-from typing import Any, Dict
+from typing import Any
 
 import torch
 
@@ -17,6 +17,10 @@ logger = get_logger(__name__)
 def _snapshot_tensor(value):
     tensor = unwrap_tensor(value)
     if torch.is_tensor(tensor):
+        # BF16 is an inference precision; NumPy telemetry and tracker geometry
+        # consume ordinary float32 observations after the model boundary.
+        if tensor.dtype == torch.bfloat16:
+            return tensor.float()
         return tensor.clone()
     return tensor
 
@@ -231,7 +235,7 @@ class DetectorInferencePlugin(Plugin):
             pass
         return results
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
@@ -266,9 +270,21 @@ class DetectorInferencePlugin(Plugin):
                 if isinstance(detection_image, torch.Tensor)
                 else torch.device("cuda" if torch.cuda.is_available() else "cpu")
             )
-            use_autocast = bool(fp16 and det_device.type == "cuda")
+            preferences = (
+                context.get("shared", {}).get("game_config", {}).get("hm_ui", {}).get("run", {})
+            )
+            precision = preferences.get("precision", "saved")
+            dtype = torch.bfloat16 if precision == "pytorch-bf16" else torch.float16
+            requested_amp = fp16 or precision in {"pytorch-fp16", "pytorch-bf16"}
+            if (
+                precision == "pytorch-bf16"
+                and det_device.type == "cuda"
+                and not torch.cuda.is_bf16_supported()
+            ):
+                raise RuntimeError("The selected GPU does not support BF16 detector inference")
+            use_autocast = bool(requested_amp and det_device.type == "cuda")
             amp_ctx = (
-                torch.amp.autocast("cuda", dtype=torch.float16, enabled=True)
+                torch.amp.autocast("cuda", dtype=dtype, enabled=True)
                 if use_autocast
                 else nullcontext()
             )
@@ -277,7 +293,6 @@ class DetectorInferencePlugin(Plugin):
                 batch_inputs = detection_image
             else:
                 batch_inputs = torch.as_tensor(detection_image)
-                batch_inputs = batch_inputs
             if batch_inputs.ndim != 4:
                 raise AssertionError(
                     "DetectorInferencePlugin expects per-frame tensors shaped (T, C, H, W)"

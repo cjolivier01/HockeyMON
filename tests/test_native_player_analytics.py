@@ -1,0 +1,668 @@
+"""Native causal history, PARSeq preprocessing and Aspen integration contracts."""
+
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import torch
+
+from hmlib.aspen.player_semantics import (
+    ActionHistory,
+    JerseyConsensus,
+    decode_parseq,
+    jersey_roi,
+    parseq_input,
+)
+from hmlib.aspen.plugins.native_analytics_plugin import (
+    ParseqJerseyPlugin,
+    TemporalActionPlugin,
+    fresh_poses,
+)
+from hmlib.models.player_analytics import PlayerModel, model_contract, prepare_player_model
+
+
+def _pose(x=250, score=0.9):
+    return np.tile([x, 500, score], (17, 1)).astype(np.float32)
+
+
+def should_require_100_causal_samples_and_normalize_against_full_canvas():
+    history = ActionHistory()
+    for index in range(100):
+        history.observe(index * 100_000_000, _pose(), 1000, 1000)
+        if index < 99:
+            assert history.tensor(index * 100_000_000) is None
+    tensor = history.tensor(9_900_000_000)
+    assert tensor.shape == (2, 100, 17, 3)
+    np.testing.assert_allclose(tensor[0, 0, 0], [-0.5, 0, 0.9])
+    assert not tensor[1].any()
+    assert history.samples[0][0] == 0 and history.samples[-1][0] == 9_900_000_000
+    assert not history.observe(9_900_000_000, _pose(), 1000, 1000)
+    assert len(history.samples) == 100
+    assert history.tensor(10_050_000_001) is None
+    history.observe(10_100_000_000, _pose(), 1000, 1000)
+    assert len(history.samples) == 1
+
+
+def should_interpolate_jitter_only_between_fresh_endpoints_and_reset_invalid_evidence():
+    history = ActionHistory()
+    history.observe(0, _pose(0), 1000, 1000)
+    history.observe(120_000_000, _pose(120, 0.6), 1000, 1000)
+    assert history.samples[-1][0] == 100_000_000
+    np.testing.assert_allclose(history.samples[-1][1][0], [-0.8, 0, 0.6], atol=1e-7)
+    assert len(history.samples) == 2
+    invalid = _pose()
+    invalid[0, 0] = np.nan
+    assert not history.observe(220_000_000, invalid, 1000, 1000)
+    assert len(history.samples) == 0
+    history.observe(300_000_000, _pose(), 1000, 1000)
+    history.observe(400_000_000, _pose(), 2000, 1000)
+    assert len(history.samples) == 1
+    history.observe(200_000_000, _pose(), 2000, 1000)
+    assert len(history.samples) == 1
+    invalid = _pose()
+    invalid[:10, 2] = 0.2
+    assert not history.observe(300_000_000, invalid, 2000, 1000)
+    assert len(history.samples) == 0
+
+
+def should_match_native_roi_geometry_and_rgb_uint8_bicubic_preprocessing():
+    assert jersey_roi([10, 20, 110, 220], None, "bbox", 320, 960) == (30, 70, 90, 210)
+    pose = _pose()
+    pose[[5, 6, 11, 12], :2] = [[10, 20], [110, 20], [10, 220], [110, 220]]
+    assert jersey_roi([0, 0, 200, 300], pose, "pose", 320, 960) == (5, 10, 115, 230)
+    pose[5, 2] = 0.3
+    assert jersey_roi([0, 0, 200, 300], pose, "pose", 320, 960) is None
+    assert jersey_roi([0, 0, 200, 300], None, "pose", 320, 960) is None
+    image = np.full((32, 128, 3), [0, 127, 255], dtype=np.uint8)
+    inputs = parseq_input(image, (0, 0, 128, 32))
+    np.testing.assert_allclose(inputs[:, 0, 0], [1, 127 / 127.5 - 1, -1], atol=1e-7)
+    assert inputs.shape == (3, 32, 128)
+    # Outside pixels retain black padding; clamping would change the model crop.
+    padded = parseq_input(image, (-128, 0, 128, 32))
+    assert np.all(padded[:, :, :50] == -1)
+
+
+def _jersey_logits(tokens):
+    logits = np.full((3, 95), -20, dtype=np.float32)
+    for index, token in enumerate(tokens):
+        logits[index, token] = 20
+    return logits
+
+
+def should_decode_all_95_tokens_and_require_digits_then_eos():
+    assert decode_parseq(_jersey_logits([4, 8, 0])) == ("37", 1.0)
+    assert decode_parseq(_jersey_logits([1, 0, 0])) == ("0", 1.0)
+    assert decode_parseq(_jersey_logits([1, 1, 0])) == ("00", 1.0)
+    for tokens in ([0, 0, 0], [11, 0, 0], [4, 8, 1]):
+        assert decode_parseq(_jersey_logits(tokens)) is None
+    scores = _jersey_logits([4, 8, 0])
+    scores[1] = 0
+    assert decode_parseq(scores)[1] == pytest.approx(1 / 95)
+
+
+def should_accumulate_jersey_evidence_with_expiry_and_hysteresis():
+    consensus = JerseyConsensus()
+    consensus.observe(0, "0", 0.9)
+    assert consensus.result(0) is None
+    consensus.observe(500_000_000, "0", 0.9)
+    assert consensus.result(500_000_000) == ("0", 1.0)
+    consensus.observe(500_000_000, "37", 1)
+    assert "37" not in consensus.evidence  # one attempt per source timestamp
+    consensus.observe(1_000_000_000, "37", 0.9)
+    assert consensus.result(1_000_000_000)[0] == "0"
+    consensus.observe(1_500_000_000, "37", 0.9)
+    assert consensus.result(1_500_000_000)[0] == "37"
+    assert consensus.result(4_500_000_001) is None
+    consensus.observe(0, "0", 0.9)
+    assert consensus.result(0) is None
+
+
+def _context(start, count=1, *, fresh=True, track_id=2**42):
+    images, frames, poses = [], [], []
+    for index in range(start, start + count):
+        box = torch.tensor([[0.0, 0.0, 100.0, 100.0]])
+        instances = SimpleNamespace(instances_id=torch.tensor([track_id]), bboxes=box)
+        frames.append(
+            SimpleNamespace(
+                metainfo={"pts_ns": index * 100_000_000}, pred_track_instances=instances
+            )
+        )
+        image = torch.zeros(3, 100, 100, dtype=torch.uint8)
+        images.append(image)
+        pose = SimpleNamespace(
+            pred_instances=SimpleNamespace(
+                keypoints=torch.full((1, 17, 2), 50.0),
+                keypoint_scores=torch.full((1, 17), 0.9),
+                bboxes=box,
+            )
+        )
+        poses.append({"predictions": [pose] if fresh else []})
+    return {
+        "original_images": torch.stack(images),
+        "data_samples": SimpleNamespace(video_data_samples=frames),
+        "pose_results": poses,
+        "shared": {"game_id": "test", "source_video_paths": ["source.mp4"]},
+    }
+
+
+class FakeAction:
+    def __init__(self):
+        self.inputs = []
+
+    def __call__(self, inputs):
+        self.inputs.append(inputs.copy())
+        logits = np.full((len(inputs), 60), -20, dtype=np.float32)
+        logits[:, 42] = 20
+        return logits
+
+
+def should_accumulate_across_batches_without_leaking_future_actions_into_earlier_frames():
+    plugin = TemporalActionPlugin()
+    model = plugin.model = FakeAction()
+    for index in range(0, 96, 4):
+        assert plugin.forward(_context(index, 4))["action_results"] == [[], [], [], []]
+    output = plugin.forward(_context(96, 4))["action_results"]
+    assert output[:3] == [[], [], []]
+    assert output[3][0]["tracking_id"] == 2**42
+    assert output[3][0]["label_index"] == 42
+    assert output[3][0]["window_start_ns"] == 0
+    assert len(model.inputs) == 1
+    np.testing.assert_allclose(model.inputs[0][0, 0, :, :, :2], 0)
+    assert plugin.forward(_context(103))["action_results"] == [[]]  # 400ms gap resets history
+    assert len(plugin.states[2**42]["history"].samples) == 1
+    assert len(model.inputs) == 1
+    changed = _context(104)
+    changed["shared"]["source_video_paths"] = ["different.mp4"]
+    plugin.forward(changed)
+    assert len(plugin.states[2**42]["history"].samples) == 1
+
+
+def should_never_use_held_poses_as_action_evidence_or_pose_guided_jersey_crops():
+    action = TemporalActionPlugin()
+    action.model = FakeAction()
+    jersey = ParseqJerseyPlugin(roi_mode="pose")
+    jersey.model = lambda inputs: pytest.fail("A held pose must not trigger jersey inference")
+    for index in range(101):
+        context = _context(index, fresh=False)
+        context["pose_display_results"] = _context(index)["pose_results"]
+        assert action.forward(context)["action_results"] == [[]]
+        assert jersey.forward(context)["jersey_results"] == [[]]
+    assert action.model.inputs == []
+
+
+def should_support_bbox_jerseys_without_pose_and_return_native_consensus():
+    plugin = ParseqJerseyPlugin()
+    calls = []
+
+    def infer(inputs):
+        calls.append(inputs.shape)
+        logits = _jersey_logits([4, 8, 0])
+        logits[2, 1] = 20 - np.log(9)  # 0.9 sequence confidence needs repeat evidence.
+        return np.stack([logits for _ in inputs])
+
+    plugin.model = infer
+    assert plugin.forward(_context(0, fresh=False))["jersey_results"] == [[]]
+    assert plugin.forward(_context(1, fresh=False))["jersey_results"] == [[]]
+    result = plugin.forward(_context(5, fresh=False))["jersey_results"][0][0]
+    assert result.number == "37" and result.tracking_id == 2**42
+    assert calls == [(1, 3, 32, 128), (1, 3, 32, 128)]
+
+
+@pytest.mark.parametrize("tokens,number", [([4, 8, 0], "37"), ([1, 0, 0], "0"), ([1, 1, 0], "00")])
+def should_render_current_native_jerseys_verbatim_and_remove_expired_badges(
+    monkeypatch, tokens, number
+):
+    from hmlib.aspen.plugins.overlay_plugin import OverlayPlugin
+    from hmlib.camera.play_tracker import PlayTracker
+
+    native = ParseqJerseyPlugin()
+    native.model = lambda images: np.stack([_jersey_logits(tokens) for _ in images])
+    overlay = OverlayPlugin(plot_jersey_numbers=True)
+    drawn = []
+
+    def draw(**kwargs):
+        drawn.append(kwargs["text"])
+        return kwargs["image"]
+
+    monkeypatch.setattr("hmlib.vis.player_labels.draw_label_box", draw)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Settled labels must not pass through legacy evidence aggregation")
+
+    monkeypatch.setattr(overlay._jersey_tracker, "observe_tracking_id_number_info", unexpected)
+    context = _context(0, fresh=False)
+    context.update(native.forward(context), img=context["original_images"])
+    overlay.forward(context)
+    assert drawn == [number]
+    tracker = SimpleNamespace()
+    PlayTracker.process_jerseys_info(tracker, 0, 0, context)
+    assert tracker._current_jersey_labels[0].number == number
+
+    native.model = lambda images: np.zeros((len(images), 3, 95), dtype=np.float32)
+    expired = _context(40, fresh=False)
+    expired.update(native.forward(expired), img=expired["original_images"])
+    overlay.forward(expired)
+    PlayTracker.process_jerseys_info(tracker, 0, 40, expired)
+    assert tracker._current_jersey_labels == []
+    assert drawn == [number]
+
+
+def should_remove_rendered_native_action_after_a_pose_history_gap(monkeypatch):
+    from hmlib.actions.action_tracker import ActionTracker
+    from hmlib.camera.play_tracker import PlayTracker
+
+    native = TemporalActionPlugin()
+    native.model = FakeAction()
+    for index in range(100):
+        context = _context(index)
+        context.update(native.forward(context))
+    tracker = SimpleNamespace(_action_tracker=ActionTracker(show=True))
+    drawn = []
+
+    def draw(image, text, *args, **kwargs):
+        drawn.append(text)
+        return image
+
+    monkeypatch.setattr("hmlib.actions.action_tracker.vis.my_put_text", draw)
+    PlayTracker.process_actions_info(tracker, 0, 99, context)
+    image = torch.zeros((100, 100, 3), dtype=torch.uint8)
+    ids, boxes = torch.tensor([2**42]), torch.tensor([[10, 30, 50, 50]])
+    tracker._action_tracker.draw(image, ids, boxes)
+    assert drawn == [native.labels[42]]
+    expired = _context(103)
+    expired.update(native.forward(expired))
+    PlayTracker.process_actions_info(tracker, 0, 103, expired)
+    tracker._action_tracker.draw(image, ids, boxes)
+    assert drawn == [native.labels[42]]
+    assert tracker._action_tracker._actions == {}
+
+
+def should_reject_wrong_pose_topology_and_preserve_one_to_one_association():
+    context = _context(0)
+    pose = context["pose_results"][0]
+    tracks = {10: np.array([0, 0, 100, 100]), 20: np.array([0, 0, 100, 100])}
+    assert list(fresh_poses(pose, tracks)) == [10]
+    pose["predictions"][0].pred_instances.keypoints = torch.zeros(1, 14, 2)
+    with pytest.raises(ValueError, match="COCO17"):
+        fresh_poses(pose, tracks)
+
+
+def should_validate_pinned_cached_bytes_before_model_loading(tmp_path):
+    path = tmp_path / "parseq-hockey-cvprw2024-df48ad7463aa89a5.onnx"
+    path.write_bytes(b"corrupt")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        prepare_player_model("jersey", tmp_path)
+    assert "CC-BY-NC" in model_contract("jersey")["source"]["license"]
+    assert len(model_contract("action")["labels"]) == 60
+
+
+def should_reject_incompatible_custom_models_and_explicit_cuda_failures(tmp_path, monkeypatch):
+    import onnxruntime as ort
+
+    path = tmp_path / "custom.onnx"
+    path.write_bytes(b"fixture")
+    monkeypatch.setattr(ort, "get_available_providers", lambda: ["CPUExecutionProvider"])
+    with pytest.raises(RuntimeError, match="CUDA provider unavailable"):
+        PlayerModel("action", str(path), "cuda").ensure_session()
+    session = SimpleNamespace(
+        get_inputs=lambda: [SimpleNamespace(type="tensor(float)", shape=["N", 2, 100, 14, 3])],
+        get_outputs=lambda: [SimpleNamespace(type="tensor(float)", shape=["N", 60])],
+    )
+    monkeypatch.setattr(ort, "InferenceSession", lambda *args, **kwargs: session)
+    with pytest.raises(ValueError, match="native|float32"):
+        PlayerModel("action", str(path), "cpu").ensure_session()
+
+
+@pytest.mark.parametrize("feature", ["jersey", "action"])
+def should_execute_custom_native_bundle_bytes_and_its_output_semantics(tmp_path, feature):
+    import copy
+    import hashlib
+
+    import onnx
+    from onnx import TensorProto, helper, numpy_helper
+
+    from hmlib.models.player_analytics import load_model_bundle
+
+    contract = copy.deepcopy(model_contract(feature))
+    contract["model_id"] = f"custom-{feature}-fixture"
+    input_spec, output_spec = contract["inputs"][0], contract["outputs"][0]
+    output = np.zeros((1, *output_spec["shape"][1:]), np.float32)
+    if feature == "action":
+        output[0, 3] = 9
+        contract["labels"][3] = "custom recorded activity"
+    else:
+        vocabulary = contract["preprocessing"]["charset"]
+        vocabulary[1], vocabulary[10] = vocabulary[10], vocabulary[1]
+        output[0, 0, 1] = 9
+        output[0, 1:, 0] = 9
+    model = helper.make_model(
+        helper.make_graph(
+            [
+                helper.make_node(
+                    "Constant", [], [output_spec["name"]], value=numpy_helper.from_array(output)
+                )
+            ],
+            "actual-custom-model",
+            [
+                helper.make_tensor_value_info(
+                    input_spec["name"], TensorProto.FLOAT, [1, *input_spec["shape"][1:]]
+                )
+            ],
+            [
+                helper.make_tensor_value_info(
+                    output_spec["name"], TensorProto.FLOAT, list(output.shape)
+                )
+            ],
+        ),
+        opset_imports=[helper.make_opsetid("", 17)],
+    )
+    model.ir_version = 9
+    path = tmp_path / "model.onnx"
+    onnx.save(model, path)
+    contract["onnx"]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = tmp_path / "manifest.json"
+    import yaml
+
+    manifest.write_text(yaml.safe_dump(contract))
+    runner = PlayerModel(feature, provider="cpu", model_bundle=str(tmp_path))
+    actual = runner(np.zeros((1, *input_spec["shape"][1:]), np.float32))
+    np.testing.assert_array_equal(actual, output)
+    if feature == "action":
+        plugin = TemporalActionPlugin(provider="cpu", model_bundle=str(tmp_path))
+        assert plugin.labels[3] == "custom recorded activity"
+    else:
+        plugin = ParseqJerseyPlugin(provider="cpu", model_bundle=str(tmp_path))
+        decoded = decode_parseq(actual[0], charset=plugin.charset, eos_index=plugin.eos_index)
+        assert decoded[0] == "9"
+    contract["preprocessing"]["id"] = "different-preprocessing"
+    manifest.write_text(yaml.safe_dump(contract))
+    with pytest.raises(ValueError, match="preprocessing"):
+        load_model_bundle(feature, tmp_path)
+    contract["preprocessing"]["id"] = model_contract(feature)["preprocessing"]["id"]
+    contract["onnx"]["sha256"] = "0" * 64
+    manifest.write_text(yaml.safe_dump(contract))
+    with pytest.raises(ValueError, match="checksum"):
+        load_model_bundle(feature, tmp_path)
+
+
+@pytest.mark.parametrize("custom", [False, True])
+@pytest.mark.parametrize("cuda_available", [False, True])
+def should_preserve_prepared_analytics_gpu_through_every_runner_and_seek(
+    tmp_path, monkeypatch, caplog, custom, cuda_available
+):
+    from copy import deepcopy
+    from pathlib import Path
+
+    import mmpose.apis.inferencers
+    import onnxruntime as ort
+
+    from hmlib.aspen.plugins.pose_factory_plugin import PoseInferencerFactoryPlugin
+    from hmlib.aspen.plugins.reid_plugin import configure_reid
+    from hmlib.aspen.plugins.team_plugin import TeamAffiliationPlugin
+    from hmlib.models import player_analytics
+    from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+
+    features = ("pose", "jersey", "action", "team")
+    selected = {
+        feature: "custom" if custom else model_contract(feature)["model_id"] for feature in features
+    }
+    paths = {feature: tmp_path / f"{feature}.onnx" for feature in features}
+    for path in paths.values():
+        path.touch()
+    monkeypatch.setattr(
+        player_analytics,
+        "load_model_bundle",
+        lambda feature, bundle: (paths[feature], model_contract(feature)),
+    )
+    observed = []
+    providers = ["CPUExecutionProvider"]
+    if cuda_available:
+        providers.insert(0, "CUDAExecutionProvider")
+    monkeypatch.setattr(ort, "get_available_providers", lambda: providers)
+
+    def create_session(path, *, providers, **kwargs):
+        feature = Path(path).stem
+        observed.append((feature, providers))
+        contract = model_contract(feature)
+
+        def nodes(kind):
+            return [
+                SimpleNamespace(
+                    name=spec["name"], shape=["N", *spec["shape"][1:]], type="tensor(float)"
+                )
+                for spec in contract[kind]
+            ]
+
+        return SimpleNamespace(
+            get_inputs=lambda: nodes("inputs"),
+            get_outputs=lambda: nodes("outputs"),
+            get_providers=lambda: (
+                ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                if cuda_available
+                else ["CPUExecutionProvider"]
+            ),
+        )
+
+    monkeypatch.setattr(ort, "InferenceSession", create_session)
+
+    class PoseModel(torch.nn.Module):
+        def test_step(self, data):
+            return []
+
+    monkeypatch.setattr(
+        mmpose.apis.inferencers,
+        "MMPoseInferencer",
+        lambda **kwargs: SimpleNamespace(
+            inferencer=SimpleNamespace(cfg=SimpleNamespace(data_mode="topdown"), model=PoseModel())
+        ),
+    )
+    analytics = {
+        feature: {"enable": True, "model": selected[feature], "bundle": str(tmp_path / feature)}
+        for feature in features
+    }
+    base = {
+        "hm_ui": {
+            "shared_analytics": selected,
+            "run": {
+                "analytics": "custom",
+                "pose_model": "shared",
+                "jersey_model": "shared",
+                "action_model": "shared",
+            },
+        },
+        "pipeline": {"player-analytics": analytics},
+        "team": {"enabled": True, "backend": "reidentificationnet"},
+        "aspen": {
+            "plugins": {
+                "pose_factory": {"params": {}},
+                "jersey_numbers": {"params": {}},
+                "actions": {"params": {}},
+                "team_affiliation": {
+                    "class": "hmlib.aspen.plugins.team_plugin.TeamAffiliationPlugin",
+                    "params": {},
+                },
+            }
+        },
+    }
+    prepared = {"pipeline": {"player-analytics": {**deepcopy(analytics), "gpu-id": 1}}}
+    expected = (
+        [("CUDAExecutionProvider", {"device_id": 1}), "CPUExecutionProvider"]
+        if cuda_available
+        else ["CPUExecutionProvider"]
+    )
+    for operator_gpu in (None, 2):
+        # A seek rebuild reads operator settings again, then reapplies the
+        # accepted bundle/device before constructing new model sessions.
+        config = deepcopy(base)
+        config["pipeline"]["player-analytics"]["gpu-id"] = operator_gpu
+        apply_prepared_shared_analytics(config, prepared)
+        configure_reid(config, tmp_path)
+        nodes = config["aspen"]["plugins"]
+        PoseInferencerFactoryPlugin(**nodes["pose_factory"]["params"]).forward({"device": "cpu"})
+        ParseqJerseyPlugin(**nodes["jersey_numbers"]["params"]).model.ensure_session()
+        TemporalActionPlugin(**nodes["actions"]["params"]).model.ensure_session()
+        TeamAffiliationPlugin(
+            **nodes["team_affiliation"]["params"]
+        )._ensure_backend()._runner._ensure_session()
+        assert observed[-4:] == [(feature, expected) for feature in features]
+    if not cuda_available:
+        assert "Shared pose CUDA provider unavailable" in caplog.text
+        assert "jersey CUDA provider unavailable" in caplog.text
+        assert "action CUDA provider unavailable" in caplog.text
+        assert "ReID CUDA provider unavailable" in caplog.text
+
+
+@pytest.mark.parametrize("gpu", [None, True, -1, "1"])
+def should_refuse_unresolved_prepared_analytics_gpu(gpu):
+    from hmlib.ui.shared_analytics import apply_prepared_shared_analytics
+
+    config = {"hm_ui": {"shared_analytics": {"pose": "native"}}, "pipeline": {}}
+    prepared = {
+        "pipeline": {
+            "player-analytics": {
+                "gpu-id": gpu,
+                "pose": {"model": "native", "bundle": "/prepared/pose"},
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="GPU id"):
+        apply_prepared_shared_analytics(config, prepared)
+
+
+@pytest.mark.parametrize("path_source", ["yaml", "override"])
+def should_restore_accepted_models_after_actual_worker_config_and_cli_overrides(
+    tmp_path, monkeypatch, path_source
+):
+    import copy
+    import sys
+
+    import yaml
+
+    from hmlib.cli import hmtrack
+    from hmlib.config import get_config
+    from hmlib.ui import runtime_setup
+    from hmlib.ui.hstream_launch import LaunchPlan
+    from hmlib.ui.shared_analytics import write_accepted_shared_analytics
+
+    game, session = tmp_path / "game", tmp_path / "session"
+    game.mkdir()
+    session.mkdir()
+    bundle = tmp_path / "native-configs" / "custom-pose"
+    bundle.mkdir(parents=True)
+    config = get_config(game_id=None)
+    config["hm_ui"] = {
+        "shared_analytics": {"pose": "custom"},
+        "run": {"analytics": "custom", "pose_model": "shared", "precision": "trt-fp32"},
+    }
+    config.setdefault("pipeline", {})["player-analytics"] = {
+        "gpu-id": 0,
+        "pose": {"enable": True, "model": "custom", "bundle": str(bundle)},
+    }
+    config["aspen"] = {
+        "plugins": {
+            "pose_factory": {"params": {}},
+            "detector_factory": {"params": {"trt": {"enable": False}}},
+        }
+    }
+    original = {
+        "pipeline": {
+            "player-analytics": {"gpu-id": None, "pose": {"enable": True, "model": "custom"}}
+        },
+        "aspen": {"pipeline": {"queue_size": 9}},
+    }
+    initial = copy.deepcopy(original)
+    initial["pipeline"]["player-analytics"]["pose"]["bundle"] = "custom-pose"
+    overlay = tmp_path / "initial.yaml"
+    extra = []
+    if path_source == "yaml":
+        original["pipeline"]["player-analytics"]["pose"]["bundle"] = "custom-pose"
+    else:
+        extra += ["--config-override", "pipeline.player-analytics.pose.bundle=custom-pose"]
+    overlay.write_text(yaml.safe_dump(original))
+    extra += [
+        "--config-override",
+        "pipeline.player-analytics.gpu-id=null",
+        "--config-override",
+        "rink.camera.color.brightness=1.7",
+        "--config-override",
+        "aspen.plugins.detector_factory.params.trt.enable=true",
+    ]
+    plan = LaunchPlan(
+        game=game,
+        config=config,
+        arguments=["--game-id", game.name, "--decoder=cv2"],
+        explicit_arguments=["--config", str(overlay), *extra],
+        cwd=tmp_path,
+        sources={},
+        sinks={"FAKE"},
+        start_seconds=0,
+        graph=config["aspen"],
+        limit_seconds=10,
+        initial_settings=initial,
+    )
+    write_accepted_shared_analytics(
+        session, game.name, config, {"pipeline": config["pipeline"]}, initial
+    )
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(session))
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.chdir(tmp_path)
+    baseline = get_config(game_id=None)
+    monkeypatch.setattr(hmtrack, "get_config", lambda **kwargs: copy.deepcopy(baseline))
+    monkeypatch.setattr(runtime_setup, "saved_pipeline_preferences", lambda *args, **kwargs: {})
+    monkeypatch.setattr(hmtrack, "configure_model", lambda *, config, args: args)
+    captured = []
+
+    def run_worker(args, num_gpus):
+        actual = args.game_config
+        captured.append(
+            copy.deepcopy(actual["aspen"]["plugins"]["pose_factory"]["params"]["shared_model"])
+        )
+        assert actual["pipeline"]["player-analytics"]["gpu-id"] == 0
+        assert actual["aspen"]["pipeline"]["queue_size"] == 9
+        assert actual["rink"]["camera"]["color"]["brightness"] == 1.7
+        assert actual["aspen"]["plugins"]["detector_factory"]["params"]["trt"]["enable"] is True
+
+    monkeypatch.setattr(hmtrack, "_main", run_worker)
+    for seek in (0, 1):
+        command = plan.write(session, seek_seconds=seek)
+        arguments = command[command.index("hmlib.cli.hmtrack") + 1 :]
+        monkeypatch.setattr(sys, "argv", ["hmtrack", *arguments])
+        hmtrack.main()
+    assert captured == [{"model": "custom", "bundle": str(bundle), "gpu": 0}] * 2
+    assert yaml.safe_load(overlay.read_text()) == original
+
+
+@pytest.mark.parametrize("changed", ["game", "session", "model", "path", "oversized"])
+def should_refuse_changed_or_unbound_worker_model_snapshots(tmp_path, monkeypatch, changed):
+    import json
+
+    from hmlib.ui.shared_analytics import (
+        restore_worker_shared_analytics,
+        write_accepted_shared_analytics,
+    )
+
+    config = {
+        "hm_ui": {"shared_analytics": {"pose": "custom"}},
+        "pipeline": {
+            "player-analytics": {
+                "gpu-id": 0,
+                "pose": {"model": "custom", "bundle": str(tmp_path / "accepted")},
+            }
+        },
+    }
+    write_accepted_shared_analytics(tmp_path, "game", config, {"pipeline": config["pipeline"]}, {})
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    path = tmp_path / "accepted-models.json"
+    snapshot = json.loads(path.read_text())
+    if changed in {"game", "session"}:
+        snapshot["game_id" if changed == "game" else "session"] = "other"
+        path.write_text(json.dumps(snapshot))
+    elif changed == "oversized":
+        path.write_text(" " * (64 * 1024 + 1))
+    else:
+        config["pipeline"]["player-analytics"]["pose"][
+            "model" if changed == "model" else "bundle"
+        ] = "other"
+    with pytest.raises(ValueError, match="snapshot|changed"):
+        restore_worker_shared_analytics(config, "game")

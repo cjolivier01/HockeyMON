@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from hmlib.stitching.calibration import CalibrationAlignmentError
+from hmlib.stitching.geometric_filtering import geometric_inliers
 
 logger = logging.getLogger(__name__)
 MAXIMUM_DETECTION_DIMENSION = 1920
@@ -52,7 +53,7 @@ class LensCalibrationPair:
 
 def _parse_camera(document: Any, key: str) -> FisheyeCalibration:
     if not isinstance(document, dict) or not isinstance(document.get(key), dict):
-        raise ValueError(f"AKAZE lens calibration is missing {key}")
+        raise ValueError(f"AKAZE lens calibration is missing {key}")  # noqa: TRY004
     camera = document[key]
     values = []
     for field in ("width", "height", "fx", "fy", "cx", "cy"):
@@ -164,7 +165,11 @@ def _ratio_matches(query, train):
 
 
 def match_akaze(
-    image0: torch.Tensor, image1: torch.Tensor, calibration: LensCalibrationPair | None = None
+    image0: torch.Tensor,
+    image1: torch.Tensor,
+    calibration: LensCalibrationPair | None = None,
+    *,
+    filtering=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return source-sized rectified points when a KB4 profile is supplied."""
     left, descriptors0, size0, source0 = _features(
@@ -197,17 +202,13 @@ def match_akaze(
         ):
             continue
         accepted.append((point0, point1, match.distance, index, match.trainIdx))
-    if len(accepted) < 8:
-        raise CalibrationAlignmentError("AKAZE found fewer than eight mutual overlap matches")
+    if len(accepted) < 6:
+        raise CalibrationAlignmentError("AKAZE found fewer than six mutual overlap matches")
     points0, points1 = (
         np.array([entry[index] for entry in accepted], dtype=np.float32) for index in (0, 1)
     )
-    fundamental, inliers = cv2.findFundamentalMat(points0, points1, cv2.FM_RANSAC, 1.0, 0.99, 2000)
-    if fundamental is None or inliers is None or inliers.size != len(accepted):
-        raise CalibrationAlignmentError("AKAZE could not estimate overlap epipolar geometry")
-    accepted = [entry for entry, keep in zip(accepted, inliers.ravel()) if keep]
-    if len(accepted) < 6:
-        raise CalibrationAlignmentError("AKAZE epipolar filtering retained fewer than six matches")
+    inliers = geometric_inliers(points0, points1, filtering, "AKAZE")
+    accepted = [accepted[index] for index in inliers]
     accepted.sort(key=lambda entry: (entry[2], entry[3], entry[4]))
     return tuple(
         torch.from_numpy(

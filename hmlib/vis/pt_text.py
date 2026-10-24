@@ -8,7 +8,6 @@ images with text directly on GPU tensors.
 
 import string
 import subprocess
-from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -17,7 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 from ..utils.image import is_channels_first, make_channels_first
 
 # Key: (ttf file path, point size, device) -> letter -> RGBA tensor
-CHARACTERS: Dict[Tuple[str, int, str], Dict[str, torch.Tensor]] = {}
+CHARACTERS: dict[tuple[str, int, str], dict[str, torch.Tensor]] = {}
 
 
 def print_rgba_planes(image_tensor):
@@ -48,9 +47,8 @@ _TRANSPARENT_PIXEL: int = 255
 
 
 def _create_text_images(
-    font_path: str, font_size: int, font_color: Tuple[int, int, int], device=torch.device
-) -> Dict[str, torch.Tensor]:
-    global CHARACTERS
+    font_path: str, font_size: int, font_color: tuple[int, int, int], device=torch.device
+) -> dict[str, torch.Tensor]:
     assert font_path
 
     key = (font_path, font_size, str(device))
@@ -60,13 +58,14 @@ def _create_text_images(
 
     # Define the set of characters we want to render
     # characters = string.ascii_letters + string.digits  # All upper and lowercase letters and digits
-    characters = string.printable
+    # Line breaks are handled by draw_text; RAQM cannot shape control glyphs.
+    characters = string.ascii_letters + string.digits + string.punctuation + " "
 
     # Load the font
     font = ImageFont.truetype(font_path, font_size)
 
     # Dictionary to hold the character images as tensors
-    char_tensors: Dict[str, torch.Tensor] = {}
+    char_tensors: dict[str, torch.Tensor] = {}
 
     max_height = 0
     border_size: int = 1
@@ -111,13 +110,13 @@ def _create_text_images(
     return char_tensors
 
 
-def find_font_path(font_name_list: List[str] = None):
+def find_font_path(font_name_list: list[str] | None = None):
     if not font_name_list:
         font_name_list = ["Ubuntu Sans:style=Thin", "DejaVuSerif.ttf", "FreeSerif.ttf"]
     for font_name in font_name_list:
         # Command to find the font file
-        command = ["fc-list", ": family file", "|", "grep", "-i", font_name]
-        result = subprocess.run(command, stdout=subprocess.PIPE, text=True, shell=True)
+        command = ["fc-list", ":", "family", "file"]
+        result = subprocess.run(command, stdout=subprocess.PIPE, text=True, check=True)
         lines = result.stdout.split("\n")
         for line in lines:
             if font_name in line:
@@ -147,7 +146,7 @@ def alpha_blend(base_img: torch.Tensor, letter_img: torch.Tensor, start_x: int, 
 
 
 # We only support default font for draw_text right now in order to conserve resources
-draw_text_SIZE_TO_FONT_PATHS: Dict[int, str] = {}
+draw_text_SIZE_TO_FONT_PATHS: dict[int, str] = {}
 
 
 def draw_text(
@@ -156,13 +155,12 @@ def draw_text(
     y: int,
     text: str,
     font_size: int = 20,
-    color: Tuple[int, int, int] = (255, 0, 0),
+    color: tuple[int, int, int] = (255, 0, 0),
     position_is_text_bottom: bool = False,
 ) -> torch.Tensor:
     # font_size = int(font_size * 25)
     assert is_channels_first(image)
     font_size = int(font_size * 10)
-    global draw_text_SIZE_TO_FONT_PATHS
     font_path = draw_text_SIZE_TO_FONT_PATHS.get(font_size)
     if font_path is None:
         font_path = find_font_path()
@@ -201,7 +199,7 @@ def draw_text(
     return image
 
 
-def measure_text(text: str, font_size: int = 20) -> Tuple[int, int]:
+def measure_text(text: str, font_size: int = 20) -> tuple[int, int]:
     """Return (width_px, height_px) for `draw_text` with the same `font_size`.
 
     This is used by overlays to draw a background box before rendering text.
@@ -209,7 +207,6 @@ def measure_text(text: str, font_size: int = 20) -> Tuple[int, int]:
     if not text:
         return 0, 0
     font_size = int(font_size * 10)
-    global draw_text_SIZE_TO_FONT_PATHS
     font_path = draw_text_SIZE_TO_FONT_PATHS.get(font_size)
     if font_path is None:
         font_path = find_font_path()

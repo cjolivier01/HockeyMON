@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -42,13 +41,21 @@ class Scoreboard(torch.nn.Module):
         dest_height: int,
         dest_width: int,
         dtype: torch.dtype,
-        clip_box: Union[torch.Tensor, None] = None,
-        device: Union[torch.device, None] = None,
+        clip_box: torch.Tensor | None = None,
+        device: torch.device | None = None,
         auto_aspect: bool = True,
-        scoreboard_scale: Optional[float] = None,
+        scoreboard_scale: float | None = None,
+        resize_filter: str = "nearest",
+        sharpen_amount: float = 0.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
+        if resize_filter not in {"nearest", "bilinear", "bicubic"}:
+            raise ValueError(f"Unknown scoreboard resize filter: {resize_filter}")
+        if not np.isfinite(sharpen_amount) or not 0 <= sharpen_amount <= 4:
+            raise ValueError("Scoreboard sharpening must be between 0 and 4")
+        self._resize_filter = resize_filter
+        self._sharpen_amount = sharpen_amount
         if not isinstance(src_pts, torch.Tensor):
             src_pts = torch.tensor(src_pts, dtype=torch.float)
         assert len(src_pts) == 4
@@ -68,7 +75,7 @@ class Scoreboard(torch.nn.Module):
             self._src_pts[:] -= clip_box[0:2]
 
         bbox_tensor = int_bbox(get_bbox(self._src_pts))
-        bbox_tuple: Tuple[int, int, int, int] = tuple(int(v) for v in bbox_tensor.tolist())
+        bbox_tuple: tuple[int, int, int, int] = tuple(int(v) for v in bbox_tensor.tolist())
         self._bbox_src = bbox_tuple
         x0, y0, x1, y1 = self._bbox_src
 
@@ -172,7 +179,8 @@ class Scoreboard(torch.nn.Module):
         src_image = F.interpolate(
             src_image,
             size=(self._dest_h, self._dest_w),
-            mode="nearest",
+            mode=self._resize_filter,
+            **({"align_corners": False} if self._resize_filter != "nearest" else {}),
         )
 
         grid = self._grid
@@ -197,7 +205,11 @@ class Scoreboard(torch.nn.Module):
                 align_corners=False,
             )
 
-        return warped_image[:, :, : self._dest_height, : self._dest_width]
+        result = warped_image[:, :, : self._dest_height, : self._dest_width]
+        if self._sharpen_amount:
+            blur = F.avg_pool2d(F.pad(result, (1, 1, 1, 1), mode="replicate"), 3, stride=1)
+            result = (result + self._sharpen_amount * (result - blur)).clamp(0, 255)
+        return result
 
     @property
     def width(self):
@@ -208,7 +220,7 @@ class Scoreboard(torch.nn.Module):
         return self._dest_height
 
 
-def get_bbox(point_list: Union[torch.Tensor, List[List[float]]]):
+def get_bbox(point_list: torch.Tensor | list[list[float]]):
     if isinstance(point_list, list):
         points = torch.tensor(point_list)
     else:
@@ -225,8 +237,8 @@ def int_bbox(bbox: torch.Tensor):
 
 
 def _get_perspective_coeffs(
-    startpoints: Union[torch.Tensor, List[List[int]]],
-    endpoints: Union[torch.Tensor, List[List[int]]],
+    startpoints: torch.Tensor | list[list[int]],
+    endpoints: torch.Tensor | list[list[int]],
 ) -> torch.Tensor:
     """Helper function to get the coefficients (a, b, c, d, e, f, g, h) for the perspective transforms.
 
@@ -276,7 +288,7 @@ def _get_perspective_coeffs(
 
 
 def _perspective_grid(
-    coeffs: Union[torch.Tensor, List[float]],
+    coeffs: torch.Tensor | list[float],
     ow: int,
     oh: int,
     dtype: torch.dtype,
@@ -316,8 +328,8 @@ def _perspective_grid(
 
 
 def _cast_squeeze_in(
-    img: Tensor, req_dtypes: List[torch.dtype]
-) -> Tuple[Tensor, bool, bool, torch.dtype]:
+    img: Tensor, req_dtypes: list[torch.dtype]
+) -> tuple[Tensor, bool, bool, torch.dtype]:
     need_squeeze = False
     # make image NCHW
     if img.ndim < 4:
@@ -355,7 +367,7 @@ def _cast_squeeze_out(
 
 
 def _apply_grid_transform(
-    img: Tensor, grid: Tensor, mode: str, fill: Optional[Union[int, float, List[float]]]
+    img: Tensor, grid: Tensor, mode: str, fill: float | list[float] | None
 ) -> Tensor:
 
     img, need_cast, need_squeeze, out_dtype = _cast_squeeze_in(img, [grid.dtype])

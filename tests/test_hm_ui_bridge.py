@@ -246,6 +246,40 @@ def should_publish_preview_frame(tmp_path):
     assert decoded.shape[:2] == (24, 32)
 
 
+def should_publish_only_selected_bounded_camera_pixels_before_downstream_changes(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    ui = HmUiProcess(
+        title="test", tmpdir=tmp_path, preview_names=("Stitched", "Final", "Camera 1", "Camera 2")
+    )
+    ui.ensure_started = lambda: None
+    ui.add_window("Tracker Controls")
+    try:
+        for index in (1, 2):
+            name = f"Camera {index}"
+            ui.state_path.write_text(
+                json.dumps({"version": 1, "windows": {}, "selected_preview": name})
+            )
+            ui.poll()
+            source = np.full((1000, 2000, 3), (20, 120, 220), dtype=np.uint8)
+            for candidate in ui.preview_paths:
+                ui.publish_preview(source, name=candidate, snapshot=True, min_interval_seconds=0)
+            source.fill(0)
+            assert ui.flush_previews()
+            path = tmp_path / f"preview-camera-{index}.jpg"
+            assert path == ui.preview_paths[name]
+            decoded = cv2.imread(str(path))
+            assert decoded.shape == (640, 1280, 3)
+            assert np.max(np.abs(decoded[0, 0].astype(int) - [20, 120, 220])) <= 2
+            assert not ui.preview_paths["Stitched"].exists()
+            assert not ui.preview_paths["Final"].exists()
+            if index == 1:
+                assert not ui.preview_paths["Camera 2"].exists()
+    finally:
+        ui.close()
+
+
 def should_publish_named_preview_frames_independently(tmp_path):
     ui = HmUiProcess(title="test", tmpdir=tmp_path)
     ui.ensure_started = lambda: None

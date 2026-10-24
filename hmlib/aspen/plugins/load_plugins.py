@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -19,7 +19,7 @@ from hmlib.tracking_utils.utils import get_track_mask
 from .base import Plugin
 
 
-def _ctx_value(context: Dict[str, Any], key: str) -> Optional[Any]:
+def _ctx_value(context: dict[str, Any], key: str) -> Any | None:
     if not key:
         return None
     if key in context:
@@ -54,10 +54,10 @@ class LoadDetectionsPlugin(Plugin):
         self._game_dir_key = game_dir_key
         self._file_stem = file_stem
         self._input_batch_size = input_batch_size
-        self._detection_dataframe: Optional[DetectionDataFrame] = None
+        self._detection_dataframe: DetectionDataFrame | None = None
         self._warned_missing = False
 
-    def _ensure_dataframe(self, context: Dict[str, Any]) -> Optional[DetectionDataFrame]:
+    def _ensure_dataframe(self, context: dict[str, Any]) -> DetectionDataFrame | None:
         if self._detection_dataframe is not None:
             return self._detection_dataframe
         path = _ctx_value(context, self._input_path_key)
@@ -77,7 +77,7 @@ class LoadDetectionsPlugin(Plugin):
         )
         return self._detection_dataframe
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
         df = self._ensure_dataframe(context)
@@ -158,16 +158,20 @@ class LoadTrackingPlugin(Plugin):
         game_dir_key: str = "game_dir",
         file_stem: str = "tracking",
         input_batch_size: int = 1,
+        load_jerseys: bool = True,
+        load_actions: bool = True,
     ):
         super().__init__(enabled=enabled)
         self._input_path_key = input_path_key
         self._game_dir_key = game_dir_key
         self._file_stem = file_stem
         self._input_batch_size = input_batch_size
-        self._tracking_dataframe: Optional[TrackingDataFrame] = None
+        self._load_jerseys = load_jerseys
+        self._load_actions = load_actions
+        self._tracking_dataframe: TrackingDataFrame | None = None
         self._warned_missing = False
 
-    def _ensure_dataframe(self, context: Dict[str, Any]) -> Optional[TrackingDataFrame]:
+    def _ensure_dataframe(self, context: dict[str, Any]) -> TrackingDataFrame | None:
         if self._tracking_dataframe is not None:
             return self._tracking_dataframe
         path = _ctx_value(context, self._input_path_key)
@@ -192,7 +196,7 @@ class LoadTrackingPlugin(Plugin):
         )
         return self._tracking_dataframe
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
@@ -213,7 +217,8 @@ class LoadTrackingPlugin(Plugin):
         video_len = len(track_data_sample)
         max_tracking_id = 0
         active_track_count = 0
-        jersey_results_all: List[List[Any]] = []
+        jersey_results_all: list[list[Any]] = []
+        action_results_all: list[list[Any]] = []
 
         for i in range(video_len):
             img_data_sample = track_data_sample[i]
@@ -223,7 +228,7 @@ class LoadTrackingPlugin(Plugin):
             img_data_sample.set_metainfo({"frame_id": fid})
             rec = None
             rec = df.get_data_dict_by_frame(frame_id=fid)
-            jersey_results: List[Any] = []
+            jersey_results: list[Any] = []
             if isinstance(rec, dict):
                 for info in rec.get("jersey_info") or []:
                     if info is None:
@@ -231,7 +236,10 @@ class LoadTrackingPlugin(Plugin):
                     if getattr(info, "tracking_id", -1) < 0:
                         continue
                     jersey_results.append(info)
+                if "jersey_results" in rec:
+                    jersey_results = rec["jersey_results"]
             jersey_results_all.append(jersey_results)
+            action_results_all.append(rec.get("action_results", []) if rec else [])
             track_ds = ds(frame_id=fid) if callable(ds) else None
             if track_ds is None:
                 # attach empty tracks instance
@@ -242,10 +250,7 @@ class LoadTrackingPlugin(Plugin):
                     labels=torch.empty((0,), dtype=torch.long),
                 )
                 img_data_sample.pred_track_instances = inst
-                try:
-                    img_data_sample.set_metainfo({"nr_tracks": 0})
-                except Exception:
-                    pass
+                img_data_sample.set_metainfo({"nr_tracks": 0})
                 continue
             inst = getattr(
                 track_ds[0] if hasattr(track_ds, "__getitem__") else track_ds,
@@ -279,16 +284,13 @@ class LoadTrackingPlugin(Plugin):
                         labels=torch.as_tensor(labels),
                     )
             img_data_sample.pred_track_instances = inst
-            try:
-                track_mask = get_track_mask(inst)
-                if isinstance(track_mask, torch.Tensor):
-                    track_count = int(track_mask.sum().item())
-                else:
-                    track_count = len(inst.instances_id)
-                img_data_sample.set_metainfo({"nr_tracks": track_count})
-                img_data_sample.set_metainfo({"frame_id": int(fid)})
-            except Exception:
-                pass
+            track_mask = get_track_mask(inst)
+            if isinstance(track_mask, torch.Tensor):
+                track_count = int(track_mask.sum().item())
+            else:
+                track_count = len(inst.instances_id)
+            img_data_sample.set_metainfo({"nr_tracks": track_count})
+            img_data_sample.set_metainfo({"frame_id": int(fid)})
 
             track_mask = get_track_mask(inst)
             if isinstance(track_mask, torch.Tensor):
@@ -308,20 +310,27 @@ class LoadTrackingPlugin(Plugin):
                     max_id = int(torch.max(inst.instances_id))
                     max_tracking_id = max(max_tracking_id, max_id)
 
-        out: Dict[str, Any] = {
+        out: dict[str, Any] = {
             "nr_tracks": active_track_count,
             "max_tracking_id": max_tracking_id,
             "tracking_dataframe": df,
         }
-        if jersey_results_all:
+        if jersey_results_all and self._load_jerseys:
             out["jersey_results"] = jersey_results_all
+        if action_results_all and self._load_actions:
+            out["action_results"] = action_results_all
         return out
 
     def input_keys(self):
         return {"data_samples", "frame_id", "frame_ids", "ids", "shared"}
 
     def output_keys(self):
-        return {"jersey_results", "nr_tracks", "max_tracking_id", "tracking_dataframe"}
+        keys = {"nr_tracks", "max_tracking_id", "tracking_dataframe"}
+        if self._load_jerseys:
+            keys.add("jersey_results")
+        if self._load_actions:
+            keys.add("action_results")
+        return keys
 
 
 class LoadPosePlugin(Plugin):
@@ -348,10 +357,10 @@ class LoadPosePlugin(Plugin):
         self._input_path_key = input_path_key
         self._game_dir_key = game_dir_key
         self._file_stem = file_stem
-        self._pose_dataframe: Optional[PoseDataFrame] = None
+        self._pose_dataframe: PoseDataFrame | None = None
         self._warned_missing = False
 
-    def _ensure_dataframe(self, context: Dict[str, Any]) -> Optional[PoseDataFrame]:
+    def _ensure_dataframe(self, context: dict[str, Any]) -> PoseDataFrame | None:
         if self._pose_dataframe is not None:
             return self._pose_dataframe
         path = _ctx_value(context, self._input_path_key)
@@ -367,7 +376,7 @@ class LoadPosePlugin(Plugin):
         self._pose_dataframe = PoseDataFrame(input_file=path, write_interval=100)
         return self._pose_dataframe
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
         df = self._ensure_dataframe(context)
@@ -385,7 +394,7 @@ class LoadPosePlugin(Plugin):
             track_data_sample = track_samples
         video_len = len(track_data_sample)
 
-        pose_results: List[Any] = []
+        pose_results: list[Any] = []
         for i in range(video_len):
             get_s = getattr(df, "get_sample_by_frame", None)
             fid: int = frame_id0 + i
@@ -433,10 +442,10 @@ class LoadCameraPlugin(Plugin):
         self._game_dir_key = game_dir_key
         self._file_stem = file_stem
         self._input_batch_size = input_batch_size
-        self._camera_dataframe: Optional[CameraTrackingDataFrame] = None
+        self._camera_dataframe: CameraTrackingDataFrame | None = None
         self._warned_missing = False
 
-    def _ensure_dataframe(self, context: Dict[str, Any]) -> Optional[CameraTrackingDataFrame]:
+    def _ensure_dataframe(self, context: dict[str, Any]) -> CameraTrackingDataFrame | None:
         if self._camera_dataframe is not None:
             return self._camera_dataframe
         path = _ctx_value(context, self._input_path_key)
@@ -455,7 +464,7 @@ class LoadCameraPlugin(Plugin):
         )
         return self._camera_dataframe
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 

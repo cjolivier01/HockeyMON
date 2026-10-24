@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Set
+import os
+from typing import Any
 
 import torch
 
@@ -8,8 +9,10 @@ from hmlib.bbox.box_functions import center, height, make_box_at_center, width
 from hmlib.builder import HM
 from hmlib.camera.camera import HockeyMON
 from hmlib.camera.camera_controller_modes import normalize_play_tracker_camera_controller
+from hmlib.camera.operator_controls import overlay_owner_values
 from hmlib.camera.play_tracker import PlayTracker as _PlayTracker
 from hmlib.config import get_nested_value
+from hmlib.log import logger
 from hmlib.utils.image import image_height, image_width
 
 from .base import Plugin
@@ -41,32 +44,32 @@ class PlayTrackerPlugin(Plugin):
     def __init__(
         self,
         enabled: bool = True,
-        cam_ignore_largest: Optional[bool] = None,
+        cam_ignore_largest: bool | None = None,
         no_wide_start: bool = False,
-        track_ids: Optional[str] = None,
+        track_ids: str | None = None,
         debug_play_tracker: bool = False,
         plot_moving_boxes: bool = False,
         plot_individual_player_tracking: bool = False,
         plot_tracking_circles: bool = True,
         plot_boundaries: bool = False,
-        plot_all_detections: Optional[float] = None,
+        plot_all_detections: float | None = None,
         plot_trajectories: bool = False,
         plot_speed: bool = False,
         plot_jersey_numbers: bool = False,
         plot_actions: bool = False,
-        camera_controller: Optional[str] = None,
-        camera_model: Optional[str] = None,
-        camera_window: Optional[int] = None,
+        camera_controller: str | None = None,
+        camera_model: str | None = None,
+        camera_window: int | None = None,
         force_stitching: bool = False,
-        cluster_centroids_path: Optional[str] = None,
+        cluster_centroids_path: str | None = None,
         save_cluster_centroids: bool = False,
     ) -> None:
         super().__init__(enabled=enabled)
-        self._hockey_mon: Optional[HockeyMON] = None
-        self._play_tracker: Optional[_PlayTracker] = None
-        self._device: Optional[torch.device] = None
+        self._hockey_mon: HockeyMON | None = None
+        self._play_tracker: _PlayTracker | None = None
+        self._device: torch.device | None = None
         self._final_aspect_ratio = torch.tensor(16.0 / 9.0, dtype=torch.float)
-        self._clip_box: Optional[torch.Tensor] = None
+        self._clip_box: torch.Tensor | None = None
         self._cam_ignore_largest = cam_ignore_largest
         self._no_wide_start = bool(no_wide_start)
         self._track_ids = track_ids
@@ -87,7 +90,7 @@ class PlayTrackerPlugin(Plugin):
         self._cluster_centroids_path = cluster_centroids_path
         self._save_cluster_centroids = bool(save_cluster_centroids)
 
-    def _update_hm_ui_preview_status(self, context: Dict[str, Any]) -> None:
+    def _update_hm_ui_preview_status(self, context: dict[str, Any]) -> None:
         shared = context.get("shared") if isinstance(context, dict) else None
         if not isinstance(shared, dict) or self._play_tracker is None:
             return
@@ -98,7 +101,7 @@ class PlayTrackerPlugin(Plugin):
 
     # region helpers
     @staticmethod
-    def _calc_seed_play_box(results: Dict[str, Any]) -> torch.Tensor:
+    def _calc_seed_play_box(results: dict[str, Any]) -> torch.Tensor:
         # Use rink_profile combined bbox if present; scale a bit and clamp
         track_container = results["data_samples"]
         vds = track_container.video_data_samples[0]
@@ -138,7 +141,7 @@ class PlayTrackerPlugin(Plugin):
         )
         return play_box
 
-    def _ensure_initialized(self, context: Dict[str, Any], results: Dict[str, Any]) -> None:
+    def _ensure_initialized(self, context: dict[str, Any], results: dict[str, Any]) -> None:
         if self._play_tracker is not None:
             return
         shared = context.get("shared", {}) if isinstance(context, dict) else {}
@@ -161,7 +164,8 @@ class PlayTrackerPlugin(Plugin):
             if fps_val is None and isinstance(shared, dict):
                 fps_val = shared.get("fps")
             fps = float(fps_val) if fps_val is not None else None
-        except Exception:
+        except (ValueError, TypeError, OverflowError) as error:
+            logger.warning("FPS unavailable; controller will use its configured cadence: %s", error)
             fps = None
         if fps is None:
             fps = 30.0
@@ -169,8 +173,8 @@ class PlayTrackerPlugin(Plugin):
         cam_name = None
         try:
             cam_name = game_cfg.get("camera", {}).get("name")
-        except Exception:
-            pass
+        except (AttributeError, TypeError) as error:
+            logger.warning("Camera profile name unavailable: %s", error)
 
         self._hockey_mon = HockeyMON(
             image_width=W,
@@ -207,14 +211,15 @@ class PlayTrackerPlugin(Plugin):
         )
 
         # Optional track id whitelist parsed here so tests/YAML can pass strings
-        track_ids: Optional[Set[int]] = None
+        track_ids: set[int] | None = None
         if self._track_ids:
             if isinstance(self._track_ids, str):
                 track_ids = {int(i) for i in self._track_ids.split(",") if i}
             else:
                 try:
                     track_ids = {int(i) for i in self._track_ids}  # type: ignore[arg-type]
-                except Exception:
+                except (ValueError, TypeError, OverflowError) as error:
+                    logger.warning("Invalid track ID selection; ignoring the selection: %s", error)
                     track_ids = None
 
         self._play_tracker = _PlayTracker(
@@ -251,6 +256,12 @@ class PlayTrackerPlugin(Plugin):
             or bool(shared.get("save_cluster_centroids", False)),
         )
         self._play_tracker.eval()
+        # Late overlays own these pixels. In particular debug mode must not
+        # re-enable the older renderer and draw a second set before the crop.
+        for key in overlay_owner_values(game_cfg):
+            setattr(self._play_tracker, "_" + key, False)
+        if self._play_tracker._operator_controls is not None:
+            shared["overlay_controls"] = self._play_tracker._operator_controls.overlay_values
         self._update_hm_ui_preview_status(context)
 
     def finalize(self) -> None:
@@ -262,7 +273,7 @@ class PlayTrackerPlugin(Plugin):
 
     # endregion
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
         track_samples = context.get("data_samples")
@@ -274,7 +285,7 @@ class PlayTrackerPlugin(Plugin):
         if original_images is None:
             return {}
         # Build results dictionary expected by PlayTracker
-        results: Dict[str, Any] = {
+        results: dict[str, Any] = {
             "data_samples": track_data_sample,
             "original_images": original_images,
         }
@@ -299,14 +310,28 @@ class PlayTrackerPlugin(Plugin):
 
         self._ensure_initialized(context, results)
         assert self._play_tracker is not None
+        ui = self._play_tracker.hm_ui_process()
+        if ui is not None and os.environ.get("HM_SHARED_UI_BACKEND") != "1":
+            ui.wait_for_playback(self._play_tracker._apply_ui_controls)
         with torch.no_grad():
             out = self._play_tracker.forward(results=results)
+        if ui is not None:
+            frame_ids = out.get("frame_ids")
+            if frame_ids is not None:
+                from hmlib.utils.gpu import unwrap_tensor
+
+                frame_ids = unwrap_tensor(frame_ids)
+            frame = int(frame_ids[-1]) if frame_ids is not None and len(frame_ids) else None
+            if os.environ.get("HM_SHARED_UI_BACKEND") == "1":
+                ui.complete_shared_batch(frame=frame, fps=context.get("fps"))
+            else:
+                ui.publish_runtime(frame=frame, fps=context.get("fps"))
         self._update_hm_ui_preview_status(context)
         # Surface current play_box for downstream video out sizing
         try:
             out["play_box"] = self._play_tracker.play_box
-        except Exception:
-            pass
+        except (AttributeError, RuntimeError, ValueError) as error:
+            logger.warning("Current camera play box unavailable: %s", error)
         results = {k: v for k, v in out.items() if k in self.output_keys()}
         return results
 
@@ -332,11 +357,15 @@ class PlayTrackerPlugin(Plugin):
                 "img",
                 "current_box",
                 "current_fast_box_list",
+                "native_current_box",
                 "camera_policy_events",
+                "native_replay",
                 "frame_ids",
                 "player_bottom_points",
                 "player_ids",
                 "play_box",
                 "rink_profile",
+                "rink_map_overlay",
+                "shared_preview_metadata",
             }
         return self._output_keys
