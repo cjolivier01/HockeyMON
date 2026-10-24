@@ -14,6 +14,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -39,6 +40,47 @@ def guarded_command(command: list[str]) -> list[str]:
         "--",
         *command,
     ]
+
+
+class ProcessCancelledError(RuntimeError):
+    """The owner cancelled an operation after its subprocess tree was reaped."""
+
+
+class ProcessCleanupError(RuntimeError):
+    """An owned helper has not confirmed complete subprocess-tree cleanup."""
+
+
+def run_cancellable(
+    command: list[str], *, cancelled: threading.Event, timeout: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Capture an owned helper, retaining its guard until cancellation cleanup ends."""
+    if cancelled.is_set():
+        raise ProcessCancelledError("Subprocess operation was cancelled before startup")
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    process = subprocess.Popen(
+        guarded_command(command), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        while True:
+            if cancelled.is_set():
+                raise ProcessCancelledError("Subprocess operation was cancelled")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                stdout, stderr = process.communicate(timeout=0.05)
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                continue
+    finally:
+        if process.poll() is None:
+            # Signal the guard, never kill it ahead of its descendants. Its
+            # bounded TERM/KILL cleanup must reap the whole tree before the
+            # calling selector thread can exit or report itself closed.
+            process.terminate()
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired as error:
+                raise ProcessCleanupError("Owned subprocess cleanup did not complete") from error
 
 
 def _configure_owner(parent: int) -> bool:

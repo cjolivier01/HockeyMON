@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from hmlib.ui.hstream_runtime import read_document, write_document
+from hmlib.ui.process_guard import ProcessCancelledError, ProcessCleanupError, run_cancellable
 
 logger = logging.getLogger(__name__)
 _DISABLED = [[0, 0], [0, 0], [0, 0], [0, 0]]
@@ -84,13 +85,9 @@ def publish_source_canvas(game_id: str, config: dict, image) -> None:
         if read_document(owner_path) != owner:
             raise ValueError("Shared scoreboard reference belongs to a different run source")
         private = read_document(directory / "config.yaml", yaml_document=True)
-        # For saved single-source playback the native transaction persisted to
-        # the original game; for an override it persisted only to this run.
-        saved = read_document(game_dir / "config.yaml", yaml_document=True)
-        if _source_paths(saved, game_dir) == sources:
-            private["rink"]["scoreboard"] = copy.deepcopy(
-                saved.get("rink", {}).get("scoreboard", {})
-            )
+        # The accepted run selection owns subsequent seeks. Re-reading the
+        # saved game here would erase explicit initial corners or a disabled
+        # sentinel before the operator has chosen to save anything.
     else:
         saved = read_document(game_dir / "config.yaml", yaml_document=True)
         preferences = copy.deepcopy(config.get("rink", {}).get("scoreboard", {}))
@@ -125,16 +122,30 @@ def apply_scoreboard_selection(game_id: str, config: dict, points: list, canvas:
     from hmlib.stitching.native_calibration import save_native_scoreboard
 
     points = _points(points, canvas["width"], canvas["height"])
+    private = None
     if "source_game_directory" in canvas:
         reference = Path(os.environ["HM_UI_SESSION_DIR"]).resolve() / "scoreboard-source"
         if Path(canvas["source_game_directory"]) != reference or canvas["game_directory"] != str(
             Path(get_game_dir(game_id)).resolve()
         ):
             raise ValueError("Scoreboard canvas belongs to a different run or game")
+        if canvas["persist_to_game"]:
+            private = read_document(reference / "config.yaml", yaml_document=True)
     try:
         ordered = save_native_scoreboard(Path(get_game_dir(game_id)), points, canvas)
     except subprocess.CalledProcessError as error:
         raise ValueError(f"Native scoreboard save failed: {error.stderr or error}") from error
+    if private is not None:
+        # Native persistence still owns the saved game's source/generation
+        # checks. Mirror only its accepted result into the run's private state,
+        # so a later seek or reopened selector cannot restore initial corners.
+        private.setdefault("rink", {}).setdefault("scoreboard", {})["perspective_polygon"] = ordered
+        try:
+            write_document(reference / "config.yaml", private)
+        except OSError as error:
+            raise RuntimeError(
+                "Scoreboard saved to the game, but updating this run's selection failed"
+            ) from error
     rink = config.setdefault("rink", {})
     scoreboard = rink.setdefault("scoreboard", {})
     scoreboard["perspective_polygon"] = ordered
@@ -159,10 +170,12 @@ class ScoreboardSession:
         self._closed = threading.Event()
         self._submission = threading.Lock()
         self._completed = False
-        self._proposal = None
+        self._cleanup_error = None
         self._thread = None
 
     def start(self) -> None:
+        if self._closed.is_set() or self._thread is not None:
+            raise RuntimeError("Scoreboard session cannot be started again")
         self._thread = threading.Thread(target=self._serve, name="shared-scoreboard", daemon=True)
         self._thread.start()
 
@@ -178,10 +191,15 @@ class ScoreboardSession:
                 ):
                     raise ValueError("Scoreboard source reference belongs to a different game")
                 self.canvas = read_scoreboard_canvas(
-                    self.game_dir, source_reference=reference, destination=self.session
+                    self.game_dir,
+                    source_reference=reference,
+                    destination=self.session,
+                    cancelled=self._closed,
                 )
             else:
-                self.canvas = read_scoreboard_canvas(self.game_dir, destination=self.session)
+                self.canvas = read_scoreboard_canvas(
+                    self.game_dir, destination=self.session, cancelled=self._closed
+                )
             self._prepare_initial()
             if self._closed.is_set():
                 return
@@ -294,6 +312,11 @@ class ScoreboardSession:
             self.server.timeout = 0.05
             while not self._closed.is_set():
                 self.server.handle_request()
+        except ProcessCancelledError:
+            logger.info("Scoreboard selector preparation cancelled")
+        except ProcessCleanupError as error:
+            self._cleanup_error = error
+            self.emit(f"runtime command failed: scoreboard subprocess ownership: {error}")
         except (
             OSError,
             RuntimeError,
@@ -311,9 +334,7 @@ class ScoreboardSession:
 
     def _prepare_initial(self) -> None:
         reference = self.canvas.get("source_game_directory")
-        config_dir = (
-            Path(reference) if reference and not self.canvas["persist_to_game"] else self.game_dir
-        )
+        config_dir = Path(reference) if reference else self.game_dir
         config = read_document(config_dir / "config.yaml", yaml_document=True)
         saved = config.get("rink", {}).get("scoreboard", {}).get("perspective_polygon")
         if saved is not None:
@@ -323,23 +344,21 @@ class ScoreboardSession:
                 "message": (
                     "Run scoreboard selection loaded. This selection applies only to the current source override."
                     if self.canvas.get("persist_to_game") is False
-                    else "Saved scoreboard selection loaded."
+                    else "Current scoreboard selection loaded."
                 ),
             }
             return
         if self._closed.is_set():
             return
-        self._proposal = subprocess.Popen(
-            [sys.executable, "-m", __name__, "--propose", self.canvas["image_path"]],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
         try:
-            stdout, stderr = self._proposal.communicate(timeout=120)
-            if self._proposal.returncode:
-                raise ValueError(stderr.strip() or "Scoreboard proposal process failed")
-            proposal = json.loads(stdout)
+            completed = run_cancellable(
+                [sys.executable, "-m", __name__, "--propose", self.canvas["image_path"]],
+                cancelled=self._closed,
+                timeout=120,
+            )
+            if completed.returncode:
+                raise ValueError(completed.stderr.strip() or "Scoreboard proposal process failed")
+            proposal = json.loads(completed.stdout)
             points = proposal["points"]
             self.initial = {
                 "points": (
@@ -352,8 +371,6 @@ class ScoreboardSession:
                 ),
             }
         except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired) as error:
-            self._proposal.kill()
-            self._proposal.communicate()
             self.emit(
                 f"Scoreboard proposal unavailable; manual selection remains available: {error}"
             )
@@ -361,8 +378,6 @@ class ScoreboardSession:
                 "points": [],
                 "message": "Scoreboard proposal unavailable. Select the four corners manually.",
             }
-        finally:
-            self._proposal = None
         if self.canvas.get("persist_to_game") is False:
             self.initial[
                 "message"
@@ -400,11 +415,12 @@ class ScoreboardSession:
 
     def close(self) -> None:
         self._closed.set()
-        proposal = self._proposal
-        if proposal is not None:
-            proposal.terminate()
         if self._thread is not None:
-            self._thread.join(timeout=1)
+            self._thread.join(timeout=6)
+            if self._thread.is_alive():
+                raise RuntimeError("Scoreboard selector cleanup did not complete")
+        if self._cleanup_error is not None:
+            raise self._cleanup_error
 
 
 if __name__ == "__main__":

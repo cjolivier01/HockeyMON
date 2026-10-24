@@ -109,11 +109,19 @@ never replaces the saved game's native `s.png`. The dialog displays the exact
 pinned canvas named by its authenticated session descriptor. Native transactions
 persist a selection to the game only when its saved single-source playlist still
 matches the active source; a temporary source override keeps its selection within
-the run, including seeks, and leaves the saved pair's polygon unchanged. Temporary
+the run, including seeks, and leaves the saved pair's polygon unchanged. The private run
+configuration supplies selector drafts and seek reconstruction for all single-source
+runs. Explicit initial corners (including the disabled sentinel) remain active until
+the operator saves a new selection; a successful native save updates that private
+selection as well as the saved game when its sources match. Temporary
 source overrides also infer their rink mask from the active frame without reading
 or replacing the saved game's masks or contour metadata, even at equal dimensions.
 Normal saved single-source playback retains its mask cache. Source coordinates do not inherit a saved pair's crop offset. Selection remains available
 while paused. Dual-source selection uses the native-owned canvas and provenance.
+Selector canvas export and proposal inference run under the same subprocess
+guard as playback. Closing a selector cancels lock waits and reaps those helpers
+before reporting closure; supervisor death also releases their native locks.
+An incomplete cleanup remains an error even if the selector thread has exited.
 
 Local monitor audio follows source time, pause, seek and Render video. It opens
 the current source chapter lazily and does not concatenate an entire game before

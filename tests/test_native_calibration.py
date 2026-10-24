@@ -1,4 +1,10 @@
+import fcntl
 import hashlib
+import json
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -182,3 +188,153 @@ def should_reuse_native_mask_pixels_without_modifying_game(snapshot):
     assert sorted(p.name for p in result.game_directory.iterdir()) == ["left.mp4", "right.mp4"]
     with pytest.raises(ValueError, match="dimensions"):
         result.rink_profile((4, 3))
+
+
+@pytest.fixture
+def blocked_exporter(tmp_path, monkeypatch):
+    game, session = tmp_path / "game", tmp_path / "session"
+    game.mkdir()
+    session.mkdir()
+    (game / "config.yaml").write_text("rink: {scoreboard: {perspective_polygon: null}}")
+    helper = tmp_path / "exporter.py"
+    helper.write_text(f"#!{sys.executable}\n" """
+import fcntl, json, os, pathlib, signal, subprocess, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if sys.argv[1] == '--descendant':
+    while True: time.sleep(.02)
+game = pathlib.Path(sys.argv[sys.argv.index('--game-dir') + 1])
+with (game / 'artifact.lock').open('w') as artifact:
+    fcntl.flock(artifact, fcntl.LOCK_EX)
+    child = subprocess.Popen([sys.executable, __file__, '--descendant'])
+    (game / 'helper.json').write_text(json.dumps({
+        'guard': os.getppid(), 'helper': os.getpid(), 'descendant': child.pid}))
+    with (game / 'config.lock').open('w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    while True: time.sleep(.02)
+""")
+    helper.chmod(0o755)
+    monkeypatch.setenv("HM_HSTREAM_CALIBRATION_EXPORT", str(helper))
+    with (game / "config.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield game, session, helper
+
+
+def _wait_for_helper(game):
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if (game / "helper.json").exists():
+            return json.loads((game / "helper.json").read_text())
+        time.sleep(0.02)
+    raise AssertionError("Owned helper did not reach its lock wait")
+
+
+@pytest.mark.parametrize("stage", ["canvas", "proposal"])
+def should_cancel_and_reap_selector_preparation_before_close_returns(
+    blocked_exporter, monkeypatch, stage
+):
+    from hmlib.ui import hstream_scoreboard, process_guard
+
+    game, session, helper = blocked_exporter
+    if stage == "proposal":
+        image = session / "canvas.png"
+        image.write_bytes(b"pinned")
+        monkeypatch.setattr(
+            native,
+            "read_scoreboard_canvas",
+            lambda *args, **kwargs: {"image_path": str(image), "width": 64, "height": 40},
+        )
+        monkeypatch.setattr(
+            hstream_scoreboard,
+            "run_cancellable",
+            lambda command, **kwargs: process_guard.run_cancellable(
+                [str(helper), "--game-dir", str(game)], **kwargs
+            ),
+        )
+    selector = hstream_scoreboard.ScoreboardSession(game, session, "blocked", lambda line: None)
+    selector.start()
+    try:
+        pids = _wait_for_helper(game)
+        started = time.monotonic()
+        selector.close()
+        assert time.monotonic() - started < 5
+        assert not selector._thread.is_alive()
+        assert all(not Path(f"/proc/{pid}").exists() for pid in pids.values()), pids
+        assert not list(session.glob("*.png"))
+        # Closing must release the helper's artifact lock even while another
+        # process continues holding the config lock it was waiting to acquire.
+        with (game / "artifact.lock").open("r") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        selector.close()
+
+
+def should_reap_blocked_selector_helper_when_its_supervisor_dies(blocked_exporter):
+    game, session, _helper = blocked_exporter
+    script = """
+import pathlib, sys, time
+from hmlib.ui.hstream_scoreboard import ScoreboardSession
+selector = ScoreboardSession(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), 'death', print)
+selector.start()
+while True: time.sleep(.02)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(game), str(session)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        pids = _wait_for_helper(game)
+        process.kill()
+        process.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        children = [pids["helper"], pids["descendant"]]
+        while any(Path(f"/proc/{pid}").exists() for pid in children):
+            assert time.monotonic() < deadline, pids
+            time.sleep(0.02)
+        with (game / "artifact.lock").open("r") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+        process.stdout.close()
+
+
+def should_capture_guarded_helper_results_and_cancel_before_start(monkeypatch):
+    from hmlib.ui import process_guard
+
+    cancelled = threading.Event()
+    result = process_guard.run_cancellable(
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('metadata'); sys.stderr.write('details'); exit(3)",
+        ],
+        cancelled=cancelled,
+    )
+    assert (result.returncode, result.stdout, result.stderr) == (3, "metadata\n", "details")
+    cancelled.set()
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *a, **kw: pytest.fail("Cancelled helper started")
+    )
+    with pytest.raises(process_guard.ProcessCancelledError, match="before startup"):
+        process_guard.run_cancellable(["unused"], cancelled=cancelled)
+
+
+def should_fail_selector_close_when_guard_cleanup_has_not_completed(tmp_path, monkeypatch):
+    from hmlib.ui.hstream_scoreboard import ScoreboardSession
+    from hmlib.ui.process_guard import ProcessCleanupError
+
+    def incomplete(*args, **kwargs):
+        raise ProcessCleanupError("Helper still owns its lock")
+
+    monkeypatch.setattr(native, "read_scoreboard_canvas", incomplete)
+    messages = []
+    selector = ScoreboardSession(tmp_path, tmp_path, "failed-cleanup", messages.append)
+    selector.start()
+    with pytest.raises(ProcessCleanupError, match="still owns its lock"):
+        selector.close()
+    assert not selector._thread.is_alive()
+    assert messages == [
+        "runtime command failed: scoreboard subprocess ownership: Helper still owns its lock"
+    ]

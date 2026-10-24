@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import uuid
 from dataclasses import dataclass
 from functools import lru_cache
@@ -234,13 +235,16 @@ def shared_native_calibration() -> NativeCalibration | None:
     return _load_shared_snapshot(directory) if directory else None
 
 
-def _native_operation(arguments: list[str]) -> dict[str, Any]:
-    completed = subprocess.run(
-        [str(_exporter_path(None)), *arguments],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _native_operation(
+    arguments: list[str], *, cancelled: threading.Event | None = None
+) -> dict[str, Any]:
+    command = [str(_exporter_path(None)), *arguments]
+    if cancelled is None:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    else:
+        from hmlib.ui.process_guard import run_cancellable
+
+        completed = run_cancellable(command, cancelled=cancelled)
     if completed.returncode:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(
@@ -253,7 +257,11 @@ def _native_operation(arguments: list[str]) -> dict[str, Any]:
 
 
 def read_scoreboard_canvas(
-    game_dir: Path, *, source_reference: Path | None = None, destination: Path | None = None
+    game_dir: Path,
+    *,
+    source_reference: Path | None = None,
+    destination: Path | None = None,
+    cancelled: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Pin native scoreboard bytes and provenance. Caller removes image_path."""
     descriptor, image_path = tempfile.mkstemp(
@@ -272,7 +280,8 @@ def read_scoreboard_canvas(
                     if source_reference
                     else []
                 ),
-            ]
+            ],
+            cancelled=cancelled,
         )
     except BaseException:
         Path(image_path).unlink(missing_ok=True)
