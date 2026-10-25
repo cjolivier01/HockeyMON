@@ -16,7 +16,13 @@ def _load_hmlib_config_light():
     log_mod = ModuleType("hmlib.log")
     log_mod.get_logger = logging.getLogger
     yaml_stub = ModuleType("yaml")
-    yaml_stub.safe_load = json.load
+
+    # Match safe_load's stream-or-text API; the production loader now retains
+    # the original text while preserving native frame-selection fingerprints.
+    def _safe_load(payload):
+        return json.loads(payload.read() if hasattr(payload, "read") else payload)
+
+    yaml_stub.safe_load = _safe_load
     yaml_stub.YAMLError = ValueError
 
     def _dump(data, stream=None, sort_keys=False):
