@@ -37,9 +37,11 @@ plot:
   # Home/away (or dark/light) labels under each tracked player. Drawn from the
   # team feature's output in both applications; see the `team` block below.
   plot_teams: false
-  # Badge match officials in the tracking overlay. Only has an effect with a
-  # detector whose head distinguishes them (--detector-model hockeyref); on a
-  # single-class person detector there is no referee index and this is inert.
+  # Badge match officials in the tracking overlay. Two preconditions, and it
+  # is inert without either: a detector whose head distinguishes them
+  # (--detector-model hockeyref), because a single-class head has no referee
+  # index; and plot_individual_player_tracking, because the badges are drawn
+  # alongside the per-player boxes.
   plot_referees: true
   plot_actions: false
   plot_pose: false
@@ -601,6 +603,13 @@ team:
   # Crops to collect before the first two-means fit. Fitting on a handful taken
   # from one end of the rink yields two centroids that both describe the same
   # team.
+  #
+  # Not the delay before a badge appears: the sides are named only once two
+  # consecutive fits agree on which group is darker, so the first label is
+  # `warmup_samples + refit_interval` crops in -- roughly six seconds of play
+  # at the defaults, longer on a clip where `min_track_height` filters most
+  # tracks. One noisy window naming the sides for the rest of the game is the
+  # failure that buys.
   warmup_samples: 200
   # Crops between fits before the centroids are recomputed, so lighting drift
   # across a period is tracked rather than averaged against first-period crops.
@@ -625,14 +634,14 @@ team:
   # faster, so the native side ships the generic re-identification embedding
   # even though HockeyMON's `backend` above defaults to the team-trained one.
   model: reidentificationnet-deployable-v1.2
-  # HStream only. Mean CIELAB L the two groups must differ by before they are
+  # Mean CIELAB L the two groups must differ by before they are
   # named dark and light. The chest band takes in ice, boards and other
   # players, so per-crop lightness is noisy; under about this much true
   # separation the ranking is a coin flip that lands differently at every
   # refit, and every badge on screen would swap HOME for AWAY together.
   # Unranked is reported as no badge, which is honest rather than wrong.
   min_lightness_gap: 6.0
-  # HStream only. Smallest share of the reservoir either group may hold. Two
+  # Smallest share of the window either group may hold. Two
   # squads split roughly evenly; a lopsided split means the fit separated
   # something else, most often the officials from everyone else when the two
   # sweaters are close in appearance. Refusing to name that is better than
@@ -931,3 +940,11 @@ model:
   svnh_classifier:
     config: null
     checkpoint: pretrained/svhnc/model-65000.pth
+
+# Output overlays are independent of local desktop preview preferences.
+output:
+  rink-map:
+    enable: false
+    size: compact
+    position: upper-right
+    pool-frames: 8

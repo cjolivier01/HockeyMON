@@ -569,6 +569,11 @@ def make_plan(
     for path in paths:
         graph_config = merge(graph_config, read_mapping(Path(path)))
     config = merge(graph_config, config)
+    if get_path(config, "output.rink-map.enable"):
+        raise ValueError(
+            "Encoded rink mini-maps require the native HStream backend; "
+            "disable output.rink-map.enable for HockeyMON Program runs"
+        )
     apply_engine_preferences(config)
     prepared = []
     if (

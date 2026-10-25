@@ -1006,3 +1006,38 @@ def should_accept_shared_program_box_selection(game, enabled):
         )
     )
     assert plan.config["plot"]["plot_individual_player_tracking"] is yaml.safe_load(enabled)
+
+
+def should_reject_native_only_encoded_rink_maps(game):
+    private = yaml.safe_load((game / "config.yaml").read_text())
+    private["output"] = {"rink-map": {"enable": True}}
+    (game / "config.yaml").write_text(yaml.safe_dump(private))
+    with pytest.raises(ValueError, match="Encoded rink mini-maps require the native"):
+        make_plan(parser().parse_args(["-g", game.name]))
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def should_validate_encoded_rink_maps_after_initial_overrides(game, tmp_path, enabled):
+    private = yaml.safe_load((game / "config.yaml").read_text())
+    private["output"] = {"rink-map": {"enable": not enabled}}
+    (game / "config.yaml").write_text(yaml.safe_dump(private))
+    override = tmp_path / "output-map.yaml"
+    override.write_text(yaml.safe_dump({"output": {"rink-map": {"enable": enabled}}}))
+    initial = tmp_path / "initial.json"
+    initial.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": ["--config", str(override)],
+            }
+        )
+    )
+    args = parser().parse_args(["-g", game.name])
+    if enabled:
+        with pytest.raises(ValueError, match="Encoded rink mini-maps require the native"):
+            make_plan(args, initial=initial)
+    else:
+        assert make_plan(args, initial=initial).config["output"]["rink-map"]["enable"] is False
