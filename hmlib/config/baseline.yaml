@@ -86,6 +86,38 @@ aspen:
     max_concurrent: 3
     cuda_streams: true
 
+# Shared Qt rendering size and browser overlay reference coordinates.
+preview_reference:
+  program_width: 1600
+  program_height: 900
+  source_width: 1280
+  source_height: 720
+
+# Private selectable browser preview. Enabled only by an explicit native
+# --web-preview-run-id, with one supervisor-owned WEBRTC sink. The browser
+# receives its receipt limits in the native presentation capability.
+web_preview:
+  width: 1600
+  height: 900
+  rate_numerator: 30
+  rate_denominator: 1
+  surface_pool_frames: 3
+  conversion_pool_frames: 8
+  bitrate: 8000000
+  idr_interval: 30
+  h264_profile: 0
+  encoder_tuning: 3
+  rtp_payload: 96
+  pending_frames: 64
+  pending_events: 256
+  presentation_history: 512
+  poll_interval_ms: 25
+  events_per_batch: 32
+  queue_frames: 1
+  browser_max_frames: 512
+  browser_max_age_ms: 3000
+  initial_channel: program
+
 #
 # Runtime defaults consumed by Aspen plugins
 #

@@ -67,6 +67,11 @@ the game or misinterpreting `-c` as a settings overlay: native `-c` names a
 separate pipeline application. Explicit native `--options` retain their normal
 precedence. The same effective settings accompany the calibration export.
 
+The synchronized baseline also owns `preview_reference` dimensions used by Qt
+and native browser overlay coordinates. Its `web_preview` section bounds the
+native selectable transport; these values do not enable that transport in the
+Python backend or replace its existing preview protocol.
+
 The desktop owns a private session and process group. `hm-cli` translates stdin
 commands into authenticated, bounded requests. The frame owner applies a complete
 request and returns a receipt; enqueueing does not acknowledge a successful
