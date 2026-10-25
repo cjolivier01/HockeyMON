@@ -1,5 +1,8 @@
 # September 2026 hstream port
 
+This document records the September port and its validation. The current desktop
+architecture is documented in [Shared HStream desktop](shared-ui-backend.md).
+
 This series adapts applicable changes from `../hstream` dated August 9 through
 September 9, 2026, at source revision
 `f3bb170a87d7172dba762190343ad2763bf4a9b7` (identical tree to the subsequently

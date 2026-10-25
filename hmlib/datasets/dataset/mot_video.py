@@ -4,9 +4,10 @@ import contextlib as _contextlib
 import os
 import threading
 import traceback
+from collections.abc import Callable
 from contextlib import contextmanager
 from threading import Lock
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -25,6 +26,8 @@ from hmlib.utils.gpu import (
 from hmlib.utils.image import image_height, image_width, make_channels_first, make_channels_last
 from hmlib.video.ffmpeg import BasicVideoInfo
 from hmlib.video.video_stream import VideoStreamReader
+
+_CPU_DEVICE = torch.device("cpu")
 
 
 @contextmanager
@@ -45,8 +48,8 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
 
     def __init__(
         self,
-        path: Union[str, List[str]],
-        game_id: str = None,
+        path: str | list[str],
+        game_id: str | None = None,
         video_id: int = 1,
         preproc=None,
         max_frames: int = 0,
@@ -55,19 +58,20 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         multi_width_img_info: bool = True,
         embedded_data_loader=None,
         original_image_only: bool = False,
-        device: torch.device = torch.device("cpu"),
-        decoder_device: torch.device = torch.device("cpu"),
-        decoder_type: Optional[str] = None,
+        device: torch.device = _CPU_DEVICE,
+        decoder_device: torch.device = _CPU_DEVICE,
+        decoder_type: str | None = None,
         device_for_original_image: torch.device = None,
         log_messages: bool = False,
         dtype: torch.dtype = None,
-        data_pipeline: Callable = None,
+        data_pipeline: Callable | None = None,
         frame_step: int = 1,
-        adjust_exposure: Optional[float] = None,
+        adjust_exposure: float | None = None,
         no_cuda_streams: bool = False,
         async_mode: bool = True,
         prefetch_batches: int = 2,
         checkerboard_input: bool = False,
+        source_frame_offset: float = 0,
     ):
         self._instance_id = MOTLoadVideoWithOrig._instance_counter
         MOTLoadVideoWithOrig._instance_counter += 1
@@ -99,7 +103,12 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         self._preproc = preproc
         self._logger = get_root_logger()
         self._dtype = dtype
+        if frame_step < 1 or source_frame_offset < 0 or start_frame_number < 0:
+            raise ValueError("Frame step must be positive and frame offsets nonnegative")
         self._frame_step = frame_step
+        self._source_frame_offset = source_frame_offset
+        self._next_source_frame = start_frame_number * frame_step + source_frame_offset
+        self._chapter_frames = None
         self._data_pipeline = data_pipeline
         self._log_messages = log_messages
         self._device_for_original_image = device_for_original_image
@@ -115,7 +124,9 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         self.height_t = None
         self._scale_color_tensor = None
         self._count = torch.tensor([0], dtype=torch.int64)
-        self._next_frame_id = torch.tensor([start_frame_number], dtype=torch.int32)
+        self._next_frame_id = torch.tensor(
+            [start_frame_number + source_frame_offset], dtype=torch.int32
+        )
         if self._next_frame_id == 0:
             # frame number is 1-based
             self._next_frame_id = 1
@@ -142,7 +153,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         self._video_info = None
         self._seek_lock = Lock()
         # Optional per-sample debug metadata propagated from embedded loaders (e.g., StitchDataset).
-        self._embedded_debug: Optional[Dict[str, Any]] = None
+        self._embedded_debug: dict[str, Any] | None = None
         self._to_worker_queue = create_queue(
             mp=False,
             name="mot-video-to-worker" + ("-EDL" if embedded_data_loader is not None else ""),
@@ -162,7 +173,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
     @staticmethod
     def compute_rgb_stats(
         img: torch.Tensor, cpu: bool = False
-    ) -> Dict[str, Tuple[float, float, float]]:
+    ) -> dict[str, tuple[float, float, float]]:
         """Compute per-channel min, max, mean for R/G/B over an image or batch.
 
         Accepts tensors with layout (B, C, H, W), (B, H, W, C), (C, H, W) or
@@ -197,11 +208,11 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
     @staticmethod
     def check_rgb_stats(
         img: torch.Tensor,
-        reference: Dict[str, Tuple[float, float, float]],
+        reference: dict[str, tuple[float, float, float]],
         *,
         atol: float = 1e-3,
         rtol: float = 1e-5,
-    ) -> Tuple[bool, bool]:
+    ) -> tuple[bool, bool]:
         """Compare current RGB stats against a reference.
 
         Returns (changed, unchanged) where:
@@ -212,7 +223,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
             raise ValueError("check_rgb_stats requires a non-None reference stats dict.")
         current = MOTLoadVideoWithOrig.compute_rgb_stats(img)
 
-        def _to_tensor(vals: Tuple[float, float, float]) -> torch.Tensor:
+        def _to_tensor(vals: tuple[float, float, float]) -> torch.Tensor:
             return torch.tensor(vals, dtype=torch.float32)
 
         changed = False
@@ -292,6 +303,18 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
             return
         assert self._embedded_data_loader is None
         self._video_info = BasicVideoInfo(",".join(self._path_list))
+        self._chapter_frames = (
+            [self._video_info.frame_count]
+            if len(self._path_list) == 1
+            else [BasicVideoInfo(str(path)).frame_count for path in self._path_list]
+        )
+
+    def _chapter_position(self, source_frame: float) -> tuple[int, float]:
+        for index, count in enumerate(self._chapter_frames):
+            if source_frame < count:
+                return index, source_frame
+            source_frame -= count
+        raise ValueError("Requested source frame is beyond the end of the video playlist")
 
     def _open_video(self):
         self.load_video_info()
@@ -303,19 +326,17 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
                 if self._decoder_device is not None and self._decoder_device.type == "cuda":
                     # Preserve the old NVIDIA path, but prefer the AMD FFmpeg/VAAPI
                     # backend when running on ROCm.
-                    try:
-                        from hmlib.utils.torch_backend import is_rocm_backend
+                    from hmlib.utils.torch_backend import is_rocm_backend
 
-                        self._decoder_type = "pyamdcodec" if is_rocm_backend() else "pynvcodec"
-                    except Exception:
-                        self._decoder_type = "pynvcodec"
+                    self._decoder_type = "pyamdcodec" if is_rocm_backend() else "pynvcodec"
+            self._current_path_index, local_frame = self._chapter_position(self._next_source_frame)
             file_path = str(self._path_list[self._current_path_index])
             if not os.path.isfile(file_path):
                 raise RuntimeError(f"Video file {file_path} does not exist")
             self.cap = VideoStreamReader(
                 filename=file_path,
                 type=self._decoder_type,
-                batch_size=self._batch_size,
+                batch_size=1 if self._frame_step > 1 else self._batch_size,
                 device=self._decoder_device,
             )
             self.vw = self.cap.width
@@ -324,21 +345,15 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
             self.vn = self._video_info.frame_count
             if not self.vn:
                 raise RuntimeError(
-                    f"Video {str(self._path_list[self._current_path_index])} either does not exist or has no usable video content"
+                    f"Video {self._path_list[self._current_path_index]!s} either does not exist or has no usable video content"
                 )
-            if self._start_frame_number < 0:
-                raise ValueError("Start frame number cannot be negative")
-            elif self._start_frame_number >= self.vn:
-                raise ValueError(
-                    f"Start frame {int(self._start_frame_number)} is beyond the end of the video, which has only {self.vn} frames"
-                )
-            if self._start_frame_number and self._current_path_index == 0:
-                self.cap.seek(frame_number=self._start_frame_number * self._frame_step)
+            if local_frame:
+                self.cap.seek(frame_number=local_frame)
             self._vid_iter = iter(self.cap)
         else:
             self.vn = len(self._embedded_data_loader)
         if self.vn is not None and self._log_messages:
-            print("Lenth of the video: {:d} frames".format(self.vn))
+            print(f"Lenth of the video: {self.vn:d} frames")
 
     def _close_video(self):
         if self.cap is not None:
@@ -353,6 +368,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         if self._current_path_index + 1 >= len(self._path_list):
             return False
         assert self._embedded_data_loader is None
+        self._next_source_frame = sum(self._chapter_frames[: self._current_path_index + 1])
         self._current_path_index += 1
         self._close_video()
         self._open_video()
@@ -362,7 +378,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
     def fps(self) -> float:
         if self._embedded_data_loader is not None:
             return self._embedded_data_loader.fps
-        return self._video_info.fps
+        return self._video_info.fps / self._frame_step
 
     @property
     def bit_rate(self) -> int:
@@ -400,18 +416,14 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
             while True:
                 cmd = self._to_worker_queue.get()
                 if cmd.startswith("seek:"):
-                    # It's a seek command!  Totally untested so far...
-                    seek_to_frame = int(cmd.split(":"))
-                    assert self.cap is not None
-                    self.cap.seek(frame_number=seek_to_frame)
-                    self._vid_iter = iter(self.cap)
+                    self._seek_file_frame(int(cmd.split(":", 1)[1]))
                     self._from_worker_queue.put("seek_ok")
                     continue
                 if cmd != "ok":
                     break
                 next_batch = self._get_next_batch()
                 self._from_worker_queue.put(next_batch)
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001 -- marshal worker failures to the consumer
             if not isinstance(ex, StopIteration):
                 print(ex)
                 traceback.print_exc()
@@ -461,14 +473,11 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         # its coordinator/worker threads do not keep the process alive after
         # hmtrack exits with an error.
         if self._embedded_data_loader is not None and hasattr(self._embedded_data_loader, "close"):
-            try:
-                self._embedded_data_loader.close()
-            except Exception:
-                traceback.print_exc()
+            self._embedded_data_loader.close()
 
         if self._path_list is not None:
             print(
-                f"MOTLoadVideoWithOrig delivered {self._frame_read_count} frames for file {str(self._path_list[self._current_path_index])}"
+                f"MOTLoadVideoWithOrig delivered {self._frame_read_count} frames for file {self._path_list[self._current_path_index]!s}"
             )
 
     def __iter__(self):
@@ -485,11 +494,31 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
                 self._open_video()
         return self
 
+    def _read_source_batch(self):
+        try:
+            image = next(self._vid_iter)
+        except StopIteration:
+            if not self.goto_next_video():
+                raise
+            image = next(self._vid_iter)
+        count = len(image) if image.ndim == 4 else 1
+        frames = [self._next_source_frame + index for index in range(count)]
+        self._next_source_frame += count
+        return image, frames
+
     def _read_next_image(self):
         img = None
         if self.cap is not None:
-            for _ in range(self._frame_step):
-                img = next(self._vid_iter)
+            if self._frame_step == 1:
+                img, self._sample_source_frames = self._read_source_batch()
+            else:
+                images, self._sample_source_frames = [], []
+                for _ in range(self._batch_size):
+                    for _ in range(self._frame_step):
+                        image, frames = self._read_source_batch()
+                    images.append(image[0] if image.ndim == 4 else image)
+                    self._sample_source_frames.extend(frames)
+                img = np.stack(images) if isinstance(images[0], np.ndarray) else torch.stack(images)
         else:
             if self._batch_size == 1:
                 item = next(self._embedded_data_loader_iter)
@@ -587,10 +616,15 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
                     img0 = img0.to(torch.float, non_blocking=True)
                 img0 = img0 * self._adjust_exposure
 
-            data_item: Dict[str, Any] = dict()
+            data_item: dict[str, Any] = {}
+            if self._embedded_data_loader is None:
+                data_item["pts_ns"] = [
+                    round(frame * 1e9 / self._video_info.fps)
+                    for frame in self._sample_source_frames
+                ]
 
             # Optional checkerboard + RGB stats debug mode for MOTLoadVideoWithOrig.
-            checkerboard_image: Optional[torch.Tensor] = None
+            checkerboard_image: torch.Tensor | None = None
             if self._checkerboard_input:
                 checkerboard_image = MOTLoadVideoWithOrig.make_checkerboard_like(img0)
                 # Compute stats on the tensor that will flow downstream.
@@ -619,12 +653,12 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
                     img0 = img0.to(dtype=self._dtype, non_blocking=True)
 
                 data_item.update(
-                    dict(
-                        img=make_channels_last(img0),
-                        img_info=dict(frame_id=ids[0]),
-                        img_prefix=None,
-                        img_id=ids,
-                    )
+                    {
+                        "img": make_channels_last(img0),
+                        "img_info": {"frame_id": ids[0]},
+                        "img_prefix": None,
+                        "img_id": ids,
+                    }
                 )
                 # Propagate any debug metadata coming from an embedded loader (e.g., StitchDataset).
                 if embedded_debug is not None:
@@ -658,10 +692,10 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
                         original_img0 = original_img0.to(self._dtype)
                     img = original_img0
                 data_item.update(
-                    dict(
-                        img=make_channels_last(img),
-                        img_id=ids,
-                    )
+                    {
+                        "img": make_channels_last(img),
+                        "img_id": ids,
+                    }
                 )
 
             if self.width_t is None:
@@ -685,7 +719,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         # Do this last, after any cuda events are taken for the non-original image
         def _wrap_original_image(
             orig_img: torch.Tensor,
-        ) -> Union[StreamCheckpoint, torch.Tensor]:
+        ) -> StreamCheckpoint | torch.Tensor:
             if checkerboard_image is not None:
                 orig_img = checkerboard_image.to(
                     device=orig_img.device, dtype=orig_img.dtype, non_blocking=True
@@ -707,15 +741,15 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         if self._original_image_only:
             if not isinstance(original_img0, StreamTensorBase):
                 original_img0 = _wrap_original_image(original_img0)
-            data_item.update(dict(img=original_img0, imgs_info=imgs_info, frame_ids=ids))
+            data_item.update({"img": original_img0, "imgs_info": imgs_info, "frame_ids": ids})
         else:
             data_item.update(
-                dict(
-                    original_images=_wrap_original_image(original_img0),
-                    img=wrap_tensor(img),
-                    imgs_info=imgs_info,
-                    ids=ids,
-                )
+                {
+                    "original_images": _wrap_original_image(original_img0),
+                    "img": wrap_tensor(img),
+                    "imgs_info": imgs_info,
+                    "ids": ids,
+                }
             )
             # assert False # Don't use this path anymore
             # return _wrap_original_image(original_img0), img, None, imgs_info, ids
@@ -756,7 +790,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
                 else:
                     try:
                         results = self._get_next_batch()
-                    except Exception as ex:
+                    except Exception as ex:  # noqa: BLE001 -- common sync/async error propagation
                         results = ex
             if isinstance(results, Exception):
                 if not isinstance(results, StopIteration):
@@ -769,10 +803,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
             self._timer_counter += self._batch_size
             if self._log_messages and self._next_counter and self._next_counter % 20 == 0:
                 self._logger.info(
-                    "Video Dataset frame delivery {} ({:.2f} fps)".format(
-                        self._timer_counter,
-                        self._batch_size * 1.0 / max(1e-5, self._timer.average_time),
-                    )
+                    f"Video Dataset frame delivery {self._timer_counter} ({self._batch_size * 1.0 / max(1e-5, self._timer.average_time):.2f} fps)"
                 )
                 if self._next_counter and self._next_counter % 100 == 0:
                     self._timer = Timer()
@@ -786,6 +817,17 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         Get which frame the dataset is on (which one it will load next)
         """
         return self._next_frame_id.clone()
+
+    def _seek_file_frame(self, frame_number: int) -> None:
+        logical_frame = frame_number - int(self._source_frame_offset)
+        if logical_frame < 0:
+            raise ValueError("Seek precedes the synchronized source origin")
+        source_frame = logical_frame * self._frame_step + self._source_frame_offset
+        self._chapter_position(source_frame)
+        self._close_video()
+        self._next_source_frame = source_frame
+        self._open_video()
+        self._next_frame_id = torch.tensor([frame_number], dtype=torch.int32)
 
     def seek(self, frame_number: int) -> None:
         """
@@ -812,14 +854,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
                     raise NotImplementedError(
                         "seek is not supported for embedded data loaders in sync mode"
                     )
-                if self.cap is None:
-                    self._open_video()
-                if self.cap is None:
-                    raise RuntimeError("Video capture is not initialized")
-                # Note: frame_number here is assumed to be the underlying frame index.
-                self.cap.seek(frame_number=int(frame_number) * self._frame_step)
-                self._vid_iter = iter(self.cap)
-                self._next_frame_id = torch.tensor([frame_number], dtype=torch.int32)
+                self._seek_file_frame(int(frame_number))
         return
 
     def __len__(self):
@@ -827,7 +862,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
             return len(self._embedded_data_loader)
         if self.vn is None:
             self.vn = self._video_info.frame_count
-        return self.vn // self._batch_size  # number of frames
+        return self.vn // self._frame_step // self._batch_size  # delivered frames
 
     # Optional: external wiring for profiler instance
     def set_profiler(self, profiler):

@@ -1,78 +1,139 @@
-# hm-ui
+# HockeyMON with the shared HStream desktop
 
-Rust operator UI for HockeyMON runtime camera controls.
+`hm-ui` (also installed as `hmui`) opens HStream's Qt desktop with HockeyMON's
+Python Program backend. `hmtrack --camera-ui=1` opens the same desktop and starts
+the requested Program run. `hmstitch --camera-ui=1` opens native stitching
+calibration. The desktop stays open when processing finishes.
 
-`hm-ui` is a sidecar process. The Python tracker owns the video pipeline and writes a JSON control spec/state file; `hm-ui` renders the controls and writes value changes back.
+The widgets, game browser, calibration editors, experiments and highlights are
+maintained in HockeyMONStream's `src/apps/hstream-ui`. This directory contains
+Python launchers and the `hm-cli` backend entry point; it does not contain a
+second desktop implementation.
 
-The **Zoom In Aggressiveness** control tunes how readily the follower camera
-zooms in. Its range is 0–100, with 25 retaining the original shrink thresholds;
-higher values respond to smaller reductions in the tracked play area. It always
-affects the follower, independently of the motion-limit box selection, and keeps
-the current camera velocity and braking state. Save/reset uses
-`rink.camera.zoom_in_aggressiveness` in the game configuration.
+## Build and launch
 
-Preview labels show each stream's current source resolution, before the bridge
-reduces frames for display. The Stitched and Final views update independently
-when the output dimensions change.
-
-## Build
+Install matching HStream tools, including `hstream-ui`, `hstream-cli` and
+`hstream-calibration-export`, `hstream-model-prepare` and `hstream-model-infer`.
+A source checkout can build the desktop with its
+normal platform configuration:
 
 ```bash
-bazelisk build //hm-ui:hm-ui
+# In the HStream checkout; select its configuration for your machine.
+bazelisk build --config=opt --config=x86_64 //src/apps/hstream-ui:hstream-ui
 ```
 
-or:
+Build HockeyMON's launchers with the backend appropriate for the machine:
 
 ```bash
-cargo build --locked --manifest-path hm-ui/Cargo.toml
+bazelisk build --config=cuda //hm-ui:hm-ui //hm-ui:hm-cli
+# Use --config=rocm on ROCm.
 ```
 
-## Use With hmtrack
+The Bazel launchers select `PYTHON_BIN_PATH`, then the active `CONDA_PREFIX`
+interpreter, then `python3` on `PATH`. Use the processing environment that matches
+the compiled `hockeymon` extension; Bazel's build-tool Python does not contain
+the processing dependencies. The built desktop launcher uses its matching built
+`hm-cli` unless `HM_CLI_BIN` explicitly selects another backend. For example:
 
 ```bash
+PYTHON_BIN_PATH=/absolute/environment/bin/python bazel-bin/hm-ui/hm-ui --game-id <game>
+```
+
+Wheel console scripts retain the interpreter of the environment where the wheel
+was installed. They do not reselect Python from these environment variables.
+
+For an installed HStream desktop:
+
+```bash
+hmui --root "$HOME/Videos"
 hmtrack --game-id <game> --camera-ui=1
-```
-
-The UI provides separate Stitched and Final preview tabs while tracking, and groups controls
-under the view they affect. Each control can be reset to its open-time value; the top bar can
-reset all controls to open-time or system defaults. Save writes only values that differ from
-system configuration to the game's private config.
-
-Controls with a fixed set of choices render as a combo box rather than a slider; the value
-still travels as the choice index, so state, resets and saves are unchanged. A control may
-also carry a one-line note, used for the settings that only take effect on the next run.
-
-The same UI is available for the stitching-only workflow. It shows only the stitched preview
-and the alignment, seam blend, and input/output color controls that affect that image:
-
-```bash
 hmstitch --game-id <game> --camera-ui=1
 ```
 
-For local source-tree runs, this also builds the sidecar first:
+For two source checkouts, point to the built desktop and this backend launcher:
 
 ```bash
-make hmtrack-rust-ui ARGS="--game-id <game>"
+export HSTREAM_UI_BIN=/absolute/hstream/bazel-bin/src/apps/hstream-ui/hstream-ui
+export HM_CLI_BIN=/absolute/HockeyMON/hm-ui/hm-cli
+./hm-ui/hm-ui --game-id <game> --root "$HOME/Videos"
 ```
 
-The Python bridge searches for `hm-ui` in this order:
+`HSTREAM_UI_BIN` and `HM_CLI_BIN` are explicit executable selections; an invalid
+selection fails with an error. Otherwise the launcher searches `PATH`, then
+`/opt/hstream/bin/hstream-ui` for the desktop and the source `hm-ui/hm-cli` for
+the backend. The desktop verifies the backend protocol before opening a game.
+Its matching native runner, calibration exporter and model preparer are passed to the Python
+backend. Installing HockeyMON's wheel alone does not install HStream or Qt.
 
-1. `HM_UI_BIN`
-2. `PATH`
-3. Bazel runfiles
-4. installed wheel path, `hmlib/bin/hm-ui`
-5. `bazel-bin/hmlib/bin/hm-ui` or `bazel-bin/hm-ui/hm-ui-bin`
-6. `hm-ui/target/release/hm-ui` or `hm-ui/target/debug/hm-ui`
+Original `hmtrack` and `hmstitch` arguments travel in a private launch document,
+including the invocation directory used for relative paths. The document applies
+to the first launch and is removed when the desktop closes. A launch with explicit
+input files and no game ID creates a uniquely named `session-input-*` game under
+the selected `HM_GAME_DIR`/`--root` directory (default: `$HOME/Videos`). Its saved
+configuration, calibration, recordings and telemetry remain after the desktop
+closes. Only the initial launch envelope is temporary.
 
-The hmlib wheel bundles `hm-ui` at `hmlib/bin/hm-ui`.
-The regular Bazel target uses the current build environment. The wheel packaging
-path opts into `--config=portable-wheels` and uses `//hm-ui:hm-ui-portable`,
-which links the bundled executable dynamically against a pinned Ubuntu 22.04
-(glibc 2.35) sysroot so wheels keep a stable glibc baseline independent of the
-build host.
+Python working outputs use a unique
+`${HM_OUTPUT_WORK_DIR:-$HOME/hstream_output}/<game>/runs/hockeymon-*` directory.
+Successful runs remove their working directory only after all requested archives
+and telemetry have been published and validated. Failed or incomplete runs retain
+it for recovery. Default desktop workers start
+there; an original CLI launch retains its working directory for relative
+arguments while writing its processing outputs to the durable run directory.
 
-To exercise actual X11/EGL initialization (not only `--help`), install `xvfb-run` and run:
+## Processing and workflow ownership
+
+| Operation | Owner |
+| --- | --- |
+| Program inference, tracking and camera processing | HockeyMON Python |
+| Calibration, camera leveling, projection/crop and rink mapping | Shared native HStream tools |
+| Stitching experiments, camera experiments and highlights | Shared HStream desktop and workflow engines |
+| Program recordings and telemetry publication | HockeyMON Python |
+| Stitched calibration preview and native workflow outputs | HStream |
+| Program job export | `hm-cli` |
+
+Both applications use the same controls and game configuration. Runtime changes
+retain the shared command acknowledgments and run generations. Controls marked
+for the next run, including output routing and detector precision, take effect on
+the next Play. A single-source HockeyMON recording does not require stitching
+calibration. Dual-camera Program uses checked native calibration artifacts before
+Python processing starts.
+
+HockeyMON previews use a bounded private JPEG transport for the selected view;
+native HStream previews retain their GPU rendering path. Turning Render video off
+or opening the Pipeline inspector suspends image-channel delivery. The final frame
+remains visible after Stop, and Stop restores the ordinary preview layout.
+
+Python detector choices and prepared models are stored under
+`hstream_ui.hockeymon.detector`, separately from native TensorRT assets. Prepare
+INT8 samples the calibrated recording through the shared native sampler, prepares
+a private sample reel, and invokes HockeyMON's existing ONNX quantizer. The returned
+model must pass ONNX validation, CPU Runtime loading and digest verification.
+Preparations are immutable, so a failed refresh leaves the prior selection intact.
+Cancelling preparation stops its process group. The saved model and manifest must
+still match at the next launch; playback never silently quantizes another model.
+
+The shared desktop accepts a completed publication receipt only after the requested
+recordings and telemetry exist. Explicit output destinations may live outside the
+game directory. Python owns their publication and cleanup; the desktop does not
+run the native finalizer on Python outputs. Exported jobs resolve `hm-cli` on the
+execution host and do not retain the private desktop session.
+
+See [the backend contract](../docs/shared-ui-backend.md) and HStream's
+`docs/shared-ui-backends.md` for launch translation, runtime control, preview and
+publication details. Native workflow documentation, including camera leveling and
+rink-map provenance, remains in the HStream repository.
+
+## Verification
 
 ```bash
-bazelisk test //hm-ui:gui_smoke_test
+python -m pytest -q tests/test_hstream_detector.py \
+  tests/test_desktop_launch_sources.py tests/test_desktop_workspace.py
 ```
+
+The HStream checkout owns `backend_options_test`, `shared_backend_window_test`,
+`int8_preparation_dialog_test` and its native desktop/X11 regression suites. The
+shared window tests exercise actual subprocess output, rendered preview pixels,
+view switching, completion receipts and final-frame retention. Python preparation
+tests use real PNGs, FFmpeg video, quantized ONNX validation and process cancellation.
+UI PR screenshots must be hosted outside the Git tree.

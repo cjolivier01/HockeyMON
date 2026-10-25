@@ -1,0 +1,35 @@
+# Compose with tracking_pose.yaml or tracking_pose_jersey.yaml. Detection,
+# pose, jerseys, camera control and output keep their existing stages.
+aspen:
+  plugins:
+    actions:
+      class: hmlib.aspen.plugins.native_analytics_plugin.TemporalActionPlugin
+      depends: [pose]
+      params:
+        top_k: 3
+        score_threshold: 0.5
+
+    save_actions:
+      class: hmlib.aspen.plugins.save_plugins.SaveActionsPlugin
+      depends: [actions]
+      params: {}
+
+    action_camera_join:
+      class: hmlib.aspen.plugins.join_plugin.JoinPlugin
+      depends: [camera_controller, actions]
+      params:
+        required_plugins: [camera_controller, actions]
+        output_key: action_camera_joined
+
+    play_tracker:
+      depends: [action_camera_join]
+
+    analytics_output_join:
+      class: hmlib.aspen.plugins.join_plugin.JoinPlugin
+      depends: [team_affiliation, actions]
+      params:
+        required_plugins: [team_affiliation, actions]
+        output_key: analytics_outputs_joined
+
+    overlays:
+      depends: [analytics_output_join]

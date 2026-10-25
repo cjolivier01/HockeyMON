@@ -164,7 +164,7 @@ class SuperPoint(nn.Module):
         )
 
     @torch.no_grad()
-    def extract(self, image: torch.Tensor) -> dict[str, torch.Tensor]:
+    def extract(self, image: torch.Tensor, *, resolution: str = "1k") -> dict[str, torch.Tensor]:
         """Detect and describe one image, resizing it to SUPERPOINT_RESIZE first.
 
         @param image: RGB tensor in ``[0, 1]``, either ``CHW`` or ``1CHW``.
@@ -178,14 +178,31 @@ class SuperPoint(nn.Module):
         if not image.is_floating_point():
             raise TypeError(f"SuperPoint.extract expects a float image, got {image.dtype}")
         height, width = image.shape[-2:]
-        # resize() also upscales, and past ~9x the border keypoints map to negative
-        # source coordinates, which kornia's LightGlue rejects with an empty message.
-        if max(height, width) * 9 < SUPERPOINT_RESIZE:
-            raise ValueError(
-                f"SuperPoint.extract needs an image of at least {SUPERPOINT_RESIZE // 9} pixels "
-                f"on its long edge, got {width}x{height}"
+        if resolution not in ("native", "1k", "2k"):
+            raise ValueError("SuperPoint resolution must be native, 1k or 2k")
+        if resolution == "native":
+            resized = image
+        elif resolution == "1k":
+            if max(height, width) * 9 < SUPERPOINT_RESIZE:
+                raise ValueError(
+                    f"SuperPoint.extract needs an image of at least {SUPERPOINT_RESIZE // 9} pixels "
+                    f"on its long edge, got {width}x{height}"
+                )
+            resized = resize(image, SUPERPOINT_RESIZE, side="long", antialias=True)
+        else:
+            scale = min(2048 / width, 1152 / height)
+            resized = resize(
+                image, (max(1, round(height * scale)), max(1, round(width * scale))), antialias=True
             )
-        resized = resize(image, SUPERPOINT_RESIZE, side="long", antialias=True)
+        resized_height, resized_width = resized.shape[-2:]
+        if resolution == "2k":
+            padded_height, padded_width = 1152, 2048
+        else:
+            padded_height = ((resized_height + 7) // 8) * 8
+            padded_width = ((resized_width + 7) // 8) * 8
+        padded = torch.nn.functional.pad(
+            resized, (0, padded_width - resized_width, 0, padded_height - resized_height)
+        )
         # Keep the coordinate maths in float32: a float16 image would quantise the
         # scale factors enough to shift restored keypoints by pixels at 8K.
         factors = torch.tensor(
@@ -193,9 +210,22 @@ class SuperPoint(nn.Module):
             device=image.device,
             dtype=torch.float32,
         )
-        feats = self.forward({"image": resized})
+        feats = self.forward({"image": padded})
+        points = feats["keypoints"][0]
+        keep = (points[:, 0] < resized_width) & (points[:, 1] < resized_height)
+        for key in ("keypoints", "keypoint_scores", "descriptors"):
+            feats[key] = feats[key][:, keep]
         feats["image_size"] = factors.new_tensor([[width, height]])
         feats["keypoints"] = (feats["keypoints"].float() + 0.5) / factors[None] - 0.5
+        points = feats["keypoints"][0]
+        keep = (
+            (points[:, 0] >= 0)
+            & (points[:, 0] < width)
+            & (points[:, 1] >= 0)
+            & (points[:, 1] < height)
+        )
+        for key in ("keypoints", "keypoint_scores", "descriptors"):
+            feats[key] = feats[key][:, keep]
         return feats
 
     def forward(self, data: dict) -> dict:

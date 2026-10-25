@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import time
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any
 
 from hmlib.builder import HM
 from hmlib.camera.hm_ui_bridge import HmUiProcess
@@ -54,7 +54,7 @@ _BLEND_MODE_LABELS = {
 }
 # The feather is a fraction; the UI carries integer controls, so it travels as
 # percent and converts at the boundary.
-_FEATHER_PERCENT_MAX = int(round(MAX_FEATHER_FRACTION * 100.0))
+_FEATHER_PERCENT_MAX = round(MAX_FEATHER_FRACTION * 100.0)
 _NEXT_RUN_NOTE = "Applies on the next stitch run."
 
 
@@ -67,16 +67,16 @@ class StitchUiPlugin(Plugin):
     def __init__(self, enabled: bool = True, blend_only: bool = False) -> None:
         super().__init__(enabled=enabled)
         self._blend_only = blend_only
-        self._process: Optional[HmUiProcess] = None
-        self._game_config: Dict[str, Any] = {}
-        self._open_config: Dict[str, Any] = {}
-        self._system_config: Dict[str, Any] = {}
-        self._game_id: Optional[str] = None
-        self._dirty_paths: Set[Tuple[str, ...]] = set()
+        self._process: HmUiProcess | None = None
+        self._game_config: dict[str, Any] = {}
+        self._open_config: dict[str, Any] = {}
+        self._system_config: dict[str, Any] = {}
+        self._game_id: str | None = None
+        self._dirty_paths: set[tuple[str, ...]] = set()
         self._save_count = 0
-        self._blend_choices: Tuple[str, ...] = ()
-        self._blend_runnable: Tuple[str, ...] = ()
-        self._shared: Optional[Dict[str, Any]] = None
+        self._blend_choices: tuple[str, ...] = ()
+        self._blend_runnable: tuple[str, ...] = ()
+        self._shared: dict[str, Any] | None = None
         self._active = False
         self._action_retry_after_monotonic = 0.0
         self._action_retry_delay_seconds = 0.0
@@ -93,7 +93,7 @@ class StitchUiPlugin(Plugin):
     @staticmethod
     def _exposure_ev_to_slider(value: Any) -> int:
         try:
-            ev_x10 = int(round(float(value) * 10.0))
+            ev_x10 = round(float(value) * 10.0)
         except (TypeError, ValueError):
             ev_x10 = 0
         ev_x10 = max(_EXPOSURE_EV_X10_MIN, min(_EXPOSURE_EV_X10_MAX, ev_x10))
@@ -105,7 +105,7 @@ class StitchUiPlugin(Plugin):
         return float(position + _EXPOSURE_EV_X10_MIN) / 10.0
 
     @staticmethod
-    def _config_blend_entry(config: Dict[str, Any]) -> Optional[str]:
+    def _config_blend_entry(config: dict[str, Any]) -> str | None:
         """The combo entry this config names, or None when it names nothing.
 
         A mode that will not normalize is kept, folded, so it can be its own
@@ -116,7 +116,7 @@ class StitchUiPlugin(Plugin):
         return config_blend_mode(get_nested_value(config, "stitching.blend_mode", None))
 
     @staticmethod
-    def _config_feather_percent(config: Dict[str, Any]) -> Optional[int]:
+    def _config_feather_percent(config: dict[str, Any]) -> int | None:
         """The slider position this config asks for, or None when it asks for one
         the slider cannot hold.
 
@@ -125,13 +125,13 @@ class StitchUiPlugin(Plugin):
         """
         raw = get_nested_value(config, "stitching.blend_feather_fraction", None)
         if raw is None:
-            return int(round(DEFAULT_FEATHER_FRACTION * 100.0))
+            return round(DEFAULT_FEATHER_FRACTION * 100.0)
         try:
-            return int(round(normalize_feather_fraction(raw) * 100.0))
+            return round(normalize_feather_fraction(raw) * 100.0)
         except ValueError:
             return None
 
-    def _resolve_blend_choices(self) -> Tuple[str, ...]:
+    def _resolve_blend_choices(self) -> tuple[str, ...]:
         """Renderable modes, plus the game's own mode when this path cannot run it.
 
         Showing an unrunnable mode as its own entry is what makes picking a real
@@ -169,17 +169,17 @@ class StitchUiPlugin(Plugin):
             for mode in self._blend_choices
         ]
 
-    def _blend_mode_index(self, config: Dict[str, Any]) -> int:
+    def _blend_mode_index(self, config: dict[str, Any]) -> int:
         mode = self._config_blend_entry(config) or DEFAULT_BLEND_MODE
         choices = self._blend_choices
         return choices.index(mode) if mode in choices else choices.index(DEFAULT_BLEND_MODE)
 
-    def _blend_feather_position(self, config: Dict[str, Any]) -> int:
+    def _blend_feather_position(self, config: dict[str, Any]) -> int:
         percent = self._config_feather_percent(config)
-        return int(round(DEFAULT_FEATHER_FRACTION * 100.0)) if percent is None else percent
+        return round(DEFAULT_FEATHER_FRACTION * 100.0) if percent is None else percent
 
     @classmethod
-    def _color_defaults(cls, config: Dict[str, Any], path: str) -> Dict[str, int]:
+    def _color_defaults(cls, config: dict[str, Any], path: str) -> dict[str, int]:
         color_cfg = get_nested_value(config, path, {}) or {}
         if not isinstance(color_cfg, dict):
             color_cfg = {}
@@ -194,7 +194,7 @@ class StitchUiPlugin(Plugin):
             "White_Balance_Blue_Gain_x100": 100,
             "Brightness_Multiplier_x100": 100,
             "Exposure_EV_x10": _EXPOSURE_EV_X10_SLIDER_ZERO,
-            "Shadow_Lift_Percent": int(round(shadow)),
+            "Shadow_Lift_Percent": round(shadow),
             "Shadow_Lift_Black_Point": int(black_point),
             "Contrast_Multiplier_x100": 100,
             "Gamma_Multiplier_x100": 100,
@@ -229,7 +229,7 @@ class StitchUiPlugin(Plugin):
                 logger.warning("Invalid %s in %s: %r", key, path, color_cfg.get(key))
         return defaults
 
-    def _add_color_window(self, window_name: str, defaults: Dict[str, int]) -> None:
+    def _add_color_window(self, window_name: str, defaults: dict[str, int]) -> None:
         assert self._process is not None
         self._process.add_window(window_name)
         maximums = {
@@ -248,7 +248,7 @@ class StitchUiPlugin(Plugin):
         for name, value in defaults.items():
             self._process.add_slider(window_name, name, maximums[name], value)
 
-    def _ensure_initialized(self, context: Dict[str, Any]) -> None:
+    def _ensure_initialized(self, context: dict[str, Any]) -> None:
         if self._process is not None or self._active:
             return
         shared = context.get("shared", {})
@@ -262,8 +262,8 @@ class StitchUiPlugin(Plugin):
         self._game_config = shared.get("game_config") or {}
         self._open_config = copy.deepcopy(self._game_config)
         self._game_id = shared.get("game_id")
-        self._system_config = copy.deepcopy(self._game_config)
-        if self._game_id:
+        self._system_config = copy.deepcopy(shared.get("hm_ui_system_config", self._game_config))
+        if self._game_id and "hm_ui_system_config" not in shared:
             try:
                 self._system_config = get_config(
                     game_id=self._game_id,
@@ -280,7 +280,14 @@ class StitchUiPlugin(Plugin):
             title = f"HM Stitch Blend Repair - {self._game_id}"
         else:
             title = f"HM Stitch UI - {self._game_id}" if self._game_id else "HM Stitch UI"
-        self._process = HmUiProcess(title=title, preview_names=("Stitched",))
+        self._process = shared.get("hm_ui_existing_process") or HmUiProcess(
+            title=title,
+            preview_names=(
+                ("Stitched",) if self._blend_only else ("Stitched", "Camera 1", "Camera 2")
+            ),
+        )
+        if not self._blend_only:
+            self._process.enable_playback()
         alignment_window = "Stitch Alignment"
         if not self._blend_only:
             self._process.add_window(alignment_window)
@@ -352,7 +359,7 @@ class StitchUiPlugin(Plugin):
             "Tracker Controls (Left Color)": "stitching.left.color",
             "Tracker Controls (Right Color)": "stitching.right.color",
         }
-        system_defaults: Dict[str, Dict[str, int]] = {
+        system_defaults: dict[str, dict[str, int]] = {
             _BLEND_WINDOW: {
                 _BLEND_MODE_CONTROL: self._blend_mode_index(self._system_config),
             }
@@ -380,8 +387,30 @@ class StitchUiPlugin(Plugin):
         shared["hm_ui_process"] = self._process
         shared["hm_ui_preview_active"] = True
 
+    def attach_controls(
+        self,
+        process: HmUiProcess,
+        game_config: dict[str, Any],
+        system_config: dict[str, Any],
+        game_id: str | None,
+    ) -> None:
+        """Mount blend controls in the tracker's sidecar; the tracker owns Save/reset."""
+        if not self._blend_only:
+            raise ValueError("Only blend controls can be attached to a tracking UI")
+        self._ensure_initialized(
+            {
+                "shared": {
+                    "camera_ui": 1,
+                    "game_config": game_config,
+                    "game_id": game_id,
+                    "hm_ui_existing_process": process,
+                    "hm_ui_system_config": system_config,
+                }
+            }
+        )
+
     @staticmethod
-    def _values_equal(left: Any, right: Any, *, path: Tuple[str, ...] = ()) -> bool:
+    def _values_equal(left: Any, right: Any, *, path: tuple[str, ...] = ()) -> bool:
         if left is _MISSING or right is _MISSING:
             return left is right
         if path == ("stitching", "blend_mode"):
@@ -394,7 +423,7 @@ class StitchUiPlugin(Plugin):
         return left == right
 
     @staticmethod
-    def _path_value(config: Dict[str, Any], path: Tuple[str, ...]) -> Any:
+    def _path_value(config: dict[str, Any], path: tuple[str, ...]) -> Any:
         current: Any = config
         for key in path:
             if not isinstance(current, dict) or key not in current:
@@ -403,7 +432,7 @@ class StitchUiPlugin(Plugin):
         return current
 
     @classmethod
-    def _set_path(cls, config: Dict[str, Any], path: Tuple[str, ...], value: Any) -> bool:
+    def _set_path(cls, config: dict[str, Any], path: tuple[str, ...], value: Any) -> bool:
         current: Any = config
         parents = []
         for key in path[:-1]:
@@ -431,11 +460,11 @@ class StitchUiPlugin(Plugin):
         current[leaf] = copy.deepcopy(value)
         return True
 
-    def _set_runtime_path(self, path: Tuple[str, ...], value: Any) -> None:
+    def _set_runtime_path(self, path: tuple[str, ...], value: Any) -> None:
         if self._set_path(self._game_config, path, value):
             self._dirty_paths.add(path)
 
-    def _apply_color_window(self, window_name: str, prefix: Tuple[str, ...]) -> None:
+    def _apply_color_window(self, window_name: str, prefix: tuple[str, ...]) -> None:
         assert self._process is not None
 
         def value(name: str) -> int:
@@ -575,7 +604,7 @@ class StitchUiPlugin(Plugin):
     def save_count(self) -> int:
         return self._save_count
 
-    def _managed_paths(self) -> Set[Tuple[str, ...]]:
+    def _managed_paths(self) -> set[tuple[str, ...]]:
         rotation_path = ("stitching", "post_stitch_rotate_degrees")
         color_keys = {
             "white_balance",
@@ -587,7 +616,7 @@ class StitchUiPlugin(Plugin):
             "contrast",
             "gamma",
         }
-        managed_paths: Set[Tuple[str, ...]] = {("stitching", "blend_mode")}
+        managed_paths: set[tuple[str, ...]] = {("stitching", "blend_mode")}
         if "alpha" in self._blend_runnable:
             managed_paths.add(("stitching", "blend_feather_fraction"))
         if self._blend_only:
@@ -601,7 +630,7 @@ class StitchUiPlugin(Plugin):
             managed_paths.update(prefix + (key,) for key in color_keys)
         return managed_paths
 
-    def _restore_managed_config(self, source: Dict[str, Any]) -> None:
+    def _restore_managed_config(self, source: dict[str, Any]) -> None:
         for path in self._managed_paths():
             self._set_runtime_path(path, self._path_value(source, path))
         # The controls already hold the reset values, and restoring the source
@@ -611,7 +640,7 @@ class StitchUiPlugin(Plugin):
         if self._process is not None:
             self._apply_blend_controls()
 
-    def _restore_final_reset_config(self, events: list[Any], final_values: Dict[str, Any]) -> None:
+    def _restore_final_reset_config(self, events: list[Any], final_values: dict[str, Any]) -> None:
         for event in reversed(events):
             event_values = final_values if event.values is None else event.values
             if event_values != final_values:
@@ -632,27 +661,19 @@ class StitchUiPlugin(Plugin):
             self._shared["hm_ui_preview_active"] = False
 
     def input_keys(self) -> set[str]:
-        return {"img", "shared"}
+        return {"img", "shared", "frame_ids", "fps"}
 
     def output_keys(self) -> set[str]:
         return {"img"}
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
-        if not self.enabled:
-            return {"img": context.get("img")}
-        img = context.get("img")
-        try:
-            self._ensure_initialized(context)
-        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as ex:
-            self._disable_ui()
-            raise RuntimeError("Failed to initialize stitch camera UI") from ex
+    def _poll_controls(self) -> None:
         if self._process is None:
-            return {"img": img}
+            return
         self._process.poll()
         controls_changed = self._process.last_poll_values_changed
         if self._process.closed:
             self._disable_ui()
-            return {"img": img}
+            return
         final_values = self._process.control_values()
         events = self._process.consume_action_events(poll=False)
         runtime_values = None
@@ -667,6 +688,8 @@ class StitchUiPlugin(Plugin):
                     self._apply_controls()
             else:
                 for event in events:
+                    if self._process.apply_playback_action(event.kind):
+                        continue
                     self._process.apply_control_values(
                         final_values if event.values is None else event.values
                     )
@@ -688,10 +711,18 @@ class StitchUiPlugin(Plugin):
                 if (controls_changed or events) and final_values != runtime_values:
                     self._apply_controls()
                 if events:
-                    self._process.acknowledge_action_events(max(event.seq for event in events))
+                    self._process.acknowledge_action_events(
+                        max(event.seq for event in events),
+                        message=(
+                            "Saved game settings"
+                            if any(e.kind == "save" for e in events)
+                            else "Applied"
+                        ),
+                    )
                     self._action_retry_after_monotonic = 0.0
                     self._action_retry_delay_seconds = 0.0
-        except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as error:
+            self._process.report_action_error(str(error))
             delay = (
                 _UI_ACTION_RETRY_INITIAL_SECONDS
                 if self._action_retry_delay_seconds <= 0.0
@@ -713,6 +744,29 @@ class StitchUiPlugin(Plugin):
                     self._restore_final_reset_config(events, final_values)
             except (OSError, RuntimeError, TypeError, ValueError, KeyError) as restore_ex:
                 logger.error("Failed to restore final stitch camera UI values: %s", restore_ex)
+
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
+        if not self.enabled:
+            return {"img": context.get("img")}
+        img = context.get("img")
+        try:
+            self._ensure_initialized(context)
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as ex:
+            self._disable_ui()
+            raise RuntimeError("Failed to initialize stitch camera UI") from ex
+        process = self._process
+        if process is None:
+            return {"img": img}
+        process.wait_for_playback(self._poll_controls)
+        if self._process is None:
+            return {"img": img}
+        frame_ids = context.get("frame_ids")
+        if frame_ids is not None:
+            from hmlib.utils.gpu import unwrap_tensor
+
+            frame_ids = unwrap_tensor(frame_ids)
+        frame = int(frame_ids[-1]) if frame_ids is not None and len(frame_ids) else None
+        process.publish_runtime(frame=frame, fps=context.get("fps"))
         if img is not None:
             self._process.publish_preview(img, name="Stitched")
         return {"img": img}
@@ -722,12 +776,12 @@ class StitchUiPlugin(Plugin):
 
 
 def repair_blend_before_stitch(
-    game_config: Dict[str, Any],
-    game_id: Optional[str],
+    game_config: dict[str, Any],
+    game_id: str | None,
     *,
-    raw_graph_params: Optional[Dict[str, Any]] = None,
+    raw_graph_params: dict[str, Any] | None = None,
     ignore_private_config: bool = False,
-    run_blend_overrides: Tuple[str, ...] = (),
+    run_blend_overrides: tuple[str, ...] = (),
 ) -> bool:
     """Let the operator save a runnable blend before a broken stitch graph starts.
 
@@ -736,7 +790,7 @@ def repair_blend_before_stitch(
     """
     stitching = get_nested_value(game_config, "stitching", {}) or {}
     if not isinstance(stitching, dict):
-        raise ValueError("stitching config must be a mapping")
+        raise ValueError("stitching config must be a mapping")  # noqa: TRY004
     graph_params = get_nested_value(game_config, "aspen.plugins.stitching.params", None)
     if graph_params is not None and not isinstance(graph_params, dict):
         raise ValueError("aspen.plugins.stitching.params must be a mapping")

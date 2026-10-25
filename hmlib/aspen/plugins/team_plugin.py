@@ -98,6 +98,8 @@ class TeamAffiliationPlugin(Plugin):
         prtreid_weights: str = "",
         prtreid_backbone_weights: str = "",
         prtreid_device: str = "cuda",
+        reid_onnx_path: str = "",
+        reid_gpu: int | None = None,
     ) -> None:
         super().__init__(enabled=enabled)
         self._backend_name = str(backend)
@@ -111,6 +113,8 @@ class TeamAffiliationPlugin(Plugin):
             "prtreid_weights": prtreid_weights,
             "prtreid_backbone_weights": prtreid_backbone_weights,
             "prtreid_device": prtreid_device,
+            "reid_onnx_path": reid_onnx_path,
+            "reid_gpu": reid_gpu,
         }
 
         self._backend = None

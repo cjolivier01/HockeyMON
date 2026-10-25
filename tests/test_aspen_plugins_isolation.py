@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import pytest
 
@@ -44,8 +45,8 @@ if torch is not None:
         FakeDetectorModel,
         FakeEndZones,
         FakePlayTrackerRuntime,
-        FakeProgressBar,
         FakePoseInferencer,
+        FakeProgressBar,
         FakeShower,
         FakeVideoOutput,
         FakeVideoOutputPreparer,
@@ -790,6 +791,7 @@ def _case_play_tracker(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = F
             "frame_ids": torch.tensor([1], dtype=torch.long),
         }
     )
+    monkeypatch.setattr(plugin._play_tracker, "hm_ui_process", lambda: None, raising=False)
     out = plugin(
         {
             "data_samples": make_track_data_sample(num_frames=1),
@@ -1137,6 +1139,7 @@ def _case_video_out(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = Fals
     out = plugin(
         {
             "img": torch.zeros((1, 3, 8, 8), dtype=torch.float32),
+            "frame_ids": torch.tensor([1]),
             "work_dir": str(tmp_path),
             "shared": {"device": torch.device("cpu"), "game_config": {}},
         }
@@ -1236,7 +1239,99 @@ def _case_apply_camera(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = F
     assert out["video_frame_cfg"]["output_frame_height"] == 8
 
 
+def _case_reid(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = False) -> None:
+    from hmlib.aspen.plugins.reid_plugin import ReidPlugin
+
+    plugin = ReidPlugin(str(tmp_path / "appearance.onnx"))
+    _maybe_enable_cuda_graph(plugin, cuda_graph_enabled)
+    calls = []
+
+    def infer(outputs, inputs):
+        calls.append(inputs["images"])
+        return [torch.ones((len(inputs["images"]), 256)).numpy()]
+
+    plugin.session = SimpleNamespace(get_inputs=lambda: [SimpleNamespace(name="images")], run=infer)
+    detections = make_instance_data(
+        bboxes=torch.tensor([[1.0, 2.0, 10.0, 12.0]]),
+        scores=torch.tensor([0.9]),
+        labels=torch.tensor([0]),
+    )
+    samples = make_track_data_sample(pred_instances=[detections])
+    out = plugin({"original_images": torch.zeros((1, 3, 32, 48)), "data_samples": samples})
+    assert out["data_samples"] is samples
+    assert calls[0].shape == (1, 3, 256, 128)
+    torch.testing.assert_close(unwrap_tensor(detections.reid_features).norm(dim=1), torch.ones(1))
+
+
+def _case_appearance_tracker(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = False) -> None:
+    from hmlib.aspen.plugins.reid_plugin import AppearanceTrackerPlugin
+
+    plugin = AppearanceTrackerPlugin()
+    _maybe_enable_cuda_graph(plugin, cuda_graph_enabled)
+    plugin._static_tracker_max_detections = 4
+    features = torch.ones((1, 256))
+    payload = plugin._build_static_tracker_inputs(
+        1,
+        torch.tensor([[1.0, 2.0, 10.0, 12.0]]),
+        torch.tensor([0]),
+        torch.tensor([0.9]),
+        det_reid=features,
+    )
+    assert payload["num_detections"].device.type == "cpu"
+    assert payload["num_detections"].item() == 1
+    torch.testing.assert_close(payload["reid_features"][:1], features)
+    assert payload["reid_features"][1:].count_nonzero() == 0
+
+
+def _native_label_context(frame_id):
+    tracks = make_instance_data(
+        bboxes=torch.tensor([[1.0, 2.0, 10.0, 12.0]]),
+        scores=torch.tensor([0.9]),
+        labels=torch.tensor([0]),
+        instances_id=torch.tensor([77]),
+    )
+    return {
+        "original_images": torch.zeros((1, 3, 32, 48), dtype=torch.uint8),
+        "data_samples": make_track_data_sample(pred_track_instances=[tracks]),
+        "frame_ids": torch.tensor([frame_id]),
+        "fps": 10,
+        "pose_results": make_pose_results(num_frames=1),
+    }
+
+
+def _case_parseq_jersey(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = False) -> None:
+    from hmlib.aspen.plugins.native_analytics_plugin import ParseqJerseyPlugin
+
+    plugin = ParseqJerseyPlugin()
+    _maybe_enable_cuda_graph(plugin, cuda_graph_enabled)
+    logits = torch.full((1, 3, 95), -20.0)
+    logits[0, 0, 1] = logits[0, 1, 1] = logits[0, 2, 0] = 20
+    plugin.model = lambda inputs: logits.numpy().repeat(len(inputs), axis=0)
+    plugin(_native_label_context(0))
+    result = plugin(_native_label_context(5))["jersey_results"][0][0]
+    assert result.tracking_id == 77 and result.number == "00"
+
+
+def _case_temporal_action(monkeypatch, tmp_path: Path, cuda_graph_enabled: bool = False) -> None:
+    from hmlib.aspen.plugins.native_analytics_plugin import TemporalActionPlugin
+
+    plugin = TemporalActionPlugin()
+    _maybe_enable_cuda_graph(plugin, cuda_graph_enabled)
+    logits = torch.full((1, 60), -20.0)
+    logits[0, 42] = 20
+    plugin.model = lambda inputs: logits.numpy().repeat(len(inputs), axis=0)
+    for frame_id in range(99):
+        assert plugin(_native_label_context(frame_id))["action_results"] == [[]]
+    label = plugin(_native_label_context(99))["action_results"][0][0]
+    assert label["tracking_id"] == 77 and label["label_index"] == 42
+    assert plugin(_native_label_context(103))["action_results"] == [[]]
+
+
 PLUGIN_CASES: dict[str, Callable[[Any, Path, bool], None]] = {
+    "hmlib.aspen.plugins.reid_plugin.ReidPlugin": _case_reid,
+    "hmlib.aspen.plugins.reid_plugin.AppearanceTrackerPlugin": _case_appearance_tracker,
+    "hmlib.aspen.plugins.native_analytics_plugin.ParseqJerseyPlugin": _case_parseq_jersey,
+    "hmlib.aspen.plugins.native_analytics_plugin.TemporalActionPlugin": _case_temporal_action,
     "hmlib.aspen.plugins.action_factory_plugin.ActionRecognizerFactoryPlugin": _case_action_factory,
     "hmlib.aspen.plugins.action_pose_plugin.ActionFromPosePlugin": _case_action_pose,
     "hmlib.aspen.plugins.boundaries_plugin.BoundariesPlugin": _case_boundaries,

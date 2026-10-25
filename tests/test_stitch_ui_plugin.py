@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from typing import ClassVar
 
 import pytest
 
@@ -46,7 +47,7 @@ def _config(rotation: float) -> dict:
 
 
 class _FakeHmUiProcess:
-    instances = []
+    instances: ClassVar[list] = []
 
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
@@ -63,6 +64,21 @@ class _FakeHmUiProcess:
         self.previews = []
         self.closed = False
         self.instances.append(self)
+
+    def enable_playback(self):
+        self.playback_enabled = True
+
+    def apply_playback_action(self, kind):
+        return False
+
+    def report_action_error(self, error):
+        self.error = error
+
+    def wait_for_playback(self, callback):
+        callback()
+
+    def publish_runtime(self, **kwargs):
+        self.runtime = kwargs
 
     def add_window(self, name: str) -> None:
         self.values.setdefault(name, {})
@@ -120,7 +136,7 @@ class _FakeHmUiProcess:
         )
         self.next_action_seq += 1
 
-    def acknowledge_action_events(self, through_seq: int) -> None:
+    def acknowledge_action_events(self, through_seq: int, *, message: str = "") -> None:
         self.acknowledged_seq = through_seq
 
     def queue_reset(self, *, system: bool) -> None:
@@ -143,7 +159,7 @@ class _FakeAction:
 
 
 class _FakeShower:
-    instances = []
+    instances: ClassVar[list] = []
 
     def __init__(self, **kwargs) -> None:
         self.kwargs = kwargs
@@ -197,7 +213,7 @@ def should_apply_and_save_stitch_only_rust_controls(monkeypatch):
     plugin.forward({"img": image, "shared": shared})
 
     process = _FakeHmUiProcess.instances[0]
-    assert process.kwargs["preview_names"] == ("Stitched",)
+    assert process.kwargs["preview_names"] == ("Stitched", "Camera 1", "Camera 2")
     assert shared["hm_ui_process"] is process
     assert process.previews[-1] == (image, "Stitched")
 
@@ -293,7 +309,7 @@ def should_retry_stitch_ui_actions_and_restore_final_values_after_failure(monkey
             del poll
             return list(self.actions)
 
-        def acknowledge_action_events(self, through_seq: int) -> None:
+        def acknowledge_action_events(self, through_seq: int, *, message: str = "") -> None:
             super().acknowledge_action_events(through_seq)
             self.actions = [action for action in self.actions if action.seq > through_seq]
 

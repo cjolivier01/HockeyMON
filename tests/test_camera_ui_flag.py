@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import importlib.util
 import copy
+import importlib.util
 import sys
-from types import ModuleType
-from types import SimpleNamespace
-from typing import Any, Dict
+from types import ModuleType, SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -70,12 +69,12 @@ def _load_play_tracker(monkeypatch):
 def should_propagate_camera_ui_into_aspen_shared(monkeypatch):
     from hmlib.tasks import tracking
 
-    captured: Dict[str, Any] = {}
+    captured: dict[str, Any] = {}
     sentinel_controller: object = object()
 
     # Stub AspenNet so we can inspect the shared dict passed from run_mmtrack.
     class DummyAspenNet(torch.nn.Module):
-        def __init__(self, name: str, graph_cfg: Dict[str, Any], shared: Dict[str, Any] | None = None, **_: Any):  # type: ignore[override]
+        def __init__(self, name: str, graph_cfg: dict[str, Any], shared: dict[str, Any] | None = None, **_: Any):  # type: ignore[override]
             super().__init__()
             self.shared = dict(shared or {})
             captured["shared"] = self.shared
@@ -83,7 +82,7 @@ def should_propagate_camera_ui_into_aspen_shared(monkeypatch):
         def to(self, *args: Any, **kwargs: Any):  # pragma: no cover - trivial passthrough
             return self
 
-        def forward(self, context: Dict[str, Any]):  # pragma: no cover - not exercised
+        def forward(self, context: dict[str, Any]):  # pragma: no cover - not exercised
             return context
 
         def finalize(self):  # pragma: no cover - not exercised
@@ -95,7 +94,7 @@ def should_propagate_camera_ui_into_aspen_shared(monkeypatch):
 
     dl = _DummyDataloader()
 
-    cfg: Dict[str, Any] = {
+    cfg: dict[str, Any] = {
         "aspen": {
             "plugins": {},
             "pipeline": {},
@@ -159,6 +158,29 @@ def should_propagate_camera_ui_initialization_failure(monkeypatch):
     assert str(exc_info.value.__cause__) == "hm-ui binary is unavailable"
     assert partial_process.closed is True
     assert tracker._hm_ui_process is None
+
+
+@pytest.mark.parametrize("dual", [False, True])
+def should_register_decoded_camera_previews_for_single_and_dual_sources(
+    tmp_path, monkeypatch, dual
+):
+    from hmlib.camera.hm_ui_bridge import HmUiProcess
+
+    PlayTracker = _load_play_tracker(monkeypatch)
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.setattr(HmUiProcess, "ensure_started", lambda self: None)
+    tracker = PlayTracker.__new__(PlayTracker)
+    tracker._game_id = "source-preview"
+    tracker._ui_dialogs = {}
+    tracker._hm_ui_process = None
+    tracker._stitch_rotation_controller = object() if dual else None
+    tracker._create_ui_dialog("Tracker Controls", initial_size=(400, 300))
+    try:
+        assert "Camera 1" in tracker._hm_ui_process.preview_paths
+        assert ("Camera 2" in tracker._hm_ui_process.preview_paths) == dual
+    finally:
+        tracker.close_ui()
 
 
 @pytest.mark.parametrize("native_tracker", [False, True])
@@ -236,6 +258,16 @@ def should_restore_distinct_system_and_open_time_zoom_defaults(monkeypatch, tmp_
     tracker._camera_base_accel_x = tracker._camera_base_accel_y = 5.0
     tracker._stitch_rotation_controller = None
     tracker._force_stitching = False
+    tracker._cam_ignore_largest = False
+    tracker._cam_ignore_largest_count = 1
+    tracker._cam_ignore_oversized = False
+    tracker._cam_oversized_percent = 100.0
+    tracker._plot_individual_player_tracking = False
+    tracker._plot_moving_boxes = False
+    tracker._plot_tracking_circles = True
+    tracker._plot_trajectories = False
+    tracker._plot_speed = False
+    tracker._plot_boundaries = False
     tracker._hockey_mon = SimpleNamespace(fps_speed_scale=1.0)
     follower = SimpleNamespace(thresholds=None)
     follower.set_resizing_shrink_thresholds = lambda *values: setattr(
@@ -318,6 +350,16 @@ def should_replay_tracking_ui_action_snapshots_in_click_order(monkeypatch):
             self.acknowledged_seq = None
             self.last_poll_values_changed = False
 
+        def apply_runtime_requests(self, apply_values, apply_operation):
+            # This fixture exercises ordered actions with no pending IPC requests.
+            return None
+
+        def apply_playback_action(self, kind):
+            return False
+
+        def report_action_error(self, error):
+            self.error = error
+
         def control_values(self):
             return {window: dict(values) for window, values in self.values.items()}
 
@@ -329,7 +371,7 @@ def should_replay_tracking_ui_action_snapshots_in_click_order(monkeypatch):
             del publish
             self.values = {window: dict(items) for window, items in values.items()}
 
-        def acknowledge_action_events(self, through_seq: int) -> None:
+        def acknowledge_action_events(self, through_seq: int, *, message: str = "") -> None:
             self.acknowledged_seq = through_seq
             self.events = [event for event in self.events if event.seq > through_seq]
 

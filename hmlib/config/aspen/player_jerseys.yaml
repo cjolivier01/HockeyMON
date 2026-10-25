@@ -1,0 +1,18 @@
+# Compose with tracking.yaml to read jersey numbers without estimating pose.
+aspen:
+  plugins:
+    jersey_numbers:
+      class: hmlib.aspen.plugins.jersey_pose_plugin.JerseyNumberFromPosePlugin
+      depends: [tracker]
+      params:
+        roi_mode: bbox
+
+    jersey_output_join:
+      class: hmlib.aspen.plugins.join_plugin.JoinPlugin
+      depends: [play_tracker, jersey_numbers]
+      params:
+        required_plugins: [play_tracker, jersey_numbers]
+        output_key: jersey_outputs_joined
+
+    overlays:
+      depends: [jersey_output_join]

@@ -1,0 +1,138 @@
+feature: jersey
+inputs:
+- dtype: float32
+  name: image
+  shape:
+  - -1
+  - 3
+  - 32
+  - 128
+model_family: parseq
+model_id: parseq-hockey-cvprw2024
+onnx:
+  file: model.onnx
+  opset: 17
+  sha256: df48ad7463aa89a5e852f9c4cf2616f0cb9a4e7490ef380b0c6ab67f110228b1
+outputs:
+- dtype: float32
+  name: logits
+  shape:
+  - -1
+  - 3
+  - 95
+preprocessing:
+  align_corners: false
+  antialias: true
+  charset:
+  - '[E]'
+  - '0'
+  - '1'
+  - '2'
+  - '3'
+  - '4'
+  - '5'
+  - '6'
+  - '7'
+  - '8'
+  - '9'
+  - a
+  - b
+  - c
+  - d
+  - e
+  - f
+  - g
+  - h
+  - i
+  - j
+  - k
+  - l
+  - m
+  - n
+  - o
+  - p
+  - q
+  - r
+  - s
+  - t
+  - u
+  - v
+  - w
+  - x
+  - y
+  - z
+  - A
+  - B
+  - C
+  - D
+  - E
+  - F
+  - G
+  - H
+  - I
+  - J
+  - K
+  - L
+  - M
+  - N
+  - O
+  - P
+  - Q
+  - R
+  - S
+  - T
+  - U
+  - V
+  - W
+  - X
+  - Y
+  - Z
+  - '!'
+  - '"'
+  - '#'
+  - $
+  - '%'
+  - '&'
+  - ''''
+  - (
+  - )
+  - '*'
+  - +
+  - ','
+  - '-'
+  - .
+  - /
+  - ':'
+  - ;
+  - <
+  - '='
+  - '>'
+  - '?'
+  - '@'
+  - '['
+  - \
+  - ']'
+  - ^
+  - _
+  - '`'
+  - '{'
+  - '|'
+  - '}'
+  - '~'
+  color: rgb
+  cubic_coefficient: -0.5
+  eos_index: 0
+  id: parseq-rgb-bicubic-v1
+  input_range:
+  - -1
+  - 1
+  interpolation: bicubic
+  max_length: 2
+  quantize_uint8_after_resize: true
+  resize_coordinate_mode: half_pixel
+schema_version: 1
+source:
+  config_sha256: b1c1374a8e672b0929c1eb26ed0eee4da199bacec84602033c018d15357e400c
+  license: CC-BY-NC-3.0; model local use remains subject to noncommercial terms
+  sha256: 5a31899866c092ff26b245898d1fb16ecaabcd091afaadeb6a9c056ca6c846e3
+  url: https://drive.google.com/file/d/1FyM31xvSXFRusN0sZH0EWXoHwDfB9WIE/view

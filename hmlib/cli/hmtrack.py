@@ -9,12 +9,12 @@ import time
 import traceback
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import torch
-import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 import yaml
+from torch.backends import cudnn
 
 # from mmdet.apis import init_track_model
 # from mmengine.config import Config
@@ -45,7 +45,7 @@ from hmlib.utils.pipeline import get_pipeline_item, update_pipeline_item
 ROOT_DIR = os.path.dirname(os.path.abspath(hmlib.__file__))
 
 
-def make_parser(parser: argparse.ArgumentParser = None):
+def make_parser(parser: argparse.ArgumentParser | None = None):
     if parser is None:
         parser = argparse.ArgumentParser("HockeyMON Tracking")
     parser = hm_opts.parser(parser)
@@ -345,7 +345,8 @@ def _run_smoke_test(args: argparse.Namespace) -> int:
     if args.game_id:
         try:
             game_dir = get_game_dir(args.game_id, assert_exists=False)
-        except Exception:
+        except (OSError, ValueError) as error:
+            logger.warning("Cannot resolve smoke-test game directory: %s", error)
             game_dir = None
 
     for message in _exercise_preview_smoke(args):
@@ -370,12 +371,12 @@ def _arg_was_explicit(args: argparse.Namespace, name: str) -> bool:
 _CONFIG_MISSING = object()
 
 
-def _config_value(config: Dict[str, Any], path: str) -> Any:
+def _config_value(config: dict[str, Any], path: str) -> Any:
     return get_nested_value(config, path, _CONFIG_MISSING)
 
 
 def _config_value_is_default_or_missing(
-    config: Dict[str, Any], baseline_config: Dict[str, Any], path: str
+    config: dict[str, Any], baseline_config: dict[str, Any], path: str
 ) -> bool:
     current = _config_value(config, path)
     if current is _CONFIG_MISSING:
@@ -385,7 +386,7 @@ def _config_value_is_default_or_missing(
 
 
 def _plugin_value_follows_source_or_missing(
-    config: Dict[str, Any], plugin_path: str, source_path: str
+    config: dict[str, Any], plugin_path: str, source_path: str
 ) -> bool:
     plugin_value = _config_value(config, plugin_path)
     if plugin_value is _CONFIG_MISSING:
@@ -471,7 +472,7 @@ def _game_or_private_plugin_config_was_explicit(
 
 
 def _apply_single_lowmem_gpu_overrides(
-    args: argparse.Namespace, game_config: Optional[Dict[str, Any]]
+    args: argparse.Namespace, game_config: dict[str, Any] | None
 ) -> None:
     print("Adjusting configuration for a single low-memory GPU environment...")
     args.cache_size = 0
@@ -696,7 +697,7 @@ def _slugify_label(value: str) -> str:
     return cleaned or "variant"
 
 
-def _parse_int_tuple(value: Any, length: int) -> Optional[Tuple[int, ...]]:
+def _parse_int_tuple(value: Any, length: int) -> tuple[int, ...] | None:
     if value is None:
         return None
     if isinstance(value, (list, tuple)) and len(value) == length:
@@ -708,17 +709,17 @@ def _parse_int_tuple(value: Any, length: int) -> Optional[Tuple[int, ...]]:
     return None
 
 
-def _parse_float(value: Any) -> Optional[float]:
+def _parse_float(value: Any) -> float | None:
     if value is None:
         return None
     try:
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return None
 
 
-def _flatten_config_for_label(config: Dict[str, Any], prefix: str = "") -> List[Tuple[str, Any]]:
-    items: List[Tuple[str, Any]] = []
+def _flatten_config_for_label(config: dict[str, Any], prefix: str = "") -> list[tuple[str, Any]]:
+    items: list[tuple[str, Any]] = []
     for key, value in (config or {}).items():
         path = f"{prefix}.{key}" if prefix else str(key)
         if isinstance(value, dict):
@@ -728,7 +729,7 @@ def _flatten_config_for_label(config: Dict[str, Any], prefix: str = "") -> List[
     return items
 
 
-def _normalize_experiment_mode(mode: Optional[str]) -> str:
+def _normalize_experiment_mode(mode: str | None) -> str:
     if not mode:
         return "concat"
     mode_key = str(mode).strip().lower()
@@ -737,8 +738,8 @@ def _normalize_experiment_mode(mode: Optional[str]) -> str:
     return "concat"
 
 
-def _build_overlay_cfg_from_args(args: argparse.Namespace) -> Dict[str, Any]:
-    overlay_cfg: Dict[str, Any] = {}
+def _build_overlay_cfg_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    overlay_cfg: dict[str, Any] = {}
     if not args.overlay_text:
         return overlay_cfg
     overlay_cfg["overlay_text"] = args.overlay_text
@@ -758,7 +759,7 @@ def _build_overlay_cfg_from_args(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def _enable_load_tracking_plugin(
-    game_config: Dict[str, Any],
+    game_config: dict[str, Any],
     prefer_detector: bool = True,
     disable_detector: bool = False,
 ) -> None:
@@ -777,7 +778,11 @@ def _enable_load_tracking_plugin(
         depends = ["image_prep"]
     if depends:
         load_tracking["depends"] = depends
-    load_tracking.setdefault("params", {})
+    load_params = load_tracking.setdefault("params", {})
+    for setting, producer in (("load_jerseys", "jersey_numbers"), ("load_actions", "actions")):
+        load_params[setting] = not (
+            isinstance(plugins.get(producer), dict) and plugins[producer].get("enabled", True)
+        )
     plugins["load_tracking"] = load_tracking
 
     tracker = plugins.get("tracker")
@@ -788,7 +793,10 @@ def _enable_load_tracking_plugin(
     save_tracking = plugins.get("save_tracking")
     if isinstance(save_tracking, dict):
         save_tracking["enabled"] = True
-        save_tracking["depends"] = ["load_tracking"]
+        save_tracking["depends"] = [
+            "load_tracking" if name == "tracker" else name
+            for name in save_tracking.get("depends", ["tracker"])
+        ]
         plugins["save_tracking"] = save_tracking
 
     save_detections = plugins.get("save_detections")
@@ -800,21 +808,50 @@ def _enable_load_tracking_plugin(
         for key in (
             "detector",
             "detector_factory",
-            "detector_join",
             "save_detections",
-            "ice_boundaries_join",
             "ice_boundaries",
+            "player_reid",
         ):
             plugin = plugins.get(key)
             if isinstance(plugin, dict):
                 plugin["enabled"] = False
                 plugins[key] = plugin
+        # Every consumer must receive the replay branch, including threaded
+        # team/pose joins that otherwise see the disabled tracker's empty output.
+        for key, plugin in plugins.items():
+            if key != "load_tracking" and isinstance(plugin, dict):
+                plugin["depends"] = list(
+                    dict.fromkeys(
+                        "load_tracking" if dependency == "tracker" else dependency
+                        for dependency in plugin.get("depends", [])
+                    )
+                )
+                if str(plugin.get("class", "")).endswith(".JoinPlugin"):
+                    params = plugin.get("params") or {}
+                    if "required_plugins" in params:
+                        params["required_plugins"] = list(
+                            dict.fromkeys(
+                                "load_tracking" if name == "tracker" else name
+                                for name in params["required_plugins"]
+                            )
+                        )
+        set_nested_value(game_config, "pipeline.tracker.reid-enable", False)
 
     camera_controller = plugins.get("camera_controller")
     if isinstance(camera_controller, dict):
-        camera_controller["depends"] = ["load_tracking"]
+        camera_dependencies = list(camera_controller.get("depends", []))
+        if camera_dependencies == ["replay_camera_join"]:
+            camera_dependencies = list(plugins["replay_camera_join"]["depends"])
+        camera_dependencies.append("load_tracking")
         if isinstance(plugins.get("ice_config"), dict):
-            camera_controller["depends"].append("ice_config")
+            camera_dependencies.append("ice_config")
+        camera_dependencies = list(dict.fromkeys(camera_dependencies))
+        plugins["replay_camera_join"] = {
+            "class": "hmlib.aspen.plugins.join_plugin.JoinPlugin",
+            "depends": camera_dependencies,
+            "params": {"required_plugins": camera_dependencies},
+        }
+        camera_controller["depends"] = ["replay_camera_join"]
         plugins["camera_controller"] = camera_controller
 
     aspen["plugins"] = plugins
@@ -822,7 +859,7 @@ def _enable_load_tracking_plugin(
 
 
 def _configure_play_tracker_cluster_cache(
-    game_config: Dict[str, Any], centroids_path: Optional[str], save_centroids: bool = True
+    game_config: dict[str, Any], centroids_path: str | None, save_centroids: bool = True
 ) -> None:
     if not centroids_path:
         return
@@ -840,7 +877,7 @@ def _configure_play_tracker_cluster_cache(
     game_config["aspen"] = aspen
 
 
-def _inject_overlay_text(video_out_pipeline: Any, overlay_cfg: Dict[str, Any]) -> Any:
+def _inject_overlay_text(video_out_pipeline: Any, overlay_cfg: dict[str, Any]) -> Any:
     if not overlay_cfg or not overlay_cfg.get("overlay_text"):
         return video_out_pipeline
     if not isinstance(video_out_pipeline, list):
@@ -859,14 +896,14 @@ def _inject_overlay_text(video_out_pipeline: Any, overlay_cfg: Dict[str, Any]) -
 
 
 def _parse_experiment_overlay_spec(
-    overlay_spec: Optional[Dict[str, Any]],
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    overlay_spec: dict[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     if not overlay_spec:
         return {}, {"show_params": True, "prefix": None}
     if overlay_spec.get("enabled") is False:
         return {}, {"show_params": False, "prefix": None}
-    overlay_cfg: Dict[str, Any] = {}
-    label_cfg: Dict[str, Any] = {
+    overlay_cfg: dict[str, Any] = {}
+    label_cfg: dict[str, Any] = {
         "show_params": overlay_spec.get("show_params", True),
         "prefix": overlay_spec.get("prefix"),
     }
@@ -890,13 +927,13 @@ def _parse_experiment_overlay_spec(
 
 def _build_variant_label_text(
     name: str,
-    variant_cfg: Optional[Dict[str, Any]],
-    label_cfg: Dict[str, Any],
-    explicit_text: Optional[str] = None,
+    variant_cfg: dict[str, Any] | None,
+    label_cfg: dict[str, Any],
+    explicit_text: str | None = None,
 ) -> str:
     if explicit_text:
         return str(explicit_text)
-    lines: List[str] = []
+    lines: list[str] = []
     prefix = label_cfg.get("prefix")
     if prefix is not None:
         lines.append(f"{prefix}{name}")
@@ -908,7 +945,7 @@ def _build_variant_label_text(
     return "\n".join(lines)
 
 
-def _apply_clip_cfg(args: argparse.Namespace, clip_cfg: Optional[Dict[str, Any]]) -> None:
+def _apply_clip_cfg(args: argparse.Namespace, clip_cfg: dict[str, Any] | None) -> None:
     if not clip_cfg:
         return
     start_time = clip_cfg.get("start_time") or clip_cfg.get("start_frame_time")
@@ -923,7 +960,7 @@ def _apply_clip_cfg(args: argparse.Namespace, clip_cfg: Optional[Dict[str, Any]]
         args.max_frames = int(clip_cfg["max_frames"])
 
 
-def _resolve_base_output_path(game_config: Dict[str, Any], work_dir: str) -> str:
+def _resolve_base_output_path(game_config: dict[str, Any], work_dir: str) -> str:
     out_path = get_nested_value(
         game_config, "aspen.plugins.video_out.params.output_video_path", default_value=None
     )
@@ -955,18 +992,32 @@ def _with_audio_output_path(path: str) -> str:
 
 def _resolve_mux_audio_source(
     input_av_files: Any,
-) -> Tuple[str, Optional[Any]]:
+    *,
+    frame_offsets: tuple[float, float] | None = None,
+    single_playlist: bool = False,
+    start_frame: int = 0,
+    start_seconds: float | None = None,
+    work_dir: Path | None = None,
+    stream: int = 0,
+) -> tuple[str | None, Any | None, float]:
     """Select an audio source file suitable for ffmpeg muxing.
 
-    Returns (audio_source_path, temp_audio_file_handle). The temp handle must
-    be kept alive until muxing completes if present.
+    Returns (audio_source_path, temporary_directory, timeline_offset_seconds).
+    The directory must be kept alive until muxing completes if present. The
+    offset uses the selected original video's rate, even when concatenation
+    produces an audio-only file or the recording uses a different output rate.
     """
-    from hmlib.audio import concatenate_audio
-    from hmlib.stitching.synchronize import synchronize_by_audio
+    import tempfile
 
-    temp_audio_file = None
-    audio_source = None
-    if isinstance(input_av_files, dict) or (
+    from hmlib.stitching.synchronize import synchronize_by_audio
+    from hmlib.ui.output_audio import prepare_chapter_audio
+
+    source_frame_offset = 0
+    if single_playlist:
+        if not isinstance(input_av_files, list) or not input_av_files:
+            raise ValueError("A single-source audio playlist must contain at least one chapter")
+        chosen = [str(path) for path in input_av_files]
+    elif isinstance(input_av_files, dict) or (
         isinstance(input_av_files, list) and len(input_av_files) == 2
     ):
         if isinstance(input_av_files, dict):
@@ -982,34 +1033,40 @@ def _resolve_mux_audio_source(
             left_sync = left_files[0]
             right_sync = right_files[0]
 
-        lfo, rfo = synchronize_by_audio(left_sync, right_sync)
-        if lfo == 0:
-            chosen = left_files
-        elif rfo == 0:
-            chosen = right_files
-        else:
-            raise RuntimeError(f"Expected one frame offset to be zero; got {lfo=} {rfo=}.")
-
-        if len(chosen) > 1:
-            temp_audio_file = concatenate_audio(chosen)
-            if temp_audio_file is None:
-                raise RuntimeError("Failed to concatenate audio for muxing.")
-            audio_source = temp_audio_file.name
-        else:
-            audio_source = chosen[0]
+        lfo, rfo = (
+            frame_offsets
+            if frame_offsets is not None
+            else synchronize_by_audio(left_sync, right_sync)
+        )
+        if lfo < 0 or rfo < 0:
+            raise ValueError(f"Audio synchronization offsets must be nonnegative: {lfo=}, {rfo=}.")
+        chosen, source_frame_offset = (left_files, lfo) if lfo <= rfo else (right_files, rfo)
     else:
         if isinstance(input_av_files, list):
             if len(input_av_files) != 1:
                 raise ValueError(
                     f"Expected a single input AV file when not stitching; got {len(input_av_files)}."
                 )
-            audio_source = str(input_av_files[0])
+            chosen = [str(input_av_files[0])]
         else:
-            audio_source = str(input_av_files)
+            chosen = [str(input_av_files)]
 
-    if not audio_source:
+    if not chosen[0]:
         raise RuntimeError("Could not resolve an audio source for muxing.")
-    return str(audio_source), temp_audio_file
+    original_video = chosen[0]
+    offset_seconds = 0.0
+    if source_frame_offset or start_frame or start_seconds:
+        from hmlib.video.ffmpeg import BasicVideoInfo
+
+        source_fps = float(BasicVideoInfo(original_video).fps)
+        if not math.isfinite(source_fps) or source_fps <= 0:
+            raise ValueError(f"Cannot align audio: invalid source frame rate {source_fps}")
+        playback_start = start_frame / source_fps if start_seconds is None else start_seconds
+        offset_seconds = -(source_frame_offset / source_fps + playback_start)
+    audio_source, temporary = prepare_chapter_audio(
+        [Path(path) for path in chosen], work_dir or Path(tempfile.gettempdir()), stream=stream
+    )
+    return audio_source, temporary, offset_seconds
 
 
 def _ensure_three_channel(frame: torch.Tensor) -> torch.Tensor:
@@ -1054,8 +1111,8 @@ def _resize_letterbox(frame: torch.Tensor, target_w: int, target_h: int) -> torc
     if h == target_h and w == target_w:
         return frame
     scale = min(float(target_w) / float(w), float(target_h) / float(h))
-    new_w = max(1, int(round(w * scale)))
-    new_h = max(1, int(round(h * scale)))
+    new_w = max(1, round(w * scale))
+    new_h = max(1, round(h * scale))
     resized = resize_image(frame, new_width=new_w, new_height=new_h)
     if resized.ndim == 3 and resized.shape[0] in (1, 3, 4):
         resized = make_channels_last(resized)
@@ -1080,10 +1137,10 @@ def _default_codec_for_output(path: str) -> str:
 
 
 def _combine_videos_concat(
-    video_paths: List[str],
+    video_paths: list[str],
     output_path: str,
-    codec: Optional[str],
-    bit_rate: Optional[int],
+    codec: str | None,
+    bit_rate: int | None,
 ) -> None:
     from hmlib.video.ffmpeg import BasicVideoInfo
     from hmlib.video.video_stream import VideoStreamReader, create_output_video_stream
@@ -1126,14 +1183,14 @@ def _combine_videos_concat(
 
 
 def _combine_videos_tile(
-    video_paths: List[str],
+    video_paths: list[str],
     output_path: str,
-    codec: Optional[str],
-    bit_rate: Optional[int],
+    codec: str | None,
+    bit_rate: int | None,
     rows: int,
     cols: int,
     padding: int = 0,
-    background: Tuple[int, int, int] = (0, 0, 0),
+    background: tuple[int, int, int] = (0, 0, 0),
 ) -> None:
     from hmlib.video.ffmpeg import BasicVideoInfo
     from hmlib.video.video_stream import VideoStreamReader, create_output_video_stream
@@ -1170,7 +1227,7 @@ def _combine_videos_tile(
         while True:
             if all(done):
                 break
-            frames: List[Optional[torch.Tensor]] = []
+            frames: list[torch.Tensor | None] = []
             any_frame = False
             for idx, it in enumerate(iters):
                 if done[idx]:
@@ -1206,7 +1263,7 @@ def _combine_videos_tile(
 def _run_experiment(
     args: argparse.Namespace,
     parser: argparse.ArgumentParser,
-    base_game_config: Dict[str, Any],
+    base_game_config: dict[str, Any],
 ) -> int:
     if not args.experiment_config:
         raise ValueError("experiment_config path missing")
@@ -1237,7 +1294,7 @@ def _run_experiment(
     reuse_tracking = False
     skip_detector = True
     reuse_clusters = False
-    cluster_centroids_path: Optional[str] = None
+    cluster_centroids_path: str | None = None
     if isinstance(reuse_tracking_cfg, dict):
         reuse_tracking = bool(reuse_tracking_cfg.get("enabled", True))
         skip_detector = bool(reuse_tracking_cfg.get("skip_detector", True))
@@ -1263,11 +1320,11 @@ def _run_experiment(
         exp_yaml_path = os.path.join(exp_dir, f"{exp_name}.yaml")
         with open(exp_yaml_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(spec, f, sort_keys=False)
-    except Exception:
-        pass
+    except (OSError, yaml.YAMLError) as error:
+        raise RuntimeError(f"Could not save experiment specification in {exp_dir}") from error
 
-    variant_outputs: List[str] = []
-    first_tracking_data: Optional[str] = None
+    variant_outputs: list[str] = []
+    first_tracking_data: str | None = None
 
     for idx, variant in enumerate(variants):
         if not isinstance(variant, dict):
@@ -1427,7 +1484,7 @@ def set_torch_multiprocessing_use_filesystem():
 
 
 def to_32bit_mul(val):
-    return int((val + 31)) & ~31
+    return int(val + 31) & ~31
 
 
 MAP_ARGS_TO_YAML = {
@@ -1435,7 +1492,7 @@ MAP_ARGS_TO_YAML = {
 }
 
 
-def update_from_args(args, arg_name, config, noset_value: any = None):
+def update_from_args(args, arg_name, config, noset_value: any | None = None):
     if not hasattr(args, arg_name):
         return
     set_nested_value(
@@ -1474,35 +1531,55 @@ def is_stitching(input_video: str) -> bool:
     return len(input_video_files) == 2 or os.path.isdir(input_video)
 
 
-class _StitchRotationController:
-    def __init__(self, game_config: Optional[Dict[str, Any]] = None) -> None:
-        self._config = game_config
-        self._value: Optional[float] = None
+def _shared_playback_fps(left_fps: float, right_fps: float) -> float:
+    from hmlib.ui.hstream_runtime import shared_playback_fps
 
-    def get_post_stitch_rotate_degrees(self) -> Optional[float]:
+    return shared_playback_fps(left_fps, right_fps)
+
+
+def _stitching_input_directory(input_files: list[str], game_directory, native_calibration) -> str:
+    """Resolve storage ownership separately from the locations of source media."""
+    if native_calibration is not None:
+        if not game_directory:
+            raise ValueError("Shared native calibration requires the selected game directory")
+        return str(Path(game_directory).resolve())
+    if len(input_files) == 2:
+        parents = {Path(path).resolve().parent for path in input_files}
+        if len(parents) != 1:
+            raise ValueError("Python calibration requires both inputs in one directory")
+        return str(parents.pop())
+    return input_files[0]
+
+
+class _StitchRotationController:
+    def __init__(self, game_config: dict[str, Any] | None = None) -> None:
+        self._config = game_config
+        self._value: float | None = None
+
+    def get_post_stitch_rotate_degrees(self) -> float | None:
         if isinstance(self._config, dict):
             try:
                 val = get_nested_value(self._config, "stitching.post_stitch_rotate_degrees", None)
                 if val is not None:
                     return float(val)
-            except Exception:
-                pass
+            except (TypeError, ValueError) as error:
+                raise ValueError("Invalid saved stitching rotation") from error
         return self._value
 
-    def set_post_stitch_rotate_degrees(self, degrees: Optional[float]) -> None:
+    def set_post_stitch_rotate_degrees(self, degrees: float | None) -> None:
         self._value = degrees
         if isinstance(self._config, dict):
             try:
                 set_nested_value(self._config, "stitching.post_stitch_rotate_degrees", degrees)
-            except Exception:
-                pass
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("Could not update stitching rotation") from error
 
 
 def _main(args, num_gpu):
     from mmcv.transforms import Compose
 
-    import hmlib.hm_transforms  # noqa: F401
-    import hmlib.tracking_utils.segm_boundaries  # noqa: F401
+    import hmlib.hm_transforms
+    import hmlib.tracking_utils.segm_boundaries
     import hmlib.transforms  # noqa: F401
     from hmlib.camera.camera import should_unsharp_mask_camera
     from hmlib.datasets.dataframe import find_latest_dataframe_file
@@ -1520,7 +1597,7 @@ def _main(args, num_gpu):
     dataloader = None
     postprocessor = None
     mux_audio_temp_file = None
-    source_video_paths: List[str] = []
+    source_video_paths: list[str] = []
     opts = copy_opts(src=args, dest=argparse.Namespace(), parser=hm_opts.parser())
     try:
 
@@ -1536,6 +1613,8 @@ def _main(args, num_gpu):
 
         if args.output_fps is None:
             args.output_fps = get_nested_value(game_config, "camera.output-fps")
+        if args.output_fps is not None:
+            set_nested_value(game_config, "video_out.output_fps", args.output_fps)
 
         if args.lfo is None and args.rfo is None:
             offsets = get_nested_value(game_config, "stitching.offsets")
@@ -1590,15 +1669,20 @@ def _main(args, num_gpu):
                         args.input_video = game_video_dir
 
         work_dir_id = args.game_id or "input-video"
-        results_folder = os.path.join(".", "output_workdirs", work_dir_id)
+        results_folder = os.environ.get("HM_SHARED_WORK_DIR") or os.path.join(
+            ".", "output_workdirs", work_dir_id
+        )
         os.makedirs(results_folder, exist_ok=True)
         args.work_dir = results_folder
         # The rink plugin snapshots the mask it actually loads this run.
         # Clear the previous run's snapshot before any pipeline work starts.
         Path(results_folder, "rink_mask_0.png").unlink(missing_ok=True)
         try:
-            args.game_dir = get_game_dir(args.game_id, assert_exists=False)
-        except Exception:
+            args.game_dir = (
+                get_game_dir(args.game_id, assert_exists=False) if args.game_id else None
+            )
+        except (OSError, ValueError) as error:
+            logger.warning("Cannot resolve game directory: %s", error)
             args.game_dir = None
 
         tracking_data_path = getattr(
@@ -1622,9 +1706,10 @@ def _main(args, num_gpu):
 
             default_prof_dir = os.path.join(results_folder, "profiler")
             profiler = build_profiler_from_args(args, save_dir_fallback=default_prof_dir)
-        except Exception:
+        except Exception:  # noqa: BLE001 - Optional profiler failures must remain visible.
+            logger.exception("Could not initialize the requested profiler")
             profiler = None
-        setattr(args, "profiler", profiler)
+        args.profiler = profiler
 
         using_precalculated_tracking = bool(tracking_data_path)
         using_precalculated_detections = bool(detection_data_path)
@@ -1637,11 +1722,11 @@ def _main(args, num_gpu):
 
         actual_device_count = torch.cuda.device_count()
         if not actual_device_count:
-            raise Exception("At leats one GPU is required for this application")
+            raise RuntimeError("At least one GPU is required for this application")
         while len(args.gpus) > actual_device_count:
             del args.gpus[-1]
 
-        gpus, is_single_lowmem_gpu, gpu_allocator = select_gpus(
+        gpus, is_single_lowmem_gpu, _gpu_allocator = select_gpus(
             allowed_gpus=args.gpus,
             is_stitching=is_stitching(args.input_video),
             # is_multipose=args.multi_pose,
@@ -1651,7 +1736,10 @@ def _main(args, num_gpu):
         # Expose per-role devices to downstream components (Aspen plugins, postprocessor)
         args.camera_device = gpus.get("camera")
         args.encoder_device = gpus.get("encoder")
-        if is_single_lowmem_gpu:
+        memory_profile = get_nested_value(game_config, "hm_ui.run.memory_profile", "automatic")
+        if memory_profile not in {"automatic", "normal", "low"}:
+            raise ValueError(f"Unknown GPU memory profile: {memory_profile}")
+        if memory_profile == "low" or (memory_profile == "automatic" and is_single_lowmem_gpu):
             _apply_single_lowmem_gpu_overrides(args, game_config)
 
         # This would be way too slow on CPU
@@ -1856,10 +1944,17 @@ def _main(args, num_gpu):
                 args.aspen["plugins"] = trunks_cfg
             except Exception:
                 traceback.print_exc()
+                raise
 
         from hmlib.models.detector_selection import configure_detector_selection
 
         configure_detector_selection(args, game_config)
+        if args.input_tracking_data:
+            _enable_load_tracking_plugin(game_config, prefer_detector=False, disable_detector=True)
+            logger.info("Replaying saved tracks from %s", args.input_tracking_data)
+        from hmlib.aspen.plugins.reid_plugin import configure_reid
+
+        configure_reid(game_config, Path(args.game_dir or results_folder))
 
         if args.tracking:
             model = None  # Built by Aspen ModelFactoryPlugin
@@ -1884,12 +1979,12 @@ def _main(args, num_gpu):
                     update_pipeline_item(
                         pipeline,
                         "IceRinkSegmConfig",
-                        dict(
-                            game_id=args.game_id,
-                            ice_rink_inference_scale=getattr(
+                        {
+                            "game_id": args.game_id,
+                            "ice_rink_inference_scale": getattr(
                                 args, "ice_rink_inference_scale", None
                             ),
-                        ),
+                        },
                     )
                 # Apply clip box if present
                 orig_clip_box = (
@@ -1954,12 +2049,10 @@ def _main(args, num_gpu):
             if hasattr(args, "game_config") and isinstance(args.game_config, dict):
                 args.game_config["initial_args"] = args.initial_args
 
-        if args.max_frames or args.max_time:
-            if not args.no_audio:
-                print("Disabling audio extraction due to max-frames/max-time limit")
-                args.no_audio = True
-
         postprocessor = None
+        native_calibration = None
+        synchronized_audio_offsets = None
+        shared_source_chapters = None
         if args.input_video:
             input_video_files = args.input_video.split(",")
             source_video_paths = input_video_files
@@ -1978,20 +2071,37 @@ def _main(args, num_gpu):
                     )
                 project_file_name = "hm_project.pto"
 
+                from hmlib.stitching.native_calibration import shared_native_calibration
+
+                native_calibration = shared_native_calibration()
+                dir_name = _stitching_input_directory(
+                    input_video_files, args.game_dir, native_calibration
+                )
+
                 game_videos = {}
 
                 if len(input_video_files) == 2:
-                    vl = input_video_files[0]
-                    vr = input_video_files[1]
-                    dir_name = os.path.dirname(vl)
-                    assert dir_name == os.path.dirname(vr)
+                    vl = str(Path(input_video_files[0]).resolve())
+                    vr = str(Path(input_video_files[1]).resolve())
+                    game_videos = {"left": [vl], "right": [vr]}
                 elif os.path.isdir(args.input_video):
-                    game_videos = configure_game_videos(
-                        game_id=args.game_id,
-                        inference_scale=getattr(args, "ice_rink_inference_scale", None),
-                    )
-                    dir_name = args.input_video
-                    assert dir_name
+                    if native_calibration is not None:
+                        game_videos = {
+                            role: [
+                                str(
+                                    Path(path)
+                                    if Path(path).is_absolute()
+                                    else Path(dir_name) / path
+                                )
+                                for path in native_calibration.config["game"]["videos"][role]
+                            ]
+                            for role in ("left", "right")
+                        }
+                    else:
+                        game_videos = configure_game_videos(
+                            game_id=args.game_id,
+                            inference_scale=args.ice_rink_inference_scale,
+                        )
                     input_video_files = game_videos
 
                 source_video_paths = list(game_videos["left"]) + list(game_videos["right"])
@@ -2009,7 +2119,8 @@ def _main(args, num_gpu):
                             stitch_time_is_zero = (
                                 time_to_frame(time_str=stitch_frame_time, fps=left_vid.fps) <= 0
                             )
-                        except Exception:
+                        except (TypeError, ValueError) as error:
+                            logger.warning("Cannot interpret stitch reference time: %s", error)
                             stitch_time_is_zero = False
                     if stitch_time_is_zero:
                         stitch_frame_time = args.start_frame_time
@@ -2019,30 +2130,40 @@ def _main(args, num_gpu):
                         time_str=stitch_frame_time, fps=left_vid.fps
                     )
 
+                playback_fps = (
+                    _shared_playback_fps(left_vid.fps, right_vid.fps)
+                    if native_calibration is not None
+                    else left_vid.fps
+                )
                 assert not args.start_frame or not args.start_frame_time
                 if not args.start_frame and args.start_frame_time:
                     args.start_frame = time_to_frame(
-                        time_str=args.start_frame_time, fps=left_vid.fps
+                        time_str=args.start_frame_time, fps=playback_fps
                     )
 
                 assert not args.max_frames or not args.max_time
                 if not args.max_frames and args.max_time:
-                    args.max_frames = time_to_frame(time_str=args.max_time, fps=left_vid.fps)
+                    args.max_frames = time_to_frame(time_str=args.max_time, fps=playback_fps)
 
-                pto_project_file, lfo, rfo = configure_video_stitching(
-                    dir_name=dir_name,
-                    video_left=str(game_videos["left"][0]),
-                    video_right=str(game_videos["right"][0]),
-                    max_control_points=args.max_control_points,
-                    project_file_name=project_file_name,
-                    left_frame_offset=args.lfo,
-                    right_frame_offset=args.rfo,
-                    base_frame_offset=stitch_frame_number,
-                    game_id=args.game_id,
-                    stitch_frame_time=stitch_frame_time,
-                    ignore_private_config=bool(args.ignore_private_config),
-                    game_config=args.game_config,
-                )
+                if native_calibration is not None:
+                    native_calibration.verify_sources(Path(dir_name), game_videos)
+                    pto_project_file = native_calibration.directory / "hm_project.pto"
+                    lfo, rfo = native_calibration.frame_offsets
+                else:
+                    pto_project_file, lfo, rfo = configure_video_stitching(
+                        dir_name=dir_name,
+                        video_left=str(game_videos["left"][0]),
+                        video_right=str(game_videos["right"][0]),
+                        max_control_points=args.max_control_points,
+                        project_file_name=project_file_name,
+                        left_frame_offset=args.lfo,
+                        right_frame_offset=args.rfo,
+                        base_frame_offset=stitch_frame_number,
+                        game_id=args.game_id,
+                        stitch_frame_time=stitch_frame_time,
+                        ignore_private_config=bool(args.ignore_private_config),
+                        game_config=args.game_config,
+                    )
                 stitch_videos = {
                     "left": {
                         "files": game_videos["left"],
@@ -2053,6 +2174,7 @@ def _main(args, num_gpu):
                         "frame_offset": rfo,
                     },
                 }
+                synchronized_audio_offsets = (lfo, rfo)
 
                 def _set_runtime_arg(name: str, value: Any) -> None:
                     setattr(args, name, value)
@@ -2089,7 +2211,8 @@ def _main(args, num_gpu):
                         game_id=game_id,
                         max_frames=args.max_frames,
                         batch_size=args.batch_size,
-                        start_frame_number=args.start_frame + lfo,
+                        start_frame_number=args.start_frame + (0 if native_calibration else lfo),
+                        source_frame_offset=lfo if native_calibration else 0,
                         original_image_only=True,
                         dtype=torch.uint8,
                         device=gpus["stitching"],
@@ -2107,7 +2230,8 @@ def _main(args, num_gpu):
                         game_id=game_id,
                         max_frames=args.max_frames,
                         batch_size=args.batch_size,
-                        start_frame_number=args.start_frame + rfo,
+                        start_frame_number=args.start_frame + (0 if native_calibration else rfo),
+                        source_frame_offset=rfo if native_calibration else 0,
                         original_image_only=True,
                         dtype=torch.uint8,
                         device=gpus["stitching"],
@@ -2204,11 +2328,34 @@ def _main(args, num_gpu):
                     )
                     try:
                         mot_dataloader.set_profiler(getattr(args, "profiler", None))
-                    except Exception:
-                        pass
+                    except Exception:  # noqa: BLE001 - Optional third-party profiler boundary.
+                        logger.exception("Could not attach the input profiler")
                     dataloader.append_dataset("pano", mot_dataloader)
             else:
                 assert len(input_video_files) == 1
+                if os.environ.get("HM_SHARED_SOURCE_CHAPTERS"):
+                    import json
+
+                    shared_source_chapters = json.loads(os.environ["HM_SHARED_SOURCE_CHAPTERS"])
+                    if (
+                        not isinstance(shared_source_chapters, list)
+                        or not shared_source_chapters
+                        or any(
+                            not isinstance(path, str) or not path for path in shared_source_chapters
+                        )
+                    ):
+                        raise ValueError("Shared source chapters must be a nonempty list of paths")
+                    if (
+                        Path(shared_source_chapters[0]).resolve()
+                        != Path(input_video_files[0]).resolve()
+                    ):
+                        raise ValueError(
+                            "Shared source chapters must start with the selected input video"
+                        )
+                    if any(not Path(path).is_file() for path in shared_source_chapters):
+                        raise ValueError("A shared source recording chapter is missing")
+                    input_video_files = shared_source_chapters
+                    source_video_paths = shared_source_chapters
                 if isinstance(aspen_cfg_for_pipeline, dict):
                     stitching_cfg = aspen_cfg_for_pipeline.get("stitching")
                     if isinstance(stitching_cfg, dict):
@@ -2224,17 +2371,21 @@ def _main(args, num_gpu):
                     dir_name = Path(input_video_files[0]).parent
                 assert not args.start_frame or not args.start_frame_time
                 if not args.start_frame and args.start_frame_time:
-                    vid_info = BasicVideoInfo(input_video_files[0])
+                    vid_info = BasicVideoInfo(",".join(input_video_files))
                     args.start_frame = time_to_frame(
                         time_str=args.start_frame_time, fps=vid_info.fps
                     )
 
                 assert not args.max_frames or not args.max_time
                 if not args.max_frames and args.max_time:
-                    vid_info = BasicVideoInfo(input_video_files[0])
+                    vid_info = BasicVideoInfo(",".join(input_video_files))
                     args.max_frames = time_to_frame(time_str=args.max_time, fps=vid_info.fps)
                 pano_dataloader = MOTLoadVideoWithOrig(
-                    path=input_video_files[0],
+                    path=(
+                        input_video_files
+                        if shared_source_chapters is not None
+                        else input_video_files[0]
+                    ),
                     start_frame_number=args.start_frame,
                     batch_size=args.batch_size,
                     max_frames=args.max_frames,
@@ -2257,13 +2408,13 @@ def _main(args, num_gpu):
                 )
                 try:
                     pano_dataloader.set_profiler(getattr(args, "profiler", None))
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 - Optional third-party profiler boundary.
+                    logger.exception("Could not attach the panorama profiler")
                 dataloader.append_dataset("pano", pano_dataloader)
 
             if args.end_zones:
                 # Try far_left and far_right videos if they exist
-                other_videos: List[Tuple[str, str]] = [
+                other_videos: list[tuple[str, str]] = [
                     ("far_left", os.path.join(dir_name, "far_left.mp4")),
                     ("far_right", os.path.join(dir_name, "far_right.mp4")),
                 ]
@@ -2285,8 +2436,8 @@ def _main(args, num_gpu):
                         )
                     try:
                         extra_dataloader.set_profiler(getattr(args, "profiler", None))
-                    except Exception:
-                        pass
+                    except Exception:  # noqa: BLE001 - Optional third-party profiler boundary.
+                        logger.exception("Could not attach the experiment profiler")
                     dataloader.append_dataset(vid_name, extra_dataloader)
                     ez_count += 1
                 if not ez_count:
@@ -2325,34 +2476,48 @@ def _main(args, num_gpu):
                 output_video_path = str(
                     add_prefix_to_filename(output_video_path, str(output_label))
                 )
-            except Exception:
-                pass
+            except (OSError, TypeError, ValueError) as error:
+                raise ValueError("Could not apply the recording label") from error
         if output_label and args.output_video:
             try:
                 args.output_video = str(
                     add_prefix_to_filename(args.output_video, str(output_label))
                 )
-            except Exception:
-                pass
+            except (OSError, TypeError, ValueError) as error:
+                raise ValueError("Could not apply the requested output label") from error
 
         mux_audio_file = args.mux_audio_file
-        if (
-            (not args.audio_only)
-            and (not is_truncated_run)
-            and (not args.no_audio)
-            and output_video_path
-        ):
+        output_routes = game_config.get("video_out", {})
+        audio_output_requested = bool(output_video_path) or any(
+            output_routes.get(route, False)
+            for route in ("archive_stitched", "archive_program_4k", "show_youtube", "rtsp_enabled")
+        )
+        if (not args.audio_only) and (not args.no_audio) and audio_output_requested:
             if not mux_audio_file:
-                try:
-                    mux_audio_file, mux_audio_temp_file = _resolve_mux_audio_source(
-                        input_video_files
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to resolve mux audio source; continuing without audio."
-                    )
-                    mux_audio_file = None
-            if mux_audio_file:
+                (
+                    mux_audio_file,
+                    mux_audio_temp_file,
+                    source_audio_offset,
+                ) = _resolve_mux_audio_source(
+                    input_video_files,
+                    frame_offsets=synchronized_audio_offsets,
+                    single_playlist=shared_source_chapters is not None,
+                    start_frame=args.start_frame or 0,
+                    start_seconds=(
+                        args.start_frame / dataloader.fps
+                        if native_calibration is not None
+                        else None
+                    ),
+                    work_dir=Path(results_folder),
+                    stream=args.mux_audio_stream,
+                )
+                if mux_audio_file is None:
+                    logger.info("The selected source has no audio stream; recording video only.")
+                else:
+                    args.mux_audio_offset_seconds += source_audio_offset
+                    if mux_audio_temp_file is not None:
+                        args.mux_audio_stream = 0
+            if mux_audio_file and output_video_path:
                 output_video_path = _with_audio_output_path(output_video_path)
 
         args.mux_audio_file = mux_audio_file
@@ -2360,11 +2525,23 @@ def _main(args, num_gpu):
         if output_video_path:
             try:
                 set_nested_value(game_config, "video_out.output_video_path", output_video_path)
-            except Exception:
-                pass
+                # GLOBAL substitution may already have frozen a configured
+                # sink path. Audio muxing and labels resolve the final path
+                # afterwards, so the writer and publisher must both use it.
+                sink = game_config.get("aspen", {}).get("plugins", {}).get("video_out")
+                if isinstance(sink, dict):
+                    sink_params = sink.get("params")
+                    if sink_params is None:
+                        sink_params = {}
+                        sink["params"] = sink_params
+                    sink_params["output_video_path"] = output_video_path
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("Could not set the recording output path") from error
 
         telemetry_path = None
         supplementary_paths = ()
+        recorded_output_paths = None
+        recorded_output_kinds = ()
         if not args.audio_only:
 
             if not args.no_play_tracking:
@@ -2374,7 +2551,7 @@ def _main(args, num_gpu):
                 #
                 video_out_pipeline = None
                 if model is not None and hasattr(model, "cfg"):
-                    video_out_pipeline = getattr(model.cfg, "video_out_pipeline")
+                    video_out_pipeline = model.cfg.video_out_pipeline
                 else:
                     video_out_pipeline = game_config.get("video_out_pipeline")
                     if video_out_pipeline is None and aspen_cfg_for_pipeline:
@@ -2407,6 +2584,9 @@ def _main(args, num_gpu):
             )
             telemetry_path = recording_artifacts.telemetry_path
             supplementary_paths = recording_artifacts.supplementary_paths
+            recorded_output_paths = recording_artifacts.output_paths
+            recorded_output_kinds = recording_artifacts.output_kinds
+            is_truncated_run = is_truncated_run or recording_artifacts.stopped
 
     except Exception as ex:
         print(ex)
@@ -2419,7 +2599,7 @@ def _main(args, num_gpu):
         if dataloader is not None:
             actions.append(("tracking dataloader", dataloader.close))
         if mux_audio_temp_file is not None:
-            actions.append(("temporary mux audio", mux_audio_temp_file.close))
+            actions.append(("temporary mux audio", mux_audio_temp_file.cleanup))
         finalize_resources(actions, primary_error=sys.exc_info()[1])
     if telemetry_path is not None:
         from hmlib.telemetry.recorder import complete_recording
@@ -2444,6 +2624,8 @@ def _main(args, num_gpu):
         game_id=args.game_id,
         telemetry_path=telemetry_path,
         supplementary_paths=supplementary_paths,
+        recorded_output_paths=recorded_output_paths,
+        recorded_output_kinds=recorded_output_kinds,
     )
     logger.info("Completed")
     return telemetry_path
@@ -2451,15 +2633,31 @@ def _main(args, num_gpu):
 
 def _deploy_output_artifacts(
     *,
-    output_video_path: Optional[str],
-    output_video: Optional[str],
+    output_video_path: str | None,
+    output_video: str | None,
     results_folder: str,
-    target_deploy_dir: Optional[str],
-    game_id: Optional[str],
-    telemetry_path: Optional[Path] = None,
-    supplementary_paths: Tuple[Path, ...] = (),
-) -> Optional[Path]:
+    target_deploy_dir: str | None,
+    game_id: str | None,
+    telemetry_path: Path | None = None,
+    supplementary_paths: tuple[Path, ...] = (),
+    recorded_output_paths: tuple[Path, ...] | None = None,
+    recorded_output_kinds: tuple[tuple[Path, str], ...] = (),
+) -> Path | None:
     """Publish a completed run with one suffix for its video, CSVs, and rink mask."""
+    output_kinds = {path.resolve(): kind for path, kind in recorded_output_kinds}
+    if telemetry_path is not None:
+        output_kinds[telemetry_path.resolve()] = "telemetry"
+    if output_video_path:
+        output_kinds.setdefault(Path(output_video_path).resolve(), "program")
+
+    def publish(sources, directory, **kwargs):
+        kinds = {
+            name: output_kinds[Path(path).resolve()]
+            for name, path in sources.items()
+            if Path(path).resolve() in output_kinds
+        }
+        return publish_artifacts(sources, directory, kinds=kinds, **kwargs)
+
     sources = {}
     if target_deploy_dir:
         sources = {
@@ -2480,7 +2678,23 @@ def _deploy_output_artifacts(
         # must never masquerade as companions of the new telemetry generation.
         sources = {path.name: path for path in supplementary_paths}
         sources[database_stem(recorded_game) + ".db"] = Path(telemetry_path)
+    if target_deploy_dir:
+        # All recordings produced by this run share the same publication
+        # version, including when telemetry recording is disabled.
+        for path in supplementary_paths:
+            if path.suffix.lower() in {".mp4", ".mkv", ".mov"}:
+                sources.pop(path.name, None)
+                name = str(add_game_id_prefix_to_filename(path.name, game_id, sep="-"))
+                sources[name] = path
+            else:
+                sources[path.name] = path
     source_video = Path(output_video_path) if output_video_path else None
+    if (
+        source_video is not None
+        and recorded_output_paths is not None
+        and source_video.resolve() not in {path.resolve() for path in recorded_output_paths}
+    ):
+        source_video = None
     if source_video is not None and not source_video.is_file():
         source_video = None
     if source_video is not None and output_video:
@@ -2495,13 +2709,13 @@ def _deploy_output_artifacts(
             )
             video_sources = dict(sources) if same_directory else {}
             video_sources[destination.name] = source_video
-            result = publish_artifacts(
+            result = publish(
                 video_sources,
                 destination.parent,
                 generation_directories=[target_deploy_dir] if target_deploy_dir else (),
             )
             if target_deploy_dir and not same_directory:
-                publish_artifacts(
+                publish(
                     {artifact_name(name, result.suffix): path for name, path in sources.items()},
                     target_deploy_dir,
                     exact=True,
@@ -2519,19 +2733,19 @@ def _deploy_output_artifacts(
         if target_deploy_dir and destination.parent.resolve() == Path(target_deploy_dir).resolve():
             if destination.resolve() != source_video.resolve():
                 csv_sources[destination.name] = source_video
-            publish_artifacts(csv_sources, target_deploy_dir, exact=True)
+            publish(csv_sources, target_deploy_dir, exact=True)
         else:
             if destination.resolve() != source_video.resolve():
-                publish_artifacts({destination.name: source_video}, destination.parent, exact=True)
+                publish({destination.name: source_video}, destination.parent, exact=True)
             if target_deploy_dir:
-                publish_artifacts(csv_sources, target_deploy_dir, exact=True)
+                publish(csv_sources, target_deploy_dir, exact=True)
         return destination
     if target_deploy_dir:
         video_name = None
         if source_video is not None:
             video_name = str(add_game_id_prefix_to_filename(source_video.name, game_id, sep="-"))
             sources[video_name] = source_video
-        result = publish_artifacts(sources, target_deploy_dir)
+        result = publish(sources, target_deploy_dir)
         return result.files.get(video_name)
     return None
 
@@ -2541,7 +2755,14 @@ def setup_logging():
     root_logger.setLevel(20)
 
 
-def main():
+def split_config_paths(items: list[str] | None) -> list[str]:
+    """Flatten repeated/comma-separated --config values in their declared order."""
+    return [
+        part.strip() for item in items or [] if item for part in item.split(",") if part.strip()
+    ]
+
+
+def main() -> int | None:
     setup_logging()
 
     # Prefer CUDA, but don't hard-fail if the runtime isn't detected so CPU-only
@@ -2557,6 +2778,13 @@ def main():
     if args.smoke_test:
         return _run_smoke_test(args)
 
+    from hmlib.ui.desktop import launch_desktop, use_desktop
+
+    if use_desktop(args.camera_ui):
+        return launch_desktop(
+            game_id=args.game_id, module="hmlib.cli.hmtrack", arguments=sys.argv[1:]
+        )
+
     import hmlib.hm_transforms  # noqa: F401 (register custom MMEngine transforms)
 
     if getattr(args, "smoke_test", False):
@@ -2569,32 +2797,57 @@ def main():
         root_dir=args.root_dir,
         ignore_private_config=bool(args.ignore_private_config),
     )
+    from hmlib.ui.runtime_setup import (
+        PIPELINE_PREFERENCES,
+        apply_engine_preferences,
+        apply_pipeline_preferences,
+        saved_pipeline_preferences,
+    )
+
+    saved_pipeline = saved_pipeline_preferences(
+        args.game_id,
+        root_dir=args.root_dir,
+        ignore_private_config=bool(args.ignore_private_config),
+    )
 
     # Merge user-provided YAML configs in order (--config can be repeated).
     # Later files override earlier values.
     from hmlib.config import load_yaml_files_ordered, recursive_update
 
-    def _split_and_strip(items):
-        paths = []
-        if not items:
-            return paths
-        for it in items:
-            if not it:
-                continue
-            parts = [p.strip() for p in str(it).split(",") if p.strip()]
-            paths.extend(parts)
-        return paths
-
-    additional_cfg_paths = _split_and_strip(args.config)
+    additional_cfg_paths = split_config_paths(args.config)
     if not additional_cfg_paths:
         default_aspen = os.path.join(ROOT_DIR, "config", "aspen", "tracking.yaml")
         if os.path.exists(default_aspen):
             additional_cfg_paths.append(default_aspen)
-    if additional_cfg_paths:
-        merged_extra = load_yaml_files_ordered(additional_cfg_paths)
+    # Bazel runfiles link each YAML individually, so its resolved parent may
+    # differ from the directory containing the shipped graph entries.
+    built_in_graphs = {
+        path.resolve() for path in (Path(ROOT_DIR) / "config" / "aspen").glob("*.yaml")
+    }
+    for config_path in additional_cfg_paths:
+        resolved_path = Path(config_path)
+        if not resolved_path.is_absolute() and (Path(ROOT_DIR) / resolved_path).exists():
+            resolved_path = Path(ROOT_DIR) / resolved_path
+        merged_extra = load_yaml_files_ordered([config_path])
         if merged_extra:
             game_config = recursive_update(game_config, merged_extra)
+        if resolved_path.resolve() in built_in_graphs:
+            # Shipped graphs supply execution defaults. Saved operator choices
+            # and preceding custom overlays take precedence over those defaults.
+            apply_pipeline_preferences(game_config, saved_pipeline)
+        else:
+            # User YAML is an explicit override in the declared file order; do
+            # not restore the older private choices over this configuration.
+            explicit_pipeline = merged_extra.get("aspen", {}).get("pipeline", {})
+            saved_pipeline.update(
+                {
+                    key: explicit_pipeline[key]
+                    for key in PIPELINE_PREFERENCES
+                    if key in explicit_pipeline
+                }
+            )
     normalize_runtime_config(game_config)
+    apply_engine_preferences(game_config)
 
     # Apply CLI-driven config overrides before resolving GLOBAL.* references so
     # Aspen plugins see the updated values via GLOBAL.*.
@@ -2614,6 +2867,9 @@ def main():
         config=args.game_config,
         explicit_arg_names=getattr(args, "explicit_arg_names", None),
     )
+    from hmlib.ui.shared_analytics import restore_worker_shared_analytics
+
+    restore_worker_shared_analytics(args.game_config, args.game_id)
     game_config = resolve_global_refs(args.game_config)
     args.game_config = game_config
 
@@ -2655,8 +2911,10 @@ def main():
             out_path = args.py_trace_out
             try:
                 os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-            except Exception:
-                pass
+            except OSError as error:
+                raise RuntimeError(
+                    f"Could not create trace output directory for {out_path}"
+                ) from error
             if out_path.endswith(".txt"):
                 with open(out_path, "w") as f:
                     ps = pstats.Stats(pr, stream=f)
@@ -2674,10 +2932,11 @@ if __name__ == "__main__":
         # without touching full tracker startup.
         if "--smoke-test" not in sys.argv and torch.cuda.is_available():
             with torch.cuda.stream(torch.cuda.Stream(torch.device("cuda"))):
-                main()
+                exit_status = main()
         else:
-            main()
-    except Exception as e:
+            exit_status = main()
+        raise SystemExit(exit_status)
+    except Exception as e:  # noqa: BLE001 - CLI reports errors before a failing exit status.
         print(f"Exception during processing: {e}")
         traceback.print_exc()
         # Debug: list live threads to help diagnose hangs where an error
@@ -2689,8 +2948,8 @@ if __name__ == "__main__":
             for t in threading.enumerate():
                 try:
                     print(f" - {t.name} (daemon={t.daemon})")
-                except Exception:
+                except (AttributeError, RuntimeError):
                     print(f" - {t}")
-        except Exception:
-            pass
+        except (ImportError, RuntimeError, OSError):
+            logger.exception("Could not enumerate live threads after failure")
         raise SystemExit(1)

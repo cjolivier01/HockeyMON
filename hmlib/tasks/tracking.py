@@ -1,10 +1,11 @@
 import contextlib
+import os
 import sys
 import time
 import traceback
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import torch
 
@@ -30,24 +31,26 @@ from hmlib.utils.progress_bar import (
 
 def run_mmtrack(
     model,
-    config: Dict[str, Any],
+    config: dict[str, Any],
     dataloader,
     postprocessor,
-    progress_bar: Optional[ProgressBar] = None,
+    progress_bar: ProgressBar | None = None,
     device: torch.device = None,
     input_cache_size: int = 2,
     fp16: bool = False,
     no_cuda_streams: bool = False,
-    track_mean_mode: Optional[str] = None,
+    track_mean_mode: str | None = None,
     profiler: Any = None,
     pose_inferencer: Any = None,
-    source_video_paths: Optional[List[str]] = None,
+    source_video_paths: list[str] | None = None,
 ):
-    mean_tracker: Optional[MeanTracker] = None
-    aspen_net: Optional[AspenNet] = None
-    work_dir: Optional[str] = None
+    mean_tracker: MeanTracker | None = None
+    aspen_net: AspenNet | None = None
+    work_dir: str | None = None
     telemetry = None
     supplementary_paths = []
+    output_paths = []
+    output_kinds = []
     if config is None:
         config = {}
     try:
@@ -67,7 +70,7 @@ def run_mmtrack(
             # Calculate some dataset stats for our progress display
             #
             batch_size = dataloader.batch_size
-            fps: Optional[float] = getattr(dataloader, "fps", None)
+            fps: float | None = getattr(dataloader, "fps", None)
             total_batches_in_video = len(dataloader)
             total_frames_in_video = batch_size * total_batches_in_video
             number_of_batches_processed = 0
@@ -93,16 +96,16 @@ def run_mmtrack(
                 graph_opt = get_nested_value(config, "aspen.pipeline.display_graph", None)
             display_aspen_graph = bool(graph_opt)
 
-            last_aspen_timing: Optional[Dict[str, Any]] = None
-            last_dataloader_time: Optional[float] = None
-            plugin_names: List[str] = []
-            plugin_display_names: List[str] = []
+            last_aspen_timing: dict[str, Any] | None = None
+            last_dataloader_time: float | None = None
+            plugin_names: list[str] = []
+            plugin_display_names: list[str] = []
 
             def _format_top_timing_summary(
-                timing: Optional[Dict[str, Any]],
-                dataloader_time: Optional[float],
+                timing: dict[str, Any] | None,
+                dataloader_time: float | None,
                 limit: int = 8,
-            ) -> Optional[str]:
+            ) -> str | None:
                 if not timing:
                     return None
                 plugin_times = timing.get("plugins", {})
@@ -113,7 +116,7 @@ def run_mmtrack(
                     total_time += float(dataloader_time)
                 if total_time <= 0.0:
                     return None
-                entries: List[Tuple[str, float]] = []
+                entries: list[tuple[str, float]] = []
                 if dataloader_time is not None and dataloader_time > 0.0:
                     entries.append(("dataloader", float(dataloader_time)))
                 entries.extend((str(name), float(value)) for name, value in plugin_times.items())
@@ -146,7 +149,7 @@ def run_mmtrack(
                     if wraparound_timer is not None:
                         processing_fps = batch_size / max(1e-5, wraparound_timer.average_time)
 
-                        table_map["HMTrack FPS"] = "{:.2f}".format(processing_fps)
+                        table_map["HMTrack FPS"] = f"{processing_fps:.2f}"
                         table_map["Dataset length"] = total_duration_str
                         table_map["Processed"] = convert_seconds_to_hms(
                             duration_processed_in_seconds
@@ -190,7 +193,8 @@ def run_mmtrack(
             if not game_dir and config.get("game_id"):
                 try:
                     game_dir = get_game_dir(config.get("game_id"), assert_exists=False)
-                except Exception:
+                except (OSError, ValueError, TypeError) as error:
+                    logger.warning("Game directory unavailable for tracking metadata: %s", error)
                     game_dir = None
             work_dir = config.get("work_dir") or config.get("results_folder")
             tracking_data_path = (
@@ -219,7 +223,7 @@ def run_mmtrack(
             # using_precalculated_pose = bool(pose_data_path)
 
             # Build AspenNet if a config is provided under config['aspen']
-            aspen_cfg: Optional[Dict[str, Any]] = None
+            aspen_cfg: dict[str, Any] | None = None
             initial_args = config.get("initial_args", {}) or {}
             cfg_aspen = config.get("aspen")
             if isinstance(cfg_aspen, dict):
@@ -254,8 +258,11 @@ def run_mmtrack(
                     if win:
                         try:
                             cc_params["window"] = int(win)
-                        except Exception:
-                            pass
+                        except (ValueError, TypeError, OverflowError) as error:
+                            logger.warning(
+                                "Invalid camera-controller window override; retaining configured value: %s",
+                                error,
+                            )
                     # If CLI overrides not provided, pull from rink.camera config
                     if not cc_params.get("controller"):
                         cam_ctrl = (config.get("rink") or {}).get("camera", {}).get("controller")
@@ -270,8 +277,11 @@ def run_mmtrack(
                         if cam_win:
                             try:
                                 cc_params["window"] = int(cam_win)
-                            except Exception:
-                                pass
+                            except (ValueError, TypeError, OverflowError) as error:
+                                logger.warning(
+                                    "Invalid camera profile window; retaining configured value: %s",
+                                    error,
+                                )
                     cc["params"] = cc_params
                 # Apply jersey trunk CLI overrides if present
                 if "jersey_numbers" in trunks_cfg:
@@ -320,43 +330,43 @@ def run_mmtrack(
                     or initial_args.get("label")
                     or initial_args.get("output_label")
                 )
-                shared = dict(
-                    model=model,
-                    postprocessor=postprocessor,
-                    pose_inferencer=pose_inferencer,
-                    fp16=fp16,
-                    device=device,
+                shared = {
+                    "model": model,
+                    "postprocessor": postprocessor,
+                    "pose_inferencer": pose_inferencer,
+                    "fp16": fp16,
+                    "device": device,
                     # using_precalculated_tracking=using_precalculated_tracking,
                     # using_precalculated_detection=using_precalculated_detection,
-                    plot_pose=bool(config.get("plot_pose", False)),
+                    "plot_pose": bool(config.get("plot_pose", False)),
                     # Propagate CLI flag to BoundariesPlugin -> IceRinkSegmBoundaries(draw)
-                    plot_ice_mask=bool(config.get("plot_ice_mask", False)),
+                    "plot_ice_mask": bool(config.get("plot_ice_mask", False)),
                     # Boundary + identity context for plugins
-                    game_id=config.get("game_id"),
-                    game_dir=game_dir,
-                    work_dir=work_dir,
-                    tracking_data_path=tracking_data_path,
-                    detection_data_path=detection_data_path,
-                    pose_data_path=pose_data_path,
-                    action_data_path=action_data_path,
-                    original_clip_box=config.get("original_clip_box"),
-                    top_border_lines=config.get("top_border_lines"),
-                    bottom_border_lines=config.get("bottom_border_lines"),
+                    "game_id": config.get("game_id"),
+                    "game_dir": game_dir,
+                    "work_dir": work_dir,
+                    "tracking_data_path": tracking_data_path,
+                    "detection_data_path": detection_data_path,
+                    "pose_data_path": pose_data_path,
+                    "action_data_path": action_data_path,
+                    "original_clip_box": config.get("original_clip_box"),
+                    "top_border_lines": config.get("top_border_lines"),
+                    "bottom_border_lines": config.get("bottom_border_lines"),
                     # Full game config and CLI-derived initial args for plugins
-                    game_config=config.get("game_config"),
-                    source_video_paths=source_video_paths or [],
-                    initial_args=config.get("initial_args"),
+                    "game_config": config.get("game_config"),
+                    "source_video_paths": source_video_paths or [],
+                    "initial_args": config.get("initial_args"),
                     # Runtime camera UI toggle for PlayTrackerPlugin
-                    camera_ui=int(initial_args.get("camera_ui") or config.get("camera_ui") or 0),
+                    "camera_ui": int(initial_args.get("camera_ui") or config.get("camera_ui") or 0),
                     # Optional stitching rotation controller (e.g., StitchDataset instance)
-                    stitch_rotation_controller=config.get("stitch_rotation_controller"),
-                    output_label=output_label,
-                    progress_bar=progress_bar,
-                    mux_audio_file=config.get("mux_audio_file"),
-                    mux_audio_stream=config.get("mux_audio_stream"),
-                    mux_audio_offset_seconds=config.get("mux_audio_offset_seconds"),
-                    mux_audio_aac_bitrate=config.get("mux_audio_aac_bitrate"),
-                )
+                    "stitch_rotation_controller": config.get("stitch_rotation_controller"),
+                    "output_label": output_label,
+                    "progress_bar": progress_bar,
+                    "mux_audio_file": config.get("mux_audio_file"),
+                    "mux_audio_stream": config.get("mux_audio_stream"),
+                    "mux_audio_offset_seconds": config.get("mux_audio_offset_seconds"),
+                    "mux_audio_aac_bitrate": config.get("mux_audio_aac_bitrate"),
+                }
                 # Optional per-plugin audit hook for debugging CUDA stream correctness.
                 audit_dir = initial_args.get("audit_dir")
                 if audit_dir:
@@ -384,7 +394,7 @@ def run_mmtrack(
                             audit_cfg.out_dir,
                             ref_path,
                         )
-                    except Exception:
+                    except (ImportError, OSError, RuntimeError, ValueError, TypeError):
                         logger.exception("Failed to initialize Aspen audit hook")
                 if profiler is not None:
                     shared["profiler"] = profiler
@@ -405,11 +415,16 @@ def run_mmtrack(
                         work_dir,
                         config.get("game_id") or Path(work_dir).name,
                         {
+                            **(config.get("game_config") or {}),
                             "game_config": config.get("game_config"),
                             "aspen": aspen_cfg,
                             "source_video_paths": source_video_paths or [],
                             "timestamp_source": "source frame / source FPS unless explicit pts_ns",
-                            "native_replay": "unavailable in HM producer",
+                            "native_replay": (
+                                "hockeymon-play-tracker-2026-09-replay-v1"
+                                if os.environ.get("HM_SHARED_UI_BACKEND") == "1"
+                                else "unavailable in HM producer"
+                            ),
                         },
                         stages,
                     )
@@ -437,7 +452,7 @@ def run_mmtrack(
             prof_ctx = profiler if getattr(profiler, "enabled", False) else contextlib.nullcontext()
             with prof_ctx:
 
-                def _extract_stitch_ids(stitch_inputs: Any) -> Tuple[Optional[torch.Tensor], int]:
+                def _extract_stitch_ids(stitch_inputs: Any) -> tuple[torch.Tensor | None, int]:
                     if isinstance(stitch_inputs, dict):
                         left = stitch_inputs.get("left")
                     else:
@@ -458,8 +473,11 @@ def run_mmtrack(
                     if ids_val is not None:
                         try:
                             return torch.tensor(list(ids_val), dtype=torch.int64), len(ids_val)
-                        except Exception:
-                            pass
+                        except (ValueError, TypeError, RuntimeError, OverflowError) as error:
+                            logger.warning(
+                                "Could not read source frame identifiers; using image batch size: %s",
+                                error,
+                            )
                     img = left.get("img")
                     if isinstance(img, torch.Tensor):
                         return None, int(img.shape[0]) if img.ndim == 4 else 1
@@ -467,6 +485,9 @@ def run_mmtrack(
 
                 cur_iter = 0
                 while True:
+                    ui = aspen_net.shared.get("hm_ui_process") if aspen_net is not None else None
+                    if ui is not None and ui.stop_requested:
+                        break
                     dataloader_start = time.perf_counter() if display_plugin_profile else None
                     try:
                         dataset_results = next(dataloader_iterator)
@@ -504,7 +525,8 @@ def run_mmtrack(
                         elif ids is not None:
                             try:
                                 frame_id = int(ids[0])
-                            except Exception:
+                            except (ValueError, TypeError, IndexError, OverflowError) as error:
+                                logger.warning("Source frame identifier unavailable: %s", error)
                                 frame_id = None
                     else:
                         raise RuntimeError(
@@ -524,12 +546,12 @@ def run_mmtrack(
                     if aspen_net is not None:
                         # Execute the configured DAG
                         # Prepare per-iteration context
-                        iter_context: Dict[str, Any] = dict(
-                            device=device,
-                            cuda_stream=cuda_stream,
-                            detect_timer=detect_timer,
-                            mean_tracker=mean_tracker,
-                        )
+                        iter_context: dict[str, Any] = {
+                            "device": device,
+                            "cuda_stream": cuda_stream,
+                            "detect_timer": detect_timer,
+                            "mean_tracker": mean_tracker,
+                        }
                         if display_plugin_profile:
                             iter_context["_aspen_timing_enabled"] = True
                         if stitch_inputs is not None:
@@ -566,6 +588,9 @@ def run_mmtrack(
                             )
                             if fps:
                                 iter_context["fps"] = float(fps)
+                        timing_source = stitch_inputs[0] if stitch_inputs is not None else data_item
+                        if timing_source is not None and "pts_ns" in timing_source:
+                            iter_context["pts_ns"] = timing_source["pts_ns"]
                         if frame_id is not None and "frame_id" not in iter_context:
                             iter_context["frame_id"] = int(frame_id)
                         # Merge shared into context for plugins convenience
@@ -590,7 +615,17 @@ def run_mmtrack(
                             if isinstance(nr_tracks, torch.Tensor):
                                 try:
                                     nr_tracks = int(nr_tracks.reshape(-1)[0].item())
-                                except Exception:
+                                except (
+                                    ValueError,
+                                    TypeError,
+                                    IndexError,
+                                    RuntimeError,
+                                    OverflowError,
+                                ) as error:
+                                    logger.warning(
+                                        "Track count unavailable for progress display; using zero: %s",
+                                        error,
+                                    )
                                     nr_tracks = 0
                             else:
                                 nr_tracks = int(nr_tracks)
@@ -598,14 +633,28 @@ def run_mmtrack(
                             if isinstance(max_tracking_id, torch.Tensor):
                                 try:
                                     max_tracking_id = int(max_tracking_id.reshape(-1)[0].item())
-                                except Exception:
+                                except (
+                                    ValueError,
+                                    TypeError,
+                                    IndexError,
+                                    RuntimeError,
+                                    OverflowError,
+                                ) as error:
+                                    logger.warning(
+                                        "Maximum track ID unavailable for progress display; using zero: %s",
+                                        error,
+                                    )
                                     max_tracking_id = 0
                         elif display_plugin_profile:
                             last_aspen_timing = aspen_net.get_last_timing()
                         elif not isinstance(max_tracking_id, (int, float)):
                             try:
                                 max_tracking_id = int(max_tracking_id)
-                            except Exception:
+                            except (ValueError, TypeError, OverflowError) as error:
+                                logger.warning(
+                                    "Maximum track ID unavailable for progress display; using zero: %s",
+                                    error,
+                                )
                                 max_tracking_id = 0
                     else:
                         # Legacy MMTracking path has been removed. An Aspen config is required.
@@ -616,20 +665,14 @@ def run_mmtrack(
                     if detect_timer is not None and cur_iter % 50 == 0:
                         # print(
                         logger.info(
-                            "Detector time, frame {} ({:.2f} fps)".format(
-                                frame_id,
-                                batch_size * 1.0 / max(1e-5, detect_timer.average_time),
-                            )
+                            f"Detector time, frame {frame_id} ({batch_size * 1.0 / max(1e-5, detect_timer.average_time):.2f} fps)"
                         )
 
                     if cur_iter % 200 == 0:
                         if wraparound_timer is not None:
                             wraparound_timer.toc()
                             logger.info(
-                                "Full wraparound time, frame {} ({:.2f} fps)".format(
-                                    frame_id,
-                                    batch_size * 1.0 / max(1e-5, wraparound_timer.average_time),
-                                )
+                                f"Full wraparound time, frame {frame_id} ({batch_size * 1.0 / max(1e-5, wraparound_timer.average_time):.2f} fps)"
                             )
                         wraparound_timer = Timer()
                     elif wraparound_timer is None:
@@ -686,7 +729,18 @@ def run_mmtrack(
         for node in aspen_net.exec_order:
             if node.module.enabled and hasattr(node.module, "supplementary_paths"):
                 supplementary_paths.extend(node.module.supplementary_paths())
+            if node.module.enabled and hasattr(node.module, "output_paths"):
+                output_paths.extend(node.module.output_paths())
+            if node.module.enabled and hasattr(node.module, "output_kinds"):
+                output_kinds.extend(node.module.output_kinds())
     return RecordingArtifacts(
         telemetry.path if telemetry is not None else None,
         tuple(dict.fromkeys(supplementary_paths)),
+        bool(
+            aspen_net is not None
+            and aspen_net.shared.get("hm_ui_process") is not None
+            and aspen_net.shared["hm_ui_process"].stop_requested
+        ),
+        tuple(dict.fromkeys(output_paths)),
+        tuple(dict.fromkeys(output_kinds)),
     )

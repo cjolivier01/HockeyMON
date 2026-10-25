@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 import yaml
 from mmengine.structures import InstanceData
@@ -137,6 +138,7 @@ def should_cli_load_tracking_smoke_runs(tmp_path):
             "--no-save-video",
             "--save-pose-data",
         ],
+        check=False,
         env=env,
         cwd=tmp_path,
         capture_output=True,
@@ -158,3 +160,28 @@ def should_cli_load_tracking_smoke_runs(tmp_path):
             sample.pred_instances.keypoints, expected_center[:, None, :].repeat(1, 17, 1)
         )
         torch.testing.assert_close(sample.pred_instances.keypoint_scores, torch.ones((1, 17)))
+
+
+@pytest.mark.parametrize("graph", ["tracking_pose", "tracking_pose_jersey"])
+def should_replay_join_receive_loaded_tracking_outputs(graph):
+    from hmlib.aspen.plugins.join_plugin import JoinPlugin
+    from hmlib.cli.hmtrack import _enable_load_tracking_plugin
+
+    config = yaml.safe_load((REPO_ROOT / f"hmlib/config/aspen/{graph}.yaml").read_text())
+    _enable_load_tracking_plugin(config, prefer_detector=False, disable_detector=True)
+    plugins = config["aspen"]["plugins"]
+    replay_outputs = {"nr_tracks": 1, "max_tracking_id": 77}
+    for specification in plugins.values():
+        if (
+            specification["class"].endswith(".JoinPlugin")
+            and "load_tracking" in specification["depends"]
+        ):
+            params = specification["params"]
+            # Exercise JoinPlugin's actual lookup and merge with only the new
+            # replay branch available, as in Aspen's per-batch plugin outputs.
+            available = {name: {} for name in specification["depends"]}
+            available["load_tracking"] = replay_outputs
+            result = JoinPlugin(**params).forward({"plugins": available, "shared": {}})
+            joined = result[params.get("output_key", "join_token")]
+            assert joined["nr_tracks"] == 1
+            assert joined["max_tracking_id"] == 77

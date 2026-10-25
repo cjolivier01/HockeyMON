@@ -9,7 +9,6 @@ above bounding boxes using the tracking utilities visualization helpers.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
 import cv2
 import torch
@@ -33,24 +32,33 @@ class ActionTracker:
     def __init__(self, show: bool = False) -> None:
         self._show = show
         # tracking_id -> last seen action info
-        self._actions: Dict[int, TrackingIdActionInfo] = {}
+        self._actions: dict[int, TrackingIdActionInfo] = {}
 
-    def observe(self, frame_id: int, infos: Optional[List[Dict]]) -> None:
+    def replace(self, frame_id: int, infos: list[dict]) -> None:
+        """Replace display state with current, already-settled backend results."""
+        self._actions = {
+            int(info["tracking_id"]): TrackingIdActionInfo(
+                tracking_id=int(info["tracking_id"]),
+                label=str(info["label"]),
+                label_index=int(info["label_index"]),
+                score=float(info["score"]),
+            )
+            for info in infos
+        }
+
+    def observe(self, frame_id: int, infos: list[dict] | None) -> None:
         if not infos:
             return
         for a in infos:
-            try:
-                tid = int(a.get("tracking_id", -1))
-                if tid < 0:
-                    continue
-                label = str(a.get("label", ""))
-                label_index = int(a.get("label_index", -1))
-                score = float(a.get("score", 0.0))
-                self._actions[tid] = TrackingIdActionInfo(
-                    tracking_id=tid, label=label, label_index=label_index, score=score
-                )
-            except Exception:
+            tid = int(a.get("tracking_id", -1))
+            if tid < 0:
                 continue
+            label = str(a.get("label", ""))
+            label_index = int(a.get("label_index", -1))
+            score = float(a.get("score", 0.0))
+            self._actions[tid] = TrackingIdActionInfo(
+                tracking_id=tid, label=label, label_index=label_index, score=score
+            )
 
     def draw(
         self, image: torch.Tensor, tracking_ids: torch.Tensor, bboxes_tlwh: torch.Tensor

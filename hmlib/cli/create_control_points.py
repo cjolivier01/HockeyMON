@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 This script synchronizes two videos using audio cross-correlation, extracts the corresponding frames,
 computes control points with a selectable matcher and updates a Hugin
@@ -12,7 +11,6 @@ from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 import ffmpegio
@@ -23,10 +21,7 @@ import torch
 from hmlib.config import get_game_config, get_game_dir
 from hmlib.stitching.akaze import LensCalibrationPair, load_lens_calibration
 from hmlib.stitching.configure_stitching import build_stitching_project, configure_video_stitching
-from hmlib.stitching.control_points import (
-    CONTROL_POINT_MATCHERS,
-    DEFAULT_CONTROL_POINT_MATCHER,
-)
+from hmlib.stitching.control_points import CONTROL_POINT_MATCHERS, DEFAULT_CONTROL_POINT_MATCHER
 from hmlib.stitching.control_points import (
     calculate_control_points as calculate_stitching_control_points,
 )
@@ -52,10 +47,10 @@ def _game_dir_for_id(game_id: str) -> str:
 
 
 def load_audio_as_tensor(
-    audio: Union[str, np.ndarray, torch.Tensor],
+    audio: str | np.ndarray | torch.Tensor,
     duration_seconds: float,
-    verbose: Optional[bool] = False,
-) -> Tuple[torch.Tensor, float]:
+    verbose: bool | None = False,
+) -> tuple[torch.Tensor, float]:
     """
     Load audio from a file (or other supported source) using ffmpegio and return it as a PyTorch tensor.
 
@@ -76,7 +71,7 @@ def load_audio_as_tensor(
     return waveform, sample_rate
 
 
-def get_video_fps_and_duration(video_path: str) -> Tuple[float, float]:
+def get_video_fps_and_duration(video_path: str) -> tuple[float, float]:
     """
     Retrieve the frames-per-second (FPS) and duration (in seconds) of a video file.
 
@@ -88,8 +83,7 @@ def get_video_fps_and_duration(video_path: str) -> Tuple[float, float]:
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"Could not open video: {video_path}")
-        exit(1)
+        raise OSError(f"Could not open video: {video_path}")
     fps: float = cap.get(cv2.CAP_PROP_FPS)
     frame_count: int = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
@@ -101,7 +95,7 @@ def synchronize_by_audio(
     file2_path: str,
     seconds: int = 15,
     verbose: bool = True,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """
     Synchronize two video files by comparing their audio tracks using cross-correlation.
 
@@ -166,13 +160,13 @@ def synchronize_by_audio(
         print(f"Equivalent time offset: {time_offset} seconds")
 
     # Determine starting frame for each video.
-    left_frame_offset: float = frame_offset if frame_offset > 0 else 0
+    left_frame_offset: float = max(0, frame_offset)
     right_frame_offset: float = -frame_offset if frame_offset < 0 else 0
 
     return left_frame_offset, right_frame_offset
 
 
-def extract_frame(video_path: str, frame_idx: Optional[float]) -> np.ndarray:
+def extract_frame(video_path: str, frame_idx: float | None) -> np.ndarray:
     """
     Extract a single frame from a video file using OpenCV.
 
@@ -238,12 +232,14 @@ def calculate_control_points(
     frame0: np.ndarray,
     frame1: np.ndarray,
     max_control_points: int,
-    device: Optional[torch.device] = None,
+    device: torch.device | None = None,
     max_num_keypoints: int = 2048,
-    output_directory: Optional[str] = None,
+    output_directory: str | None = None,
     matcher: str = DEFAULT_CONTROL_POINT_MATCHER,
-    lens_calibration: Optional[LensCalibrationPair] = None,
-) -> Dict[str, torch.Tensor]:
+    lens_calibration: LensCalibrationPair | None = None,
+    control_point_resolution: str | None = None,
+    control_point_filtering=None,
+) -> dict[str, torch.Tensor]:
     """
     Compute control points between two frames with the selected matcher.
 
@@ -268,10 +264,12 @@ def calculate_control_points(
         output_directory=output_directory,
         matcher=matcher,
         lens_calibration=lens_calibration,
+        control_point_resolution=control_point_resolution,
+        control_point_filtering=control_point_filtering,
     )
 
 
-def load_pto_file(file_path: str) -> List[str]:
+def load_pto_file(file_path: str) -> list[str]:
     """
     Load the contents of a Hugin PTO file.
 
@@ -282,13 +280,13 @@ def load_pto_file(file_path: str) -> List[str]:
         A list of strings representing the lines in the file (with trailing whitespace removed).
     """
     with open(file_path, "r") as file:
-        lines: List[str] = file.readlines()
+        lines: list[str] = file.readlines()
     # Remove trailing whitespace from each line.
     lines = [line.rstrip() for line in lines]
     return lines
 
 
-def save_pto_file(file_path: str, data: List[str]) -> None:
+def save_pto_file(file_path: str, data: list[str]) -> None:
     """
     Save a list of lines back into a PTO file.
 
@@ -297,11 +295,10 @@ def save_pto_file(file_path: str, data: List[str]) -> None:
         data: List of lines to write.
     """
     with open(file_path, "w") as file:
-        for line in data:
-            file.write(f"{line}\n")
+        file.writelines(f"{line}\n" for line in data)
 
 
-def remove_control_points(lines: List[str]) -> Tuple[List[str], int]:
+def remove_control_points(lines: list[str]) -> tuple[list[str], int]:
     """
     Remove existing control point lines (lines starting with "c ") from a PTO file content.
 
@@ -313,7 +310,7 @@ def remove_control_points(lines: List[str]) -> Tuple[List[str], int]:
         and count is the number of control point lines removed.
     """
     prev_control_point_count: int = 0
-    new_lines: List[str] = []
+    new_lines: list[str] = []
     for line in lines:
         if line.startswith(_CONTROL_POINTS_LINE):
             continue
@@ -324,7 +321,7 @@ def remove_control_points(lines: List[str]) -> Tuple[List[str], int]:
     return new_lines, prev_control_point_count
 
 
-def is_older_than(file1: str, file2: str) -> Optional[bool]:
+def is_older_than(file1: str, file2: str) -> bool | None:
     """
     Compare the modification times of two files.
 
@@ -356,7 +353,7 @@ def strip(s: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
-def update_pto_file(pto_file: str, control_points: Dict[str, torch.Tensor]) -> None:
+def update_pto_file(pto_file: str, control_points: dict[str, torch.Tensor]) -> None:
     """
     Update a Hugin PTO file by replacing existing control points with new ones.
 
@@ -371,12 +368,12 @@ def update_pto_file(pto_file: str, control_points: Dict[str, torch.Tensor]) -> N
     assert len(pts0) > 0 and len(pts1) > 0, "No control points found."
 
     # Load the current PTO file and remove old control point lines.
-    pto_lines: List[str] = load_pto_file(pto_file)
+    pto_lines: list[str] = load_pto_file(pto_file)
     pto_lines, _ = remove_control_points(pto_lines)
     pto_lines.append("")
     pto_lines.append(_CONTROL_POINTS_LINE)
 
-    def _to_hugin_decimal(val: Union[str, float]) -> str:
+    def _to_hugin_decimal(val: str | float) -> str:
         # Convert value to float and then format.
         val = float(val)
         if val == float(int(val)):
@@ -404,17 +401,17 @@ def configure_stitching(
     directory: str,
     force: bool = True,
     skip_if_exists: bool = False,
-    fov: Optional[float] = None,
+    fov: float | None = None,
     max_control_points: int = 240,
-    scale: Optional[float] = None,
-    max_output_dimension: Optional[int] = None,
-    device: Optional[torch.device] = None,
-    control_point_matcher: Optional[str] = None,
-    mapping_backend: Optional[str] = None,
-    game_config: Optional[dict] = None,
-    run_autooptimizer: Optional[bool] = None,
-    settings: Optional[StitchingSettings] = None,
-    game_id: Optional[str] = None,
+    scale: float | None = None,
+    max_output_dimension: int | None = None,
+    device: torch.device | None = None,
+    control_point_matcher: str | None = None,
+    mapping_backend: str | None = None,
+    game_config: dict | None = None,
+    run_autooptimizer: bool | None = None,
+    settings: StitchingSettings | None = None,
+    game_id: str | None = None,
 ) -> bool:
     """Calibrate two BGR frames using the shared project builder.
 
@@ -476,6 +473,8 @@ def configure_stitching(
             device=device,
             matcher=settings.control_point_matcher,
             lens_calibration=lens_calibration,
+            control_point_resolution=settings.control_point_resolution,
+            control_point_filtering=settings.control_point_filtering,
         )
         return build_stitching_project(
             project_file_path=str(Path(directory) / "hm_project.pto"),

@@ -10,7 +10,7 @@ import os
 import re
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import torch
 
@@ -34,22 +34,22 @@ from hmlib.utils.video import load_first_video_frame
 # number
 GOPRO_FILE_PATTERN: str = r"^G[A-Z][0-9]{6}\.(MP4|mp4)$"
 INSTA360_FILE_PATTERN: str = r"^VID_[0-9]{8}_[0-9]{6}_[0-9]{3}\.(MP4|mp4)$"
-VIDEO_EXT_PRIORITY: Tuple[str, ...] = ("mp4", "mkv", "m4v")
+VIDEO_EXT_PRIORITY: tuple[str, ...] = ("mp4", "mkv", "m4v")
 LEFT_PART_FILE_PATTERN: str = r"left-[0-9]\.{ext}$"
 RIGHT_PART_FILE_PATTERN: str = r"right-[0-9]\.{ext}$"
 LEFT_FILE_PATTERN: str = r"left\.{ext}$"
 RIGHT_FILE_PATTERN: str = r"right\.{ext}$"
 
 
-VideoChapter = Dict[Union[int, str], Any]
-VideosDictKey = Union[int, str]
-VideosDict = Dict[VideosDictKey, VideoChapter]
+VideoChapter = dict[int | str, Any]
+VideosDictKey = int | str
+VideosDict = dict[VideosDictKey, VideoChapter]
 
 
 logger = get_logger(__name__)
 
 
-def gopro_get_video_and_chapter(filename: Path) -> Tuple[int, int]:
+def gopro_get_video_and_chapter(filename: Path) -> tuple[int, int]:
     """Return (video number, chapter number) from a GoPro filename."""
     name = Path(filename).stem
     assert name[0] == "G"
@@ -57,7 +57,7 @@ def gopro_get_video_and_chapter(filename: Path) -> Tuple[int, int]:
     return int(name[4:8]), int(name[2:4])
 
 
-def insta360_get_video_and_chapter(filename: Path) -> Tuple[int, int]:
+def insta360_get_video_and_chapter(filename: Path) -> tuple[int, int]:
     """Return (video identifier, chapter number) for Insta360 clips."""
     name = Path(filename).stem
     tokens = name.split("_")
@@ -75,13 +75,13 @@ def get_lr_part_number(filename: str) -> int:
     return int(tokens[-1])
 
 
-def find_matching_files(re_pattern: str, directory: str) -> List[str]:
+def find_matching_files(re_pattern: str, directory: str) -> list[str]:
     """Return sorted list of filenames in ``directory`` matching ``re_pattern``."""
     # Regex to match the file format 'GLXXXXXX.mp4'
     pattern = re.compile(re_pattern)
 
     # List to store the names of matching files
-    matching_files: List[str] = []
+    matching_files: list[str] = []
 
     # Iterate over all the files in the directory
     for filename in os.listdir(directory):
@@ -92,7 +92,7 @@ def find_matching_files(re_pattern: str, directory: str) -> List[str]:
     return sorted(matching_files)
 
 
-def prune_chapters(videos: VideosDict) -> Tuple[VideosDict, VideosDict]:
+def prune_chapters(videos: VideosDict) -> tuple[VideosDict, VideosDict]:
     """Prune out videos that don't have matching chapters.
 
     @return: Tuple (kept_videos, discarded_videos).
@@ -103,42 +103,34 @@ def prune_chapters(videos: VideosDict) -> Tuple[VideosDict, VideosDict]:
     return videos, {}
 
 
-def _find_vendor_chapter_pairs(directory: str) -> List[Tuple[Tuple[int, int], str]]:
+def _find_vendor_chapter_pairs(directory: str) -> list[tuple[tuple[int, int], str]]:
     """Scan a directory for known vendor MP4 chapter files and return ordered pairs.
 
     Returns a list of ((video_id, chapter_num), full_path) sorted by (video_id, chapter_num).
     Supports GoPro and Insta360 naming conventions.
     """
-    pairs: List[Tuple[Tuple[int, int], str]] = []
+    pairs: list[tuple[tuple[int, int], str]] = []
 
     # GoPro
     for f in find_matching_files(re_pattern=GOPRO_FILE_PATTERN, directory=directory):
-        try:
-            vid, ch = gopro_get_video_and_chapter(f)
-            pairs.append(((vid, ch), f))
-        except Exception:
-            continue
+        vid, ch = gopro_get_video_and_chapter(f)
+        pairs.append(((vid, ch), f))
 
     # Insta360
     for f in find_matching_files(re_pattern=INSTA360_FILE_PATTERN, directory=directory):
-        try:
-            vid, ch = insta360_get_video_and_chapter(f)
-            pairs.append(((vid, ch), f))
-        except Exception:
-            continue
+        vid, ch = insta360_get_video_and_chapter(f)
+        pairs.append(((vid, ch), f))
 
     pairs.sort(key=lambda x: x[0])
     return pairs
 
 
-def _pairs_to_linear_chapter_map(pairs: List[Tuple[Tuple[int, int], str]]) -> VideoChapter:
+def _pairs_to_linear_chapter_map(pairs: list[tuple[tuple[int, int], str]]) -> VideoChapter:
     """Flatten vendor chapter pairs into a linear 1..N->file mapping."""
     return {i + 1: f for i, ((_, _), f) in enumerate(pairs)}
 
 
-def _collect_lr_chapters(
-    directory: str, side: str, renumber: bool = False
-) -> Optional[VideoChapter]:
+def _collect_lr_chapters(directory: str, side: str, renumber: bool = False) -> VideoChapter | None:
     """Collect left/right single or part files into a chapter map.
 
     If renumber=True, chapters are returned as 1..N in file order; otherwise
@@ -182,22 +174,16 @@ def get_available_videos(dir_name: str, prune: bool = False) -> VideosDict:
     # This avoids filename collisions when multiple cameras produce the same
     # chapter filenames. Each camX directory is treated as a separate camera and
     # its files are collected as the chapter list for that camera key.
-    try:
-        cam_dirs = [
-            d
-            for d in os.listdir(dir_name)
-            if os.path.isdir(os.path.join(dir_name, d)) and re.match(r"^cam\d+$", d, re.IGNORECASE)
-        ]
-    except Exception:
-        cam_dirs = []
+    cam_dirs = [
+        d
+        for d in os.listdir(dir_name)
+        if os.path.isdir(os.path.join(dir_name, d)) and re.match(r"^cam\d+$", d, re.IGNORECASE)
+    ]
 
-    def _sorted_cam_dirs(names: List[str]) -> List[str]:
+    def _sorted_cam_dirs(names: list[str]) -> list[str]:
         def cam_index(name: str) -> int:
-            try:
-                m = re.search(r"(\d+)", name)
-                return int(m.group(1)) if m else 0
-            except Exception:
-                return 0
+            m = re.search(r"(\d+)", name)
+            return int(m.group(1)) if m else 0
 
         return sorted(names, key=cam_index)
 
@@ -258,7 +244,7 @@ def detect_video_rink_masks(
     game_id: str,
     videos_dict: VideosDict,
     device: torch.device = None,
-    inference_scale: Optional[float] = None,
+    inference_scale: float | None = None,
 ) -> VideosDict:
     """Run ice-rink segmentation on the first frame of each video."""
     if device is None:
@@ -270,7 +256,7 @@ def detect_video_rink_masks(
         )
 
     keys = []
-    images: List[torch.Tensor] = []
+    images: list[torch.Tensor] = []
     for key, value in videos_dict.items():
         keys.append(key)
         min_chapter_key = min(value, key=value.get)
@@ -294,7 +280,7 @@ def detect_video_rink_masks(
     return videos_dict
 
 
-def get_orientation_dict(rink_mask: torch.Tensor) -> Dict[str, float]:
+def get_orientation_dict(rink_mask: torch.Tensor) -> dict[str, float]:
     """Summarize rink occupancy on each edge of the mask."""
     assert rink_mask.dtype == torch.bool
     assert rink_mask.ndim == 2
@@ -345,9 +331,9 @@ def get_orientation(rink_mask: torch.Tensor) -> str:
 
 def get_game_videos_analysis(
     game_id: str,
-    videos_dict: Optional[VideosDict] = None,
+    videos_dict: VideosDict | None = None,
     device: torch.device = None,
-    inference_scale: Optional[float] = None,
+    inference_scale: float | None = None,
 ) -> VideosDict:
     """Analyze game videos and attach orientation metadata per camera."""
     if videos_dict is None:
@@ -361,12 +347,12 @@ def get_game_videos_analysis(
 
     new_dict: VideosDict = {}
 
-    video_ssm: Dict[VideosDictKey, Dict[str, float]] = {}
+    video_ssm: dict[VideosDictKey, dict[str, float]] = {}
 
     for key, value in videos_dict.items():
         mask = value["rink_profile"]["combined_mask"]
 
-        sum_map: Dict[str, float] = get_orientation_dict(mask)
+        sum_map: dict[str, float] = get_orientation_dict(mask)
         video_ssm[key] = sum_map
 
         orientation = get_orientation(mask)
@@ -385,8 +371,8 @@ def get_game_videos_analysis(
     return videos_dict
 
 
-def extract_chapters_file_list(chapter_map: VideoChapter) -> List[str]:
-    numeric_keys = sorted(key for key in chapter_map.keys() if isinstance(key, (int, float)))
+def extract_chapters_file_list(chapter_map: VideoChapter) -> list[str]:
+    numeric_keys = sorted(key for key in chapter_map if isinstance(key, (int, float)))
     if not numeric_keys:
         return []
 
@@ -405,8 +391,8 @@ def configure_game_videos(
     force: bool = False,
     write_results: bool = True,
     device: torch.device = None,
-    inference_scale: Optional[float] = None,
-) -> Dict[str, List[str]]:
+    inference_scale: float | None = None,
+) -> dict[str, list[str]]:
     """Return and optionally persist left/right ordered chapter lists.
 
     @param game_id: Game identifier.
@@ -417,24 +403,25 @@ def configure_game_videos(
     @return: Dict with keys ``\"left\"`` and ``\"right\"`` mapping to lists of files.
     """
     dir_name = get_game_dir(game_id=game_id)
+    private_config = get_game_config_private(game_id=game_id)
+    if not force:
+        declared = get_nested_value(private_config, "game.videos", {})
+        if not isinstance(declared, dict):
+            raise TypeError("game.videos must be a mapping")
+        if declared.get("left") is not None or declared.get("right") is not None:
+            for role in ("left", "right"):
+                if not isinstance(declared.get(role), list) or not declared[role]:
+                    raise ValueError("Import both left and right recordings before stitching")
+            return {
+                role: [os.path.join(dir_name, path) for path in declared[role]]
+                for role in ("left", "right")
+            }
     videos_dict = get_available_videos(dir_name=dir_name)
     if not force and ("left" in videos_dict and "right" in videos_dict):
         return {
             "left": extract_chapters_file_list(videos_dict["left"]),
             "right": extract_chapters_file_list(videos_dict["right"]),
         }
-    private_config = get_game_config_private(game_id=game_id)
-    if not force:
-        # See if we have it already
-        left_list = get_nested_value(private_config, "game.videos.left")
-        right_list = get_nested_value(private_config, "game.videos.right")
-        if left_list and right_list:
-            left_list = [os.path.join(dir_name, p) for p in left_list]
-            right_list = [os.path.join(dir_name, p) for p in right_list]
-            return {
-                "left": left_list,
-                "right": right_list,
-            }
     videos_dict = get_game_videos_analysis(
         game_id=game_id,
         device=device,

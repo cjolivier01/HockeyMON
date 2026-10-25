@@ -43,9 +43,11 @@ retain their names. Old unnumbered outputs remain readable.
 
 This ports the output lifecycle and publication behavior from hstream commits
 `780308e0`, `89b7df83`, `58099b70`, and `51ffac90`. It does not add hstream's native
-Main10/P010 archive backend. HM's current decoder outputs RGBP/uint8, its native
-stitch input is uint8, and its encoder accepts uint8/YUV420. Floating-point image
-processing alone does not preserve a 10-bit source through those conversions.
+Main10/P010 archive backend. HM's ordinary hardware decode path outputs
+RGBP/uint8, and its archive encoder accepts uint8/YUV420. The
+[shared desktop grading path](shared-ui-backend.md) can explicitly decode BGR48
+and retain floating source precision through grading; archive encoding still
+uses the existing output format.
 
 ## Automatic output bitrate
 

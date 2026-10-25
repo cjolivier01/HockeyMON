@@ -1,7 +1,8 @@
 """Audio-based synchronization utilities for multi-camera stitching."""
 
+import logging
 import os
-from typing import Dict
+import subprocess
 
 import numpy as np
 import scipy
@@ -18,6 +19,8 @@ from hmlib.config import (
 from hmlib.hm_opts import hm_opts
 from hmlib.utils.audio import load_audio_as_tensor
 from hmlib.video.ffmpeg import BasicVideoInfo
+
+logger = logging.getLogger(__name__)
 
 
 def synchronize_by_audio(
@@ -73,11 +76,11 @@ def synchronize_by_audio(
 
         # Compute correlation using convolution
         # The 'groups' argument ensures a separate convolution for each batch
-        correlation = F.conv1d(audio1, audio2.flip(-1), padding=audio2.size(-1) - 1, groups=1)
+        correlation = F.conv1d(audio1, audio2, padding=audio2.size(-1) - 1, groups=1)
 
         # Remove added dimensions to get the final 1D correlation tensor
         correlation = correlation.squeeze()
-        lag, idx = torch.argmax(correlation) - len(audio1) + 1
+        lag = int(torch.argmax(correlation)) - audio2.size(-1) + 1
 
     # Calculate the time offset in seconds
     fps = video1_info.fps
@@ -89,7 +92,7 @@ def synchronize_by_audio(
         print(f"Time offset: {time_offset} seconds")
 
     # Adjust to the starting frame number in each video (i.e. frame_offset might be a negative number)
-    left_frame_offset = frame_offset if frame_offset > 0 else 0
+    left_frame_offset = max(0, frame_offset)
     right_frame_offset = -frame_offset if frame_offset < 0 else 0
 
     return left_frame_offset, right_frame_offset
@@ -101,7 +104,8 @@ def configure_synchronization(
     video_right: str,
     audio_sync_seconds: float = 15.0,
     force: bool = False,
-) -> Dict[str, float]:
+    sync_method: str | None = None,
+) -> dict[str, float]:
     """Load or compute audio-based frame offsets and persist them to config.
 
     @param game_id: Game identifier (used to locate private config).
@@ -113,9 +117,24 @@ def configure_synchronization(
     """
     config = get_game_config_private(game_id=game_id) or {}
     normalize_runtime_config(config)
-    frame_offsets = (
-        get_nested_value(config, "stitching.frame_offsets", None) if not force else dict()
-    )
+    method = sync_method or get_nested_value(config, "stitching.sync_method", "audio")
+    if method not in ("audio", "imu", "auto", "manual"):
+        raise ValueError("stitching.sync_method must be audio, imu, auto or manual")
+    frame_offsets = get_nested_value(config, "stitching.frame_offsets", None)
+    if method == "manual":
+        if not isinstance(frame_offsets, dict) or any(
+            isinstance(frame_offsets.get(side), bool)
+            or not isinstance(frame_offsets.get(side), (int, float))
+            or not np.isfinite(frame_offsets[side])
+            or frame_offsets[side] < 0
+            for side in ("left", "right")
+        ):
+            raise ValueError(
+                "Manual synchronization requires nonnegative left and right frame offsets"
+            )
+        return {side: float(frame_offsets[side]) for side in ("left", "right")}
+    if force:
+        frame_offsets = {}
     if (
         force
         or not frame_offsets
@@ -125,11 +144,23 @@ def configure_synchronization(
         # Calculate by audio
         # game_dir = get_game_dir(game_id=game_id)
         assert "/" in video_left  # should be full path
-        lfo, rfo = synchronize_by_audio(
-            file1_path=video_left,
-            file2_path=video_right,
-            seconds=audio_sync_seconds,
-        )
+        offsets = None
+        if method in ("imu", "auto"):
+            from hmlib.stitching.imu_synchronization import synchronize_by_imu
+
+            try:
+                offsets = synchronize_by_imu(video_left, video_right)
+            except (ValueError, OSError, ImportError, subprocess.SubprocessError) as error:
+                if method == "imu":
+                    raise
+                logger.warning("Gyroscope synchronization unavailable (%s); using audio", error)
+        if offsets is None:
+            offsets = synchronize_by_audio(
+                file1_path=video_left,
+                file2_path=video_right,
+                seconds=audio_sync_seconds,
+            )
+        lfo, rfo = offsets
         if frame_offsets is None:
             frame_offsets = {}
         frame_offsets["left"] = float(lfo)
