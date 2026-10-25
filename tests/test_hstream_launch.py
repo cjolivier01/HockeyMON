@@ -918,3 +918,91 @@ def should_keep_initial_pose_backend_out_of_shared_model_preparation(game, tmp_p
     # override that used to replace explicit ONNX/TensorRT settings at runtime.
     apply_engine_preferences(plan.config)
     assert "shared_model" not in plan.config["aspen"]["plugins"]["pose_factory"]["params"]
+
+
+@pytest.mark.parametrize("saved", ["{}\n", "hstream_ui: {camera_controls: {Exposure_x100: 200}}\n"])
+def should_use_saved_defaults_without_resurrecting_legacy_tuning(game, tmp_path, saved):
+    from hmlib.ui.hstream_launch import shared_user_settings
+
+    legacy = tmp_path / ".hstream" / "hstream.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text(
+        "paths: {games: /storage/games}\n"
+        "hstream_ui: {camera_controls: {Exposure_x100: 50}}\n"
+        "runtime: {gpu_memory_profile: low}\n"
+    )
+    defaults = tmp_path / ".config" / "hstream-ui" / "defaults.yaml"
+    defaults.parent.mkdir(parents=True)
+    defaults.write_text(saved)
+    user = shared_user_settings()
+    assert user["paths"] == {"games": "/storage/games"}
+    assert "runtime" not in user
+    plan = make_plan(parser().parse_args(["-g", game.name]))
+    expected = 1 if "200" in saved else 0
+    assert plan.config["rink"]["camera"]["color"]["exposure_ev"] == expected
+
+
+def should_keep_game_settings_above_saved_defaults(game, tmp_path):
+    defaults = tmp_path / ".config" / "hstream-ui" / "defaults.yaml"
+    defaults.parent.mkdir(parents=True)
+    defaults.write_text("hstream_ui: {camera_controls: {Exposure_x100: 200}}\n")
+    private = yaml.safe_load((game / "config.yaml").read_text())
+    private["hstream_ui"] = {"camera_controls": {"Exposure_x100": 400}}
+    (game / "config.yaml").write_text(yaml.safe_dump(private))
+    plan = make_plan(parser().parse_args(["-g", game.name]))
+    assert plan.config["rink"]["camera"]["color"]["exposure_ev"] == 2
+
+
+@pytest.mark.parametrize("invalid", ["[]\n", "broken-link"])
+def should_reject_invalid_saved_defaults_instead_of_using_legacy(game, tmp_path, invalid):
+    from hmlib.ui.hstream_launch import shared_user_settings
+
+    defaults = tmp_path / ".config" / "hstream-ui" / "defaults.yaml"
+    defaults.parent.mkdir(parents=True)
+    if invalid == "broken-link":
+        defaults.symlink_to(tmp_path / "missing.yaml")
+    else:
+        defaults.write_text(invalid)
+    with pytest.raises((TypeError, FileNotFoundError)):
+        shared_user_settings()
+
+
+@pytest.mark.parametrize("side", ["true", "false", "null"])
+def should_accept_shared_home_sweater_selection(game, side):
+    plan = make_plan(
+        parser().parse_args(
+            [
+                "-g",
+                game.name,
+                f"--options=game.home_is_dark={side}",
+                f"--options=pipeline.player-analytics.home-is-dark={side}",
+            ]
+        )
+    )
+    assert plan.config["game"]["home_is_dark"] is yaml.safe_load(side)
+
+
+def should_fail_when_defaults_directory_cannot_be_inspected(game, tmp_path):
+    from hmlib.ui.hstream_launch import shared_user_settings
+
+    legacy = tmp_path / ".hstream" / "hstream.yaml"
+    legacy.parent.mkdir()
+    legacy.write_text("runtime: {gpu_memory_profile: low}\n")
+    (tmp_path / ".config").symlink_to(tmp_path / ".config")
+    with pytest.raises(OSError):
+        shared_user_settings()
+
+
+@pytest.mark.parametrize("enabled", ["true", "false"])
+def should_accept_shared_program_box_selection(game, enabled):
+    plan = make_plan(
+        parser().parse_args(
+            [
+                "-g",
+                game.name,
+                f"--options=plot.plot_individual_player_tracking={enabled}",
+                f"--options=pipeline.hmplaycropper.plot-player-tracking={enabled}",
+            ]
+        )
+    )
+    assert plan.config["plot"]["plot_individual_player_tracking"] is yaml.safe_load(enabled)
