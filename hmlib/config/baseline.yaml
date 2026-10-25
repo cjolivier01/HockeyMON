@@ -139,6 +139,14 @@ runtime:
       maximum_cost_matrix_bytes: 8388608
 
 hstream_ui:
+  # Shared Qt/browser tone values use integer slider units, including exposure.
+  camera_controls:
+    Bring_Up_Shadows: 0
+    Lift_Shadow_Black_Point: 0
+    Exposure_x100: 0
+  runtime_controls:
+    debounce_ms: 120
+    ack_timeout_ms: 3000
   # Program detector models offered in the Detection tab. config_prefix names a
   # configs/config_infer_*.yaml family: the bare prefix is FP32 and the selected
   # precision appends _fp16/_bf16/_int8. The first entry is the default.
