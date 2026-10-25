@@ -132,6 +132,27 @@ def read_mapping(path: Path) -> dict:
     return value
 
 
+def shared_user_settings() -> dict:
+    """Match native UserConfig: explicit defaults replace legacy tuning."""
+    legacy = Path.home() / ".hstream" / "hstream.yaml"
+    defaults = Path.home() / ".config" / "hstream-ui" / "defaults.yaml"
+
+    def present(path: Path) -> bool:
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return False
+        return True
+
+    preferences = read_mapping(legacy) if present(legacy) else {}
+    if not present(defaults):
+        return preferences
+    # An empty saved document is an intentional reset to the baseline. Keep
+    # storage preferences, but never resurrect the old tuning underneath it.
+    paths = {"paths": copy.deepcopy(preferences["paths"])} if "paths" in preferences else {}
+    return merge(paths, read_mapping(defaults))
+
+
 def native_application_config(runner: Path) -> Path:
     root = os.environ.get("HM_CONFIG_ROOT")
     candidates = (
@@ -375,9 +396,9 @@ def make_plan(
         resolve_globals=False,
     )
     # HStream user preferences precede game settings, including native aliases.
-    user = Path.home() / ".hstream" / "hstream.yaml"
-    if user.is_file():
-        config = merge(config, read_mapping(user))
+    user = shared_user_settings()
+    if user:
+        config = merge(config, user)
         if initial_args is None or not initial_args.ignore_private_config:
             private_config = game / "config.yaml"
             if private_config.is_file():
@@ -424,6 +445,8 @@ def make_plan(
                 "runtime.gpu_memory_profile",
             )
         ) and key not in {
+            "game.home_is_dark",
+            "pipeline.hmplaycropper.plot-player-tracking",
             "pipeline.hmstitcher.properties.high-bit-depth",
             "pipeline.hmaudio.enable",
             "pipeline.primary-gie.config-file",
