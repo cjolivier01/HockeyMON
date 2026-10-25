@@ -86,6 +86,12 @@ aspen:
     max_concurrent: 3
     cuda_streams: true
 
+# Initial preview-only diagnostics, shared by Qt and browser controls.
+preview_overlays:
+  players: false
+  play: false
+  rink: false
+
 # Shared Qt rendering size and browser overlay reference coordinates.
 preview_reference:
   program_width: 1600
