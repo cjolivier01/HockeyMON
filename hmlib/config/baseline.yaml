@@ -110,6 +110,10 @@ web_preview:
   surface_pool_frames: 3
   conversion_pool_frames: 8
   bitrate: 8000000
+  audio_bitrate: 128000
+  stun_server: ""
+  authored_connect_timeout_ms: 60000
+  authored_disconnect_timeout_ms: 30000
   idr_interval: 30
   h264_profile: 0
   encoder_tuning: 3
@@ -185,6 +189,9 @@ hstream_ui:
   runtime_controls:
     debounce_ms: 120
     ack_timeout_ms: 3000
+    # Outlast the native teardown watchdog, then bound forced process reaping.
+    stop_timeout_ms: 30000
+    kill_timeout_ms: 5000
   # Program detector models offered in the Detection tab. config_prefix names a
   # configs/config_infer_*.yaml family: the bare prefix is FP32 and the selected
   # precision appends _fp16/_bf16/_int8. The first entry is the default.
