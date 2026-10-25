@@ -181,6 +181,8 @@ runtime:
       maximum_cost_matrix_bytes: 8388608
 
 hstream_ui:
+  # Shared Qt/browser playback start, with optional millisecond precision.
+  playback_start_time: "00:00:00"
   # Shared Qt/browser tone values use integer slider units, including exposure.
   camera_controls:
     Bring_Up_Shadows: 0
