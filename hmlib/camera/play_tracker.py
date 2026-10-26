@@ -2697,6 +2697,7 @@ class PlayTracker(torch.nn.Module):
             {
                 "camera": camera,
                 "controller": self._camera_controller,
+                "excluded_role_labels": excluded_role_labels(self._game_config),
                 "applied_targets": self._applied_camera_targets,
                 "post_stitch_rotate_degrees": (
                     input_geometry["post_stitch_rotate_degrees"]

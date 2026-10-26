@@ -15,6 +15,11 @@ tracks or tracking-box display. The canonical configuration keys are
 Rule-based camera controls apply these exclusions live. Learned transformer/GPT
 controllers apply them at startup and require a restart to change them; live
 requests fail explicitly before changing the active settings.
+Learned controllers also filter their optional pose features by matching pose
+boxes to valid labeled tracks (at least 0.3 IoU, as in pose display matching).
+When exclusions are active, unmatched poses do not contribute camera features;
+published poses and pose overlays remain intact. Live changes to effective role
+exclusions create camera-policy boundaries in training exports.
 The selected detector supplies the class indices; single-class person detectors
 cannot apply role exclusions. Tracked boxes display GOALIE or REF, without a
 person/player label. Existing referee-overlay visibility controls remain honored.
