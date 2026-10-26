@@ -241,3 +241,47 @@ def should_preserve_roles_when_pose_replaces_detection_boxes():
     pose = [{"predictions": [{"bboxes": boxes, "bbox_scores": [0.9, 0.9, 0.9]}]}]
     PoseToDetPlugin()({"data_samples": sample, "pose_results": pose})
     assert sample[0].pred_instances.labels.tolist() == [2, 0, 1]
+
+
+def should_keep_goalie_labels_when_referee_labels_are_hidden(monkeypatch):
+    from hmlib.aspen.plugins import overlay_plugin
+
+    texts = []
+
+    def capture(**kwargs):
+        texts.append(kwargs["text"])
+        return kwargs["image"]
+
+    monkeypatch.setattr(overlay_plugin, "draw_label_box", capture)
+    _render([0, 1, 2], referee_label=2, goalie_label=1, plot_referees=False)
+    assert texts == ["GOALIE"]
+
+
+def should_filter_before_learned_camera_features(monkeypatch):
+    from hmlib.aspen.plugins import camera_controller_plugin as module
+    from hmlib.camera.camera_transformer import CameraNorm
+
+    plugin = module.CameraControllerPlugin(controller="rule", window=2)
+    plugin._controller = "transformer"
+    plugin._model = torch.nn.Linear(11, 3)
+    plugin._norm = CameraNorm(420, 320, 16)
+    captured = []
+    original = module.build_frame_features_torch
+
+    def capture(**kwargs):
+        captured.append(kwargs["tlwh"].clone())
+        return original(**kwargs)
+
+    monkeypatch.setattr(module, "build_frame_features_torch", capture)
+    tracks = _tracks([0, 1, 2])
+    sample = make_track_data_sample(
+        num_frames=1, ori_shape=(320, 420), pred_track_instances=[tracks]
+    )
+    config = {
+        "detector": {"role_labels": {"referee": 2, "goalie": 1}},
+        "rink": {"tracking": {"cam_ignore_referees": True, "cam_ignore_goalies": True}},
+    }
+    plugin({"data_samples": sample, "shared": {"game_config": config}})
+    assert len(captured) == 1 and captured[0].shape[0] == 1
+    assert captured[0][0, 0] == tracks.bboxes[0, 0]
+    assert len(tracks) == 3

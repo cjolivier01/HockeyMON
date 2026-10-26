@@ -22,6 +22,7 @@ from hmlib.camera.camera_transformer import (
 )
 from hmlib.camera.clusters import ClusterMan
 from hmlib.camera.rink_context import StaticRinkEncoderCache
+from hmlib.camera.role_filter import camera_role_mask, excluded_role_labels
 from hmlib.log import logger
 from hmlib.tracking_utils.utils import get_track_mask
 from hmlib.utils.gpu import unwrap_tensor, wrap_tensor
@@ -633,6 +634,15 @@ class CameraControllerPlugin(Plugin):
                 self._prev_h = None
                 self._prev_y = None
             track_mask = get_track_mask(inst)
+            role_config = (context.get("shared") or {}).get("game_config") or {}
+            if excluded_role_labels(role_config):
+                labels = unwrap_tensor(inst.labels).reshape(-1).to(det_tlbr.device)
+                if labels.numel() != det_tlbr.shape[0]:
+                    raise ValueError("Camera track labels and boxes must align")
+                role_mask = camera_role_mask(labels, role_config)
+                track_mask = (
+                    role_mask if track_mask is None else track_mask.to(role_mask.device) & role_mask
+                )
             if isinstance(track_mask, torch.Tensor):
                 det_tlbr = det_tlbr[track_mask]
             if det_tlbr.numel() == 0:

@@ -402,3 +402,54 @@ def should_match_native_excluded_player_ids(tlwhs, count, enabled, percent, expe
     result = tracker.forward(list(range(len(boxes))), native_boxes)
     native_ids = sorted(track.tracking_id for track in result.size_ignored_tracking_boxes)
     assert native_ids == (~keep).nonzero().flatten().tolist() == expected
+
+
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("exclude_goalie", [False, True])
+def should_share_camera_subjects_with_rink_guide_and_preserve_minimap(
+    monkeypatch, native, exclude_goalie
+):
+    from hmlib.ui import calibration_workspace
+
+    config = _base_game_config()
+    config["detector"] = {"role_labels": {"goalie": 1, "referee": 2}}
+    config["rink"]["tracking"].update(
+        cam_ignore_largest=True,
+        cam_ignore_largest_count=1,
+        cam_ignore_goalies=exclude_goalie,
+        cam_ignore_referees=False,
+    )
+    tracker = _build_tracker(config, {}, cpp_playtracker=native)
+    tracker._rink_map = {}
+    received = []
+
+    def step(*args):
+        received.append(args[4].tolist())
+        return args[1]
+
+    tracker._rink_guide = SimpleNamespace(image_size=(960, 540), step=step)
+    monkeypatch.setattr(
+        calibration_workspace, "project_rink_points", lambda points, *args, **kwargs: points
+    )
+    results = _make_results_from_box_list(
+        [
+            torch.tensor(
+                [
+                    [10, 10, 300, 300],
+                    [320, 20, 500, 200],
+                    [520, 20, 550, 80],
+                    [560, 20, 590, 80],
+                    [600, 20, 630, 80],
+                    [640, 20, 670, 80],
+                ],
+                dtype=torch.float32,
+            )
+        ]
+    )
+    tracks = results["data_samples"].video_data_samples[0].pred_track_instances
+    tracks.labels = torch.tensor([1, 0, 0, 0, 0, 0])
+    output = tracker.forward(results)
+    assert received == [[3, 4, 5, 6] if exclude_goalie else [2, 3, 4, 5, 6]]
+    assert output["player_ids"][0].tolist() == [1, 2, 3, 4, 5, 6]
+    assert output["player_bottom_points"][0].shape[0] == 6
+    assert tracks.instances_id.tolist() == [1, 2, 3, 4, 5, 6]

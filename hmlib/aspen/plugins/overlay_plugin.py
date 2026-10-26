@@ -316,10 +316,10 @@ class OverlayPlugin(Plugin):
         track; this overprints a REF label on the officials rather than
         recolouring, so the track identity stays readable.
         """
-        if labels is None or not self._plot_referees:
+        if labels is None:
             return img_f
         is_referee = torch.zeros_like(labels, dtype=torch.bool)
-        for role in (self._referee_label, self._goalie_label):
+        for role in (self._referee_label if self._plot_referees else None, self._goalie_label):
             if role is not None:
                 is_referee |= labels == role
         if not bool(is_referee.any()):

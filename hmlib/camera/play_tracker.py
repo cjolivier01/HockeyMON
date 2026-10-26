@@ -30,6 +30,7 @@ from hmlib.camera.camera import HockeyMON
 from hmlib.camera.camera_policy import CameraPolicyRecorder
 from hmlib.camera.clusters import ClusterMan
 from hmlib.camera.moving_box import MovingBox
+from hmlib.camera.role_filter import camera_role_mask, excluded_role_labels
 from hmlib.camera.zoom import zoom_in_shrink_thresholds
 from hmlib.config import (
     get_config,
@@ -962,19 +963,8 @@ class PlayTracker(torch.nn.Module):
 
     def _play_role_mask(self, ids, track_inst):
         """Select camera subjects without changing the published track instances."""
-        roles = get_nested_value(self._game_config, "detector.role_labels", {})
-        excluded = []
-        for role in ("referee", "goalie"):
-            enabled = get_nested_value(
-                self._game_config, f"rink.tracking.cam_ignore_{role}s", False
-            )
-            if not isinstance(enabled, bool):
-                raise TypeError(f"cam_ignore_{role}s must be a boolean")
-            if enabled and roles.get(role) is not None:
-                excluded.append(roles[role])
-        keep = torch.ones_like(ids, dtype=torch.bool)
-        if not excluded:
-            return keep
+        if not excluded_role_labels(self._game_config):
+            return torch.ones_like(ids, dtype=torch.bool)
         labels = unwrap_tensor(track_inst.labels).reshape(-1).to(ids.device)
         source_ids = unwrap_tensor(track_inst.instances_id).reshape(-1).to(ids.device)
         if labels.shape != source_ids.shape:
@@ -983,9 +973,7 @@ class PlayTracker(torch.nn.Module):
         if source_mask is not None:
             source_mask = source_mask.to(device=ids.device, dtype=torch.bool)
             source_ids, labels = source_ids[source_mask], labels[source_mask]
-        rejected = torch.zeros_like(labels, dtype=torch.bool)
-        for label in excluded:
-            rejected |= labels == label
+        rejected = ~camera_role_mask(labels, self._game_config)
         return ~torch.isin(ids, source_ids[rejected])
 
     def _kmeans_cuda_device(self):
@@ -1481,11 +1469,11 @@ class PlayTracker(torch.nn.Module):
                         cluster_enclosing_box = get_enclosing_box(cluster_boxes)
 
             # Compute per-player representative points for minimap
-            if isinstance(online_tlwhs, torch.Tensor) and online_tlwhs.numel() > 0:
+            if isinstance(display_tracks[2], torch.Tensor) and display_tracks[2].numel() > 0:
                 # centers and bottoms
-                cx = online_tlwhs[:, 0] + online_tlwhs[:, 2] / 2.0
-                cy = online_tlwhs[:, 1] + online_tlwhs[:, 3] / 2.0
-                by = online_tlwhs[:, 1] + online_tlwhs[:, 3]
+                cx = display_tracks[2][:, 0] + display_tracks[2][:, 2] / 2.0
+                cy = display_tracks[2][:, 1] + display_tracks[2][:, 3] / 2.0
+                by = display_tracks[2][:, 1] + display_tracks[2][:, 3]
                 # Default to bottom points
                 rep_x = cx
                 rep_y = by
@@ -1507,7 +1495,9 @@ class PlayTracker(torch.nn.Module):
                 foot_points = torch.empty((0, 2), dtype=torch.float32)
             player_bottom_points_list.append(foot_points)
             player_ids_list.append(
-                online_ids.clone() if isinstance(online_ids, torch.Tensor) else torch.tensor([])
+                display_tracks[0].clone()
+                if isinstance(display_tracks[0], torch.Tensor)
+                else torch.tensor([])
             )
 
             # if self._plot_boundaries and self._boundaries is not None:
@@ -1540,6 +1530,16 @@ class PlayTracker(torch.nn.Module):
                                     thickness=1,
                                 )
 
+            # Guidance consumes exactly the camera subjects, while drawing uses every track.
+            guide_ids, guide_tlwhs = online_ids, online_tlwhs
+            if self._rink_guide is not None and self._playtracker is not None:
+                guide_keep = player_size_exclusion_mask(
+                    guide_tlwhs,
+                    self._cam_ignore_largest_count if self._cam_ignore_largest else 0,
+                    self._cam_ignore_oversized,
+                    self._cam_oversized_percent,
+                )
+                guide_ids, guide_tlwhs = guide_ids[guide_keep], guide_tlwhs[guide_keep]
             online_ids, online_bboxes_tlbr, online_tlwhs = display_tracks
             # Maybe draw trajectories...
             if self._plot_trajectories:
@@ -1791,27 +1791,15 @@ class PlayTracker(torch.nn.Module):
                             self._rink_map,
                             image_size=size,
                         )
-                    mask = (
-                        player_size_exclusion_mask(
-                            online_tlwhs,
-                            self._cam_ignore_largest_count if self._cam_ignore_largest else 0,
-                            self._cam_ignore_oversized,
-                            self._cam_oversized_percent,
-                        )
-                        .detach()
-                        .cpu()
-                        .numpy()
-                        if self._playtracker is not None
-                        else np.ones(len(boxes), dtype=bool)
-                    )
-                    mask &= self._play_role_mask(online_ids, track_inst).detach().cpu().numpy()
+                    guide_boxes = guide_tlwhs.detach().cpu().numpy().copy()
+                    guide_boxes[:, 2:] += guide_boxes[:, :2]
                     guided = self._rink_guide.step(
                         int(scalar_frame_id)
                         / (HockeyMON.BASE_FPS * self._hockey_mon.fps_speed_scale),
                         current_box_list[-1].detach().cpu().numpy(),
                         self._play_box.detach().cpu().numpy(),
-                        boxes[mask],
-                        online_ids.detach().cpu().numpy()[mask],
+                        guide_boxes,
+                        guide_ids.detach().cpu().numpy(),
                         (
                             cluster_enclosing_box.detach().cpu().numpy()
                             if isinstance(cluster_enclosing_box, torch.Tensor)
