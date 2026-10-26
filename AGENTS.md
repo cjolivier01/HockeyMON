@@ -73,6 +73,14 @@
   Browser admission is still gated on audio, publication and shared workflow
   qualification; see `docs/hstream-web-program.md`. Preserve the existing
   desktop protocol and native calibration ownership when extending this path.
+- `hmlib/ui/hstream_web_content.py` inspects pinned Program media, telemetry and
+  companion files in a bounded CPU subprocess before publishing the negotiated
+  `pinned-output-content-v1` manifest. Keep it byte-identical to HockeyMONWeb's
+  `tools/hockeymon_content.py`, which independently verifies adoption. The web
+  telemetry binding is a normal recorder configuration event; desktop schema
+  and native calibration ownership stay unchanged. Archive inspection remains
+  contained after Stop under the bounded allowance described in
+  `docs/hstream-web-program.md`.
 - Shared desktop launch reads `~/.config/hstream-ui/defaults.yaml` when present, retaining only `paths` from legacy `~/.hstream/hstream.yaml`; an empty defaults document resets tuning to the baseline. Game settings remain above this user layer, and malformed defaults fail launch. Native encoded rink mini-maps are unsupported in Python Program: enabling `output.rink-map.enable` fails launch instead of silently dropping the overlay.
 - Shared playback pause is cooperative once the Python frame-owner mailbox exists: emit `HSTREAM_PROCESS_PAUSE ... mode=cooperative` only after its receipt, keep runtime edits and graceful Stop responsive, and retain the acknowledged pause across seek replacement. The first replacement batch supplies its preview before `seek_ready` permits the seek receipt; it does not resume audio. Startup/native preparation retains Qt's process-group signal fallback without the cooperative mode.
 - Shared analytics choices are translated by `hmlib/ui/shared_analytics.py`; `hstream-model-prepare` owns native cache preparation before Python starts. Python executes the selected ONNX bundles or the exact default DeepStream ETLT-derived TensorRT appearance engine, validates their contracts and hashes, and retains accepted assets across seeks. The preparer resolves `pipeline.player-analytics.gpu-id` and `pipeline.tracker.gpu-id`; each shared model carries its accepted device through the graph to its ONNX provider or native helper, including seek rebuilds. The supervisor writes a session/game-bound `accepted-models.json`; `hmtrack.main` reapplies only its accepted bindings after original YAML/CLI overrides, preserving captured relative custom paths without letting those reloads reset the prepared GPU. Changed model/custom-path identities fail, and the snapshot never enters saved user config. Shared pose binds both inputs and outputs to that device, moving only bounded crops when preprocessing uses another GPU. Preserve explicit initial Python model overrides and never substitute a different model for a shared menu selection.

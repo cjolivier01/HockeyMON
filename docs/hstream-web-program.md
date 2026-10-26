@@ -295,6 +295,16 @@ preview publication under the encoder's commit lock. Queued and in-flight JPEGs
 cannot republish afterward. Stop acceptance is distinct from descendant retirement
 and output adoption, which remain the outer supervisor's responsibility.
 
+For an archived or telemetry run with negotiated `pinned-output-content-v1`,
+the outer bridge adds the content helper's exact 120-second wall cap once to
+the original Stop deadline, only after validating an applied acknowledgment
+within the ordinary stop grace. The producer still stops its processing child
+under its existing watchdog before inspecting closed outputs. This allowance
+keeps the current control protocol unchanged; missing, failed, late and repeated
+acknowledgments cannot extend it, and unarchived or legacy runs keep the ordinary
+grace. Cancellation and the outer total run deadline still bound finalization,
+and all descendants remain owned until confirmed cleanup.
+
 Seek returns `position_ns` and `owner` only after the supervised replacement has
 a different session and reports its first completed batch with `seek_ready: true`.
 The acknowledgment echoes the old request session; `result.owner` carries the
@@ -364,3 +374,60 @@ durable. The outer supervisor must still prove descendant retirement, compare th
 run/deployment/request bindings and verify video, sidecar and telemetry contents
 before adopting artifacts. A child exit code or the desktop publication log alone
 is never an adoption receipt. Producer failures do not publish a success receipt.
+
+
+Archives and telemetry additionally require `pinned-output-content-v1`. After
+committed-output descriptors and admitted inputs are rechecked, the producer
+writes `hockeymon-output-content-VERSION.json` exclusively and fsyncs it and the
+game directory. Its logical name is `hockeymon-output-content.json`, kind is
+`metadata`, and version matches every output/companion. Its bytes count toward
+ordinary artifact/quota accounting. Legacy unarchived v1 empty completion stays
+compatible; archive/telemetry adoption without this feature/manifest fails.
+
+The manifest's `hstream-web-output-content` protocol version 1 records the exact
+request digest, run/deployment/runtime, ordered admitted sources, opaque native
+calibration tuple, launch selection, common publication version, and each actual
+artifact's size/SHA-256 and inspected format. These claims supplement CPU
+inspection; they never substitute for probing the retained output descriptors.
+The web service independently recomputes and compares this document after
+supervised descendant retirement.
+
+`hmlib/ui/hstream_web_content.py` mirrors HockeyMONWeb's
+`tools/hockeymon_content.py` byte-for-byte. The helper inherits only pinned file
+descriptors, probes packet/stream timelines with CPU ffprobe, and decodes the
+first video frame with CPU ffmpeg. MOV/MP4 and Matroska/WebM with H.264/HEVC or
+MPEG-4 video and at most one AAC/Opus audio stream are supported. Explicit Program
+size and output FPS from the pinned admitted configuration are checked alongside
+bounded dimensions, packet counts, duration/start and cross-archive timelines.
+The Program 4K role requires the fixed 3840x2160 ApplyCameraPlugin canvas;
+normal Program recording dimensions do not change it.
+Automatic/aspect-derived and encoder-limited stitched geometry is recorded,
+not inferred. This does not establish every-frame decodability, visual source
+identity, audio timing or GPU/shared-workflow parity.
+
+SQLite is inspected from a bounded private snapshot copied with `pread` from the
+retained descriptor; SQLite's own `/proc/self/fd` resolution cannot reopen a
+replaced tenant pathname. Inspection requires the actual v1 DDL/application ID,
+completed recorder UUID, outcome/sample counts, references/ordinals, finite
+observations, replay/checkpoint shapes and exact PNG masks/canvases. On web-only
+recorder creation, config event 2 is `web-program-binding`, key `request-v1`,
+boundary 1, and canonical manifest request binding as its value. Camera events
+continue at 3. This changes no SQLite schema or desktop recording behavior.
+Chapter-local PTS is not authoritative playlist/audio time.
+
+Known headerless CSV layouts and mask PNGs are inspected; empty CSVs are valid.
+Policy CSVs retain `hm-camera-policy-v1` and their paired camera companion. A
+present policy requires nonempty policy/camera rows, startup at the minimum
+paired camera frame, and every boundary in that actual camera CSV. Where
+telemetry exists, companion source-frame IDs and mask canvases must agree.
+Unknown metadata, unsupported rink-input payloads and segmented recordings fail
+closed. Browser recording toggles/repeated output roles need their own admission
+contract.
+
+Limits are 32 artifacts, 64 GiB per media file, 2 GiB SQLite, 32 MiB companions,
+4 MiB manifest, 20 million rows per table/CSV, 32768 pixels per axis and
+256 megapixels. The isolated helper has 120 wall seconds, 90 CPU seconds, 1 GiB
+address space, bounded external diagnostics and 45 seconds per ffmpeg probe.
+Failure/timeout kills the contained process group and removes private snapshots.
+These CPU fixtures leave public browser admission closed and preserve the
+remaining audio, seek, GPU/export and shared-control qualification gaps.

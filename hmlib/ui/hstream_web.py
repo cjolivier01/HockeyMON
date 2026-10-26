@@ -16,6 +16,7 @@ import stat
 import sys
 import tempfile
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -252,6 +253,7 @@ def capabilities() -> dict[str, Any]:
             "confined-publication-v1",
             "selected-jpeg-snapshot-v1",
             "typed-runtime-controls-v1",
+            "pinned-output-content-v1",
         ],
         "qualified": False,
         "missing": [
@@ -679,7 +681,7 @@ class WebProgram:
             kind = record["kind"]
             if kind not in {*OUTPUT_KINDS.values(), "telemetry", "metadata"}:
                 raise ValueError("Invalid producer artifact kind")
-            pinned = PinnedFile(self.game, path.name)
+            pinned = PinnedFile(self.game, path.name, allow_empty=kind == "metadata")
             try:
                 if pinned.identity != record["identity"]:
                     raise ValueError("Published output changed before terminal receipt")
@@ -704,6 +706,59 @@ class WebProgram:
             raise ValueError("Published outputs and companions do not share one generation")
         if status == "complete" and kinds != self.expected_outputs():
             raise ValueError("Published output kinds differ from the admitted selection")
+        if status == "complete" and kinds:
+            from hmlib.ui import hstream_web_content as content
+
+            with ExitStack() as stack:
+                pins = {}
+                for artifact in artifacts:
+                    pin = PinnedFile(
+                        self.game,
+                        Path(artifact["path"]).name,
+                        allow_empty=artifact["kind"] == "metadata",
+                    )
+                    stack.callback(pin.close)
+                    if pin.identity != {key: artifact[key] for key in pin.identity}:
+                        raise ValueError("Published output changed before content validation")
+                    pins[artifact["path"]] = pin
+                manifest = content.run_probe(
+                    self.document,
+                    artifacts,
+                    pins,
+                    configuration=self.pins["game_config"],
+                )
+                for pin in pins.values():
+                    pin.check()
+                self.check()
+                version = next(iter(versions))
+                filename = content.manifest_filename(version)
+                descriptor = os.open(
+                    self.game / filename,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    0o600,
+                )
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(content.canonical(manifest))
+                    output.flush()
+                    os.fsync(output.fileno())
+                directory = os.open(self.game, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+                pin = PinnedFile(self.game, filename)
+                try:
+                    artifacts.append(
+                        {
+                            "path": "game/" + filename,
+                            "name": content.MANIFEST_NAME,
+                            "kind": "metadata",
+                            "version": version,
+                            **pin.identity,
+                        }
+                    )
+                finally:
+                    pin.close()
         document = {
             "protocol": PROTOCOL,
             "version": 1,
@@ -845,7 +900,7 @@ def publication_records(records: list[dict]) -> list[dict]:
         kind = record.get("kind", "metadata")
         if kind == "metadata" and path.suffix.lower() in {".mp4", ".mkv", ".mov", ".db", ".sqlite"}:
             raise ValueError("Published media requires its producer's logical kind")
-        pinned = PinnedFile(root / "game", path.name)
+        pinned = PinnedFile(root / "game", path.name, allow_empty=kind == "metadata")
         try:
             os.fsync(pinned.fd)
             result.append({**record, "kind": kind, "identity": pinned.identity})

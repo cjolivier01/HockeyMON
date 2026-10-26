@@ -347,11 +347,31 @@ def should_publish_only_exact_confined_outputs_after_private_work_cleanup(admitt
     context = open_admitted(admitted, monkeypatch)
     try:
         source = context.output / "video.mp4"
-        source.write_bytes(b"closed video")
-        metadata = context.output / "video.json"
-        metadata.write_text('{"complete":true}')
+        subprocess.run(
+            [
+                "/usr/bin/ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x48:r=10:d=0.3",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+                str(source),
+            ],
+            check=True,
+            timeout=20,
+        )
+        metadata = context.output / "tracking.csv"
+        metadata.write_bytes(b"")
         result = publish_artifacts(
-            {"video.mp4": source, "video.json": metadata},
+            {"video.mp4": source, "tracking.csv": metadata},
             context.game,
             kinds={"video.mp4": "program"},
         )
@@ -362,7 +382,8 @@ def should_publish_only_exact_confined_outputs_after_private_work_cleanup(admitt
         receipt = context.receipt("complete", records)
         assert receipt["request_digest"] == admitted.document["request_digest"]
         assert {row["path"] for row in receipt["artifacts"]} == {
-            "game/" + path.name for path in result.files.values()
+            *("game/" + path.name for path in result.files.values()),
+            "game/hockeymon-output-content-1.json",
         }
         assert all(
             {"device", "inode", "size", "mtime_ns", "ctime_ns"} <= row.keys()
@@ -715,5 +736,88 @@ def should_reject_nonregular_or_unbounded_publication_journals(admitted, monkeyp
             journal.write_bytes(b"x" * (web.MAX_RECEIPT_BYTES + 1))
         with pytest.raises((ValueError, OSError)):
             web.read_publications(context.root)
+    finally:
+        context.close()
+
+
+def should_publish_actual_web_bound_telemetry_recording(admitted, monkeypatch):
+    import numpy as np
+    import torch
+
+    from hmlib.telemetry.recorder import TelemetryRecorder, complete_recording
+    from hmlib.ui import hstream_web_content as content
+
+    admitted.document["launch"]["telemetry"] = True
+    admitted.write()
+    context = open_admitted(admitted, monkeypatch)
+    try:
+        recorder = TelemetryRecorder(context.output, "game", {}, {"cameras"})
+        recorder.new_batch().capture(
+            "cameras",
+            {
+                "frame_ids": torch.tensor([0, 1]),
+                "frame_id": 0,
+                "fps": 10,
+                "original_images": torch.zeros(2, 3, 48, 64),
+                "current_box": torch.tensor([[0.0, 0.0, 64.0, 48.0], [0.0, 0.0, 64.0, 48.0]]),
+                "rink_profile": {"combined_mask": np.ones((48, 64), dtype=bool)},
+                "camera_policy_events": [{"frame": 0, "kind": "startup", "policy": {"zoom": 1}}],
+            },
+        )
+        recorder.close()
+        complete_recording(recorder.path)
+        publish_artifacts(
+            {"game_telemetry.db": recorder.path},
+            context.game,
+            kinds={"game_telemetry.db": "telemetry"},
+        )
+        receipt = context.receipt("complete", web.read_publications(context.root))
+        assert {row["kind"] for row in receipt["artifacts"]} == {"telemetry", "metadata"}
+        manifest = json.loads((context.game / content.manifest_filename(1)).read_bytes())
+        assert manifest["artifacts"][0]["format"]["recording_id"] == recorder.run_id
+        assert manifest["artifacts"][0]["format"]["counts"]["config_events"] == 3
+    finally:
+        context.close()
+
+
+def should_keep_content_validator_schema_equal_to_actual_recorder_schema():
+    from hmlib.ui import hstream_web_content as content
+
+    path = Path(__file__).parents[1] / "hmlib/telemetry/schema.sql"
+    assert content.TELEMETRY_SCHEMA == path.read_text()
+
+
+def should_refuse_low_resolution_media_for_program_4k_publication(admitted, monkeypatch):
+    admitted.document["launch"]["sinks"] = ["ENCODE_PROGRAM_4K_FILE"]
+    admitted.write()
+    context = open_admitted(admitted, monkeypatch)
+    try:
+        source = context.output / "program_4k_output.mkv"
+        subprocess.run(
+            [
+                "/usr/bin/ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x48:r=10:d=0.3",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-threads",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+                str(source),
+            ],
+            check=True,
+            timeout=20,
+        )
+        publish_artifacts({source.name: source}, context.game, kinds={source.name: "program-4k"})
+        with pytest.raises(ValueError, match="3840x2160"):
+            context.receipt("complete", web.read_publications(context.root))
+        assert not (context.root / web.RECEIPT_NAME).exists()
+        assert not (context.game / "hockeymon-output-content-1.json").exists()
     finally:
         context.close()
