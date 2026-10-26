@@ -54,6 +54,28 @@ def should_apply_shared_memory_profile_to_python_processing(native, python):
     assert config["hm_ui"]["run"]["memory_profile"] == python
 
 
+@pytest.mark.parametrize("choice", ["normal", "low"])
+def should_keep_python_memory_choice_above_new_canonical_auto_baseline(game, choice):
+    config = yaml.safe_load((game / "config.yaml").read_text())
+    config["hm_ui"] = {"run": {"memory_profile": choice}}
+    (game / "config.yaml").write_text(yaml.safe_dump(config))
+    plan = make_plan(parser().parse_args(["-g", game.name, "--enable-sinks=FAKE"]))
+    assert plan.config["runtime"]["gpu_memory_profile"] == "auto"
+    assert plan.config["hm_ui"]["run"]["memory_profile"] == choice
+    for native, expected in [("low", "low"), ("standard", "normal"), ("auto", "automatic")]:
+        plan = make_plan(
+            parser().parse_args(
+                [
+                    "-g",
+                    game.name,
+                    "--enable-sinks=FAKE",
+                    "--options=runtime.gpu_memory_profile=" + native,
+                ]
+            )
+        )
+        assert plan.config["hm_ui"]["run"]["memory_profile"] == expected
+
+
 def should_match_native_network_sink_address_and_rtmp_precedence():
     from hmlib.ui.hstream_launch import _translate_native_settings
 

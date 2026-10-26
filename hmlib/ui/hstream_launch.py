@@ -459,7 +459,9 @@ def make_plan(
                 f"The HockeyMON backend does not implement native launch setting {key}"
             )
         set_path(config, key, value)
-    _translate_native_settings(config, sinks)
+    _translate_native_settings(
+        config, sinks, memory_profile_explicit="runtime.gpu_memory_profile" in options
+    )
     run = config.setdefault("hm_ui", {}).setdefault("run", {})
     run["save_video"] = "ENCODE_FILE" in sinks
     set_path(config, "video_out.archive_program", "ENCODE_FILE" in sinks)
@@ -703,13 +705,22 @@ def make_plan(
     )
 
 
-def _translate_native_settings(config: dict, sinks: set[str]) -> None:
+def _translate_native_settings(
+    config: dict, sinks: set[str], *, memory_profile_explicit: bool = False
+) -> None:
     memory_profile = get_path(config, "runtime.gpu_memory_profile")
     if memory_profile is not None:
         profiles = {"auto": "automatic", "standard": "normal", "low": "low"}
         if memory_profile not in profiles:
             raise ValueError(f"Unknown GPU memory profile: {memory_profile}")
-        set_path(config, "hm_ui.run.memory_profile", profiles[memory_profile])
+        # Canonical baseline auto must not erase a saved Python-only choice.
+        # Explicit shared UI launch options still win, including explicit auto.
+        if (
+            memory_profile != "auto"
+            or memory_profile_explicit
+            or get_path(config, "hm_ui.run.memory_profile") is None
+        ):
+            set_path(config, "hm_ui.run.memory_profile", profiles[memory_profile])
     controls = get_path(config, "hstream_ui.camera_controls", {})
     for name, key, divisor in (
         ("Bring_Up_Shadows", "shadow_lift", 1),

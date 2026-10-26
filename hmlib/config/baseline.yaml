@@ -132,6 +132,8 @@ web_preview:
 # Runtime defaults consumed by Aspen plugins
 #
 runtime:
+  # Native GPU pool sizing; explicit UI choices last only for the current session.
+  gpu_memory_profile: auto
   # Valid values: nvvideoconvert, dsxvideoconvert.
   video_converter: "nvvideoconvert"
 
@@ -234,6 +236,13 @@ hstream_ui:
 # Native player pose cadence and display defaults. Enabling/drawing pose remains
 # an explicit choice; these preferences do not enable the model.
 pipeline:
+  ds-playtracker:
+    private-properties:
+      # Next-run Program framing; a reviewed map must match the calibration.
+      rink-camera-enable: 0
+      rink-camera-anticipate: 1
+      rink-camera-frame-goals: 0
+      rink-camera-adaptive-zoom: 0
   hmstitcher:
     properties:
       # Auto detects source depth; 1 forces P010/FP16, 0 forces standard 8-bit.
