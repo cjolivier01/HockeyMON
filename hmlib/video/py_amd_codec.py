@@ -6,9 +6,10 @@ import shutil
 import subprocess
 import threading
 from collections import deque
+from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, ClassVar
 from urllib.parse import urlparse
 
 import torch
@@ -18,11 +19,12 @@ from hmlib.log import get_logger
 from hmlib.utils.finalization import finalize_resources
 from hmlib.utils.gpu import StreamTensorBase, unwrap_tensor, wrap_tensor
 from hmlib.video.ffmpeg import BasicVideoInfo, preexec_fn
+from hmlib.video.frame_timing import DecodedTimestamp, FFmpegFrameTiming, read_ffmpeg_timing
 
 logger = get_logger(__name__)
 
 
-def _ffmpeg_path() -> Optional[str]:
+def _ffmpeg_path() -> str | None:
     return shutil.which("ffmpeg")
 
 
@@ -50,7 +52,8 @@ def _read_ffmpeg_listing(*args: str) -> set[str]:
             stderr=subprocess.STDOUT,
             text=True,
         )
-    except Exception:
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning("Could not inspect FFmpeg capabilities: %s", error)
         return set()
     items: set[str] = set()
     for line in raw.splitlines():
@@ -65,8 +68,8 @@ def _read_ffmpeg_listing(*args: str) -> set[str]:
     return items
 
 
-_FFMPEG_ENCODERS: Optional[set[str]] = None
-_FFMPEG_HWACCELS: Optional[set[str]] = None
+_FFMPEG_ENCODERS: set[str] | None = None
+_FFMPEG_HWACCELS: set[str] | None = None
 
 
 def _get_ffmpeg_encoders() -> set[str]:
@@ -83,7 +86,7 @@ def _get_ffmpeg_hwaccels() -> set[str]:
     return _FFMPEG_HWACCELS
 
 
-def _best_vaapi_device() -> Optional[str]:
+def _best_vaapi_device() -> str | None:
     env_device = (os.environ.get("HM_AMD_VAAPI_DEVICE") or "").strip()
     candidates = [env_device] if env_device else []
     candidates.extend(
@@ -111,7 +114,7 @@ def _has_amf_runtime() -> bool:
 class PyAmdVideoCodec:
     """Capability helpers for AMD-backed video encode/decode paths."""
 
-    _CODEC_ALIASES = {
+    _CODEC_ALIASES: ClassVar[dict[str, str]] = {
         "av1": "av1",
         "h264": "h264",
         "avc": "h264",
@@ -120,7 +123,7 @@ class PyAmdVideoCodec:
     }
 
     @classmethod
-    def normalize_codec(cls, codec: Optional[str]) -> str:
+    def normalize_codec(cls, codec: str | None) -> str:
         key = (codec or "h264").strip().lower()
         for token, family in cls._CODEC_ALIASES.items():
             if token in key:
@@ -128,7 +131,7 @@ class PyAmdVideoCodec:
         raise ValueError(f"Unsupported AMD codec {codec!r}; expected h264, hevc/h265, or av1.")
 
     @classmethod
-    def bitstream_format(cls, codec: Optional[str]) -> str:
+    def bitstream_format(cls, codec: str | None) -> str:
         family = cls.normalize_codec(codec)
         if family == "av1":
             return "ivf"
@@ -144,7 +147,7 @@ class PyAmdVideoCodec:
         return device
 
     @classmethod
-    def is_encoder_available(cls, codec: Optional[str] = None, backend: str = "auto") -> bool:
+    def is_encoder_available(cls, codec: str | None = None, backend: str = "auto") -> bool:
         try:
             cls.resolve_encoder(codec or "h264", backend=backend)
             return True
@@ -183,7 +186,7 @@ class PyAmdVideoCodec:
         return "software"
 
     @classmethod
-    def resolve_encoder(cls, codec: Optional[str], backend: str = "auto") -> str:
+    def resolve_encoder(cls, codec: str | None, backend: str = "auto") -> str:
         family = cls.normalize_codec(codec)
         candidates = (
             [f"{family}_vaapi", f"{family}_amf"]
@@ -219,13 +222,13 @@ class PyAmdVideoDecoder:
     @typechecked
     def __init__(
         self,
-        input_path: Union[str, Path],
+        input_path: str | Path,
         *,
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         backend: str = "auto",
         batch_size: int = 1,
         output_format: str = "bgr24",
-        vaapi_device: Optional[str] = None,
+        vaapi_device: str | None = None,
         loglevel: str = "warning",
     ) -> None:
         self.input_path = str(input_path)
@@ -250,9 +253,11 @@ class PyAmdVideoDecoder:
         self.frames_delivered_count = 0
         self._frame_bytes = int(self.width * self.height * 3)
         self._start_time = 0.0
-        self._process: Optional[subprocess.Popen[bytes]] = None
-        self._stderr_thread: Optional[threading.Thread] = None
+        self._process: subprocess.Popen[bytes] | None = None
+        self._stderr_thread: threading.Thread | None = None
         self._stderr_tail: deque[str] = deque(maxlen=40)
+        self.last_frame_timing: list[DecodedTimestamp] = []
+        self._timing = FFmpegFrameTiming()
         if self.backend == "software":
             logger.warning(
                 "PyAmdVideoDecoder is using FFmpeg software decode. "
@@ -260,23 +265,18 @@ class PyAmdVideoDecoder:
             )
         self.open()
 
-    def _stderr_worker(self, pipe) -> None:
-        try:
-            for raw_line in iter(pipe.readline, b""):
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if line:
-                    self._stderr_tail.append(line)
-        finally:
-            pipe.close()
+    def _stderr_worker(self, pipe, timing: FFmpegFrameTiming) -> None:
+        read_ffmpeg_timing(pipe, timing, self._stderr_tail.append)
 
     def _build_cmd(self) -> list[str]:
         cmd = [
             self._ffmpeg_path,
             "-hide_banner",
             "-loglevel",
-            self.loglevel,
+            self.loglevel if self.loglevel in {"verbose", "debug", "trace"} else "info",
             "-nostats",
             "-nostdin",
+            "-copyts",
         ]
         if self.backend == "vaapi":
             cmd += [
@@ -287,59 +287,84 @@ class PyAmdVideoDecoder:
                 "-hwaccel_output_format",
                 "vaapi",
             ]
-        cmd += ["-i", self.input_path]
         if self._start_time > 0:
-            # Output-side -ss keeps seeking frame-accurate for exact frame-number requests.
+            # Accurate input seeking drops preroll before showinfo. Keep source
+            # timestamps and avoid decoding the full prefix on a late seek.
             cmd += ["-ss", f"{self._start_time:.6f}"]
-        if self.backend == "vaapi":
-            cmd += ["-vf", "hwdownload,format=bgr24"]
+        cmd += ["-i", self.input_path, "-map", "0:v:0", "-an", "-sn", "-dn"]
+        filters = ["hwdownload", "format=bgr24"] if self.backend == "vaapi" else []
+        cmd += ["-vf", ",".join([*filters, "showinfo=checksum=0"])]
         cmd += [
+            "-fps_mode",
+            "passthrough",
             "-f",
             "rawvideo",
             "-pix_fmt",
             self.output_format,
+            "-flush_packets",
+            "1",
             "pipe:1",
         ]
         return cmd
 
     def open(self) -> None:
         self.close()
+        self._timing = FFmpegFrameTiming()
+        self.last_frame_timing = []
         self._process = subprocess.Popen(
             self._build_cmd(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=10**8,
-            preexec_fn=preexec_fn,
+            preexec_fn=preexec_fn,  # noqa: PLW1509 - retain existing parent-death ownership
         )
         assert self._process.stderr is not None
         self._stderr_thread = threading.Thread(
             target=self._stderr_worker,
-            args=(self._process.stderr,),
+            args=(self._process.stderr, self._timing),
             daemon=True,
         )
         self._stderr_thread.start()
 
     def get_index_from_time_in_seconds(self, timestamp: float) -> int:
-        return max(0, int(round(float(timestamp) * self.fps)))
+        return max(0, round(float(timestamp) * self.fps))
 
     def seek_to_index(self, frame_index: int) -> None:
         self._start_time = max(0.0, float(frame_index) / max(self.fps, 1e-6))
         self.open()
 
-    def read_batch(
-        self, batch_size: Optional[int] = None
-    ) -> Optional[Union[torch.Tensor, StreamTensorBase]]:
+    def read_batch(self, batch_size: int | None = None) -> torch.Tensor | StreamTensorBase | None:
         process = self._process
         if process is None or process.stdout is None:
             raise RuntimeError("AMD decoder is not open.")
         batch = int(batch_size or self.batch_size)
-        raw = process.stdout.read(self._frame_bytes * batch)
-        if not raw:
+        storage, timestamps = bytearray(self._frame_bytes * batch), []
+        for index in range(batch):
+            start, received = index * self._frame_bytes, 0
+            while received < self._frame_bytes:
+                count = process.stdout.readinto(
+                    memoryview(storage)[start + received : start + self._frame_bytes]
+                )
+                if not count:
+                    break
+                received += count
+            if received != self._frame_bytes:
+                code = process.wait()
+                if self._stderr_thread is not None:
+                    self._stderr_thread.join(timeout=1)
+                if received or code:
+                    raise RuntimeError(
+                        f"AMD decode failed ({code}): {'; '.join(self._stderr_tail)}"
+                    )
+                self._timing.assert_drained()
+                break
+            timestamps.append(self._timing.take())
+        if not timestamps:
             return None
-        frame_count = len(raw) // self._frame_bytes
-        if frame_count <= 0:
-            return None
-        tensor = torch.frombuffer(bytearray(raw), dtype=torch.uint8).reshape(
+        self.last_frame_timing = timestamps
+        frame_count = len(timestamps)
+        del storage[frame_count * self._frame_bytes :]
+        tensor = torch.frombuffer(storage, dtype=torch.uint8).reshape(
             frame_count, self.height, self.width, 3
         )
         tensor = tensor.permute(0, 3, 1, 2).contiguous()
@@ -377,20 +402,20 @@ class PyAmdVideoEncoder:
     @typechecked
     def __init__(
         self,
-        output_path: Optional[Union[str, Path]],
+        output_path: str | Path | None,
         width: int,
         height: int,
         fps: float,
         codec: str = "h264",
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         backend: str = "auto",
-        bitrate: Optional[int] = None,
-        mux_audio_file: Optional[str] = None,
+        bitrate: int | None = None,
+        mux_audio_file: str | None = None,
         mux_audio_stream: int = 0,
         mux_audio_offset_seconds: float = 0.0,
         mux_audio_aac_bitrate: str = "192k",
-        bitstream_handler: Optional[Callable[[bytes], None]] = None,
-        profiler: Optional[Any] = None,
+        bitstream_handler: Callable[[bytes], None] | None = None,
+        profiler: Any | None = None,
     ) -> None:
         self.output_path = str(output_path) if output_path is not None else None
         self._output_is_stream = bool(self.output_path and _is_stream_output(self.output_path))
@@ -412,13 +437,13 @@ class PyAmdVideoEncoder:
         self._mux_audio_aac_bitrate = str(mux_audio_aac_bitrate or "192k")
         self._bitstream_handler = bitstream_handler
         self._profiler = profiler
-        self.last_frame_id: Optional[int] = None
+        self.last_frame_id: int | None = None
         self._opened = False
-        self._process: Optional[subprocess.Popen[bytes]] = None
-        self._stderr_thread: Optional[threading.Thread] = None
-        self._stdout_thread: Optional[threading.Thread] = None
+        self._process: subprocess.Popen[bytes] | None = None
+        self._stderr_thread: threading.Thread | None = None
+        self._stdout_thread: threading.Thread | None = None
         self._stderr_tail: deque[str] = deque(maxlen=40)
-        self._background_error: Optional[BaseException] = None
+        self._background_error: BaseException | None = None
         self._vaapi_device = (
             PyAmdVideoCodec.default_vaapi_device() if self.backend == "vaapi" else None
         )
@@ -445,12 +470,12 @@ class PyAmdVideoEncoder:
                     break
                 assert self._bitstream_handler is not None
                 self._bitstream_handler(payload)
-        except BaseException as exc:  # pragma: no cover - background thread
+        except BaseException as exc:  # noqa: BLE001 - report failures to the owning thread
             self._background_error = exc
         finally:
             pipe.close()
 
-    def _build_video_filters(self) -> Optional[str]:
+    def _build_video_filters(self) -> str | None:
         if self.backend == "vaapi":
             return "format=nv12,hwupload"
         return None
@@ -533,7 +558,7 @@ class PyAmdVideoEncoder:
             cmd.append(self.output_path)
         return cmd
 
-    def _normalize_frames(self, frames: Union[torch.Tensor, StreamTensorBase]) -> torch.Tensor:
+    def _normalize_frames(self, frames: torch.Tensor | StreamTensorBase) -> torch.Tensor:
         if isinstance(frames, StreamTensorBase):
             frames = unwrap_tensor(frames)
         if not isinstance(frames, torch.Tensor):
@@ -567,7 +592,7 @@ class PyAmdVideoEncoder:
         return frames.contiguous()
 
     def _validate_frame_ids(
-        self, batch: torch.Tensor, frame_ids: Union[int, torch.Tensor, list[int], None]
+        self, batch: torch.Tensor, frame_ids: int | torch.Tensor | list[int] | None
     ) -> None:
         if frame_ids is None:
             return
@@ -610,7 +635,7 @@ class PyAmdVideoEncoder:
             stdout=stdout,
             stderr=subprocess.PIPE,
             bufsize=0,
-            preexec_fn=preexec_fn,
+            preexec_fn=preexec_fn,  # noqa: PLW1509 - retain existing parent-death ownership
         )
         assert self._process.stderr is not None
         self._stderr_thread = threading.Thread(
@@ -631,8 +656,8 @@ class PyAmdVideoEncoder:
 
     def write(
         self,
-        frames: Union[torch.Tensor, StreamTensorBase],
-        frame_ids: Union[int, torch.Tensor, list[int], None] = None,
+        frames: torch.Tensor | StreamTensorBase,
+        frame_ids: int | torch.Tensor | list[int] | None = None,
     ) -> None:
         if not self._opened or self._process is None or self._process.stdin is None:
             raise RuntimeError("Encoder is not open. Call open() before write().")

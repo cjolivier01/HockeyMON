@@ -85,14 +85,19 @@ def _native_max_output_width(config: dict) -> int:
 class Supervisor:
     """Keep native preparation and Python processing within the UI-owned group."""
 
-    def __init__(self, args, arguments: list[str], session: Path) -> None:
+    def __init__(self, args, arguments: list[str], session: Path, *, web=None) -> None:
         from hmlib.ui.hstream_launch import make_plan
         from hmlib.ui.hstream_runtime import RuntimeProtocol, shared_playback_fps
 
         self.args, self.arguments, self.session = args, arguments, session
+        self.web = web
+        self.web_cancelled = False
         launch = os.environ.get("HM_UI_INITIAL_LAUNCH")
         self.initial = Path(launch) if launch else None
         self.plan = make_plan(args, initial=self.initial)
+        if self.web is not None:
+            self.web.validate_plan(self.plan)
+            self.web.write_admission()
         self.environment = dict(
             os.environ,
             PYTHONPATH=os.pathsep.join(
@@ -113,6 +118,8 @@ class Supervisor:
         self.environment["HM_OUTPUT_WORK_DIR"] = str(output_root.resolve())
         runs.mkdir(parents=True, exist_ok=True)
         self.working_directory = Path(tempfile.mkdtemp(prefix="hockeymon-", dir=runs))
+        if self.web is not None:
+            self.web.working_directory = self.working_directory
         identity = self.working_directory.stat()
         self._working_identity = (identity.st_dev, identity.st_ino)
         self.worker_cwd = self.plan.cwd if self.initial else self.working_directory
@@ -167,7 +174,19 @@ class Supervisor:
                 self.environment["HM_SHARED_SOURCE_SCOREBOARD_POLYGON"] = json.dumps(
                     scoreboard["perspective_polygon"], allow_nan=False
                 )
-        self.protocol = RuntimeProtocol(
+        protocol_type = RuntimeProtocol
+        protocol_options = {}
+        if self.web is not None:
+            from hmlib.ui.hstream_web_runtime import WebRuntimeProtocol
+
+            protocol_type = WebRuntimeProtocol
+            protocol_options = {
+                "allow_seek": not (self.plan.sinks - {"RENDER", "FAKE"})
+                and self.environment["HM_SHARED_TELEMETRY"] == "0",
+                "stop_applied": self._web_stop_applied,
+                "realtime": args.render_realtime,
+            }
+        self.protocol = protocol_type(
             session,
             emit,
             game_dir=self.plan.game,
@@ -178,6 +197,12 @@ class Supervisor:
             total_ns=round(self.duration * 1e9),
             start_ns=round(self.plan.start_seconds * 1e9),
             initial_preview=args.ui_preview_active,
+            web_binding=(
+                {key: self.web.document[key] for key in ("run_id", "request_digest")}
+                if self.web is not None
+                else None
+            ),
+            **protocol_options,
         )
         self.child = None
         self.phase = "preparing"
@@ -221,9 +246,12 @@ class Supervisor:
 
     def _stop_signal(self, signum, frame) -> None:
         self.stop_requested = True
+        self.web_cancelled = True
 
     def _spawn(self, command: list[str], *, phase: str, cwd: Path | None = None) -> None:
         self.phase = phase
+        if self.web is not None:
+            self.web.check()
         label = {
             "calibration": "shared native calibration",
             "models": "shared model preparation",
@@ -368,6 +396,13 @@ class Supervisor:
         self._prepare_models()
         if self.stop_requested or set(self.plan.sources) != {"left", "right"}:
             return
+        if self.web is not None:
+            self.web.check()
+            self.snapshot = self.web.calibration
+            if self.snapshot is None:
+                raise ValueError("Prepare stitching before starting paired HockeyMON Program")
+            self._accept_calibration()
+            return
         self._native_runner()
         # Native owns validity, recovery, synchronization and all editor dialogs.
         # One decoded pair is sufficient after the calibration transaction commits.
@@ -420,6 +455,9 @@ class Supervisor:
             effective_config=effective_config,
             max_output_width=_native_max_output_width(self.plan.config),
         )
+        self._accept_calibration()
+
+    def _accept_calibration(self) -> None:
         self.environment["HM_SHARED_NATIVE_CALIBRATION"] = str(self.snapshot.directory)
         self.protocol.frame_offset = self.snapshot.frame_offsets[0]
         available = (
@@ -434,6 +472,8 @@ class Supervisor:
         self.protocol.total_ns = round(self.duration * 1e9)
 
     def _prepare_audio(self) -> None:
+        if self.web is not None:
+            return  # Browser audio requires its separate supervised transport.
         from hmlib.ui.hstream_audio import AudioMonitor
         from hmlib.ui.hstream_launch import get_path
 
@@ -455,6 +495,7 @@ class Supervisor:
     def _python(self, offset_ns: int = 0) -> None:
         from hmlib.ui.hstream_runtime import write_document
 
+        self.protocol.reset_child(offset_ns)
         for name in (
             "spec.json",
             "runtime.json",
@@ -466,7 +507,6 @@ class Supervisor:
         for path in self.session.glob("preview-*"):
             if path.suffix in {".jpg", ".json"}:
                 path.unlink()
-        self.protocol.reset_child(offset_ns)
         for directory in (
             "operator-actions",
             "operator-results",
@@ -522,6 +562,12 @@ class Supervisor:
 
     def _refresh_calibration(self) -> None:
         """Reload native edits without moving the run's original playback origin."""
+        if self.web is not None:
+            self.web.check()
+            self.snapshot = self.web.calibration
+            if self.snapshot is None:
+                raise ValueError("Web Program lost its completed native calibration")
+            return
         import yaml
 
         from hmlib.stitching.native_calibration import prepare_native_calibration
@@ -553,6 +599,9 @@ class Supervisor:
         self.protocol.graph = plan.graph
 
     def _line(self, line: str) -> None:
+        if self.web is not None:
+            self.protocol.handle_line(line)
+            return
         if line in {"q", "quit"}:
             self.stop_requested = True
         elif self.phase == "calibration":
@@ -561,6 +610,9 @@ class Supervisor:
                 self.child.stdin.flush()
         else:
             self.protocol.handle_line(line)
+
+    def _web_stop_applied(self) -> None:
+        self.stop_requested = True
 
     def _pump(self) -> int:
         while True:
@@ -603,8 +655,12 @@ class Supervisor:
                 if self.seek_generation is not None:
                     path = self.session / "runtime.json"
                     state = json.loads(path.read_text()) if path.is_file() else {}
-                    if state.get("frame") is not None and state.get("seek_ready", True):
-                        self.protocol.seek_completed(self.last_seek, self.seek_generation)
+                    if (
+                        state.get("frame") is not None
+                        and state.get("seek_ready", True)
+                        and self.protocol.seek_completed(self.last_seek, self.seek_generation)
+                        is not False
+                    ):
                         self.seek_generation = None
                         self.audio_seeking = False
                         self.pause_audio(self.audio_paused)
@@ -628,9 +684,16 @@ class Supervisor:
 
     def _published_artifacts(self) -> list[dict]:
         receipt = self.session / "publication.json"
-        records = json.loads(receipt.read_text()) if receipt.is_file() else []
+        if self.web is not None:
+            from hmlib.ui.hstream_web import read_publications
+
+            records = read_publications(self.web.root)
+        else:
+            records = json.loads(receipt.read_text()) if receipt.is_file() else []
         if not isinstance(records, list):
             raise TypeError("Publication receipt must contain an artifact list")
+        if self.web is not None:
+            return records  # The confined web receipt validates all metadata too.
         required = {
             kind
             for sink, kind in (
@@ -691,8 +754,26 @@ class Supervisor:
         try:
             (self.session / "publication.json").unlink(missing_ok=True)
             emit("HM_BACKEND_LAUNCH " + json.dumps(self.plan.launch_receipt()))
+            if self.web is not None:
+                emit(
+                    "HM_WEB_PROGRAM_ADMITTED "
+                    + json.dumps(
+                        {
+                            "version": 1,
+                            "run_id": self.web.document["run_id"],
+                            "request_digest": self.web.document["request_digest"],
+                            "deployment_id": self.web.document["deployment_id"],
+                        }
+                    )
+                )
             self._prepare()
             if self.stop_requested:
+                if self.web is not None:
+                    closed = True
+                    self._close_resources()
+                    self._cleanup_working_directory()
+                    self._web_publication("cancelled", [])
+                    return 0
                 emit(
                     "HM_BACKEND_PUBLICATION "
                     + json.dumps(
@@ -733,10 +814,16 @@ class Supervisor:
                     )
                 )
                 return code
-            artifacts = self._published_artifacts()
+            cancelled = self.web is not None and (
+                self.web_cancelled or (self.web.root / "cancel").exists()
+            )
+            artifacts = [] if cancelled else self._published_artifacts()
             closed = True
             self._close_resources()
             self._cleanup_working_directory()
+            if self.web is not None:
+                self._web_publication("cancelled" if cancelled else "complete", artifacts)
+                return 0
             emit(
                 "HM_BACKEND_PUBLICATION "
                 + json.dumps(
@@ -753,10 +840,61 @@ class Supervisor:
             if not closed:
                 self._close_resources()
 
+    def _web_publication(self, status: str, artifacts: list[dict]) -> None:
+        from hmlib.ui.hstream_web import RECEIPT_NAME, file_content
+
+        self.web.receipt(status, artifacts)
+        emit(
+            "HM_WEB_PROGRAM_PUBLICATION "
+            + json.dumps(
+                {
+                    "version": 1,
+                    "run_id": self.web.document["run_id"],
+                    "request_digest": self.web.document["request_digest"],
+                    "receipt": RECEIPT_NAME,
+                    "content": file_content(self.web.root / RECEIPT_NAME),
+                }
+            )
+        )
+
+
+def _web_main(request: str) -> int:
+    from hmlib.ui.hstream_web import WebProgram
+
+    context = WebProgram(Path(request))
+    environment = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ.update(context.environment(environment))
+        from hmlib.ui.hstream_launch import parser
+
+        arguments = context.arguments()
+        args = parser().parse_args(arguments)
+        return Supervisor(args, arguments, context.session, web=context).run()
+    finally:
+        os.environ.clear()
+        os.environ.update(environment)
+        context.close()
+
 
 def main(arguments: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if arguments is None else arguments)
-    # Handshake is deliberately independent of torch, OpenCV, CUDA and YAML.
+    # Handshakes are deliberately independent of torch, OpenCV, CUDA and YAML.
+    if arguments == ["--web-backend-info"]:
+        from hmlib.ui.hstream_web import capabilities
+
+        emit(json.dumps(capabilities()))
+        return 0
+    if arguments and arguments[0].split("=", 1)[0] == "--web-program-request":
+        try:
+            if len(arguments) == 2 and arguments[0] == "--web-program-request":
+                return _web_main(arguments[1])
+            if len(arguments) == 1 and arguments[0].startswith("--web-program-request="):
+                return _web_main(arguments[0].split("=", 1)[1])
+            raise ValueError("Web Program requests cannot be combined with desktop arguments")
+        except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+            emit(f"HSTREAM_BACKEND_ERROR {type(error).__name__}: {error}")
+            return 1
     if arguments == ["--ui-backend-info"]:
         emit(
             json.dumps(

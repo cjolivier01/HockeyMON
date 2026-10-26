@@ -661,7 +661,16 @@ class StitchUiPlugin(Plugin):
             self._shared["hm_ui_preview_active"] = False
 
     def input_keys(self) -> set[str]:
-        return {"img", "shared", "frame_ids", "fps"}
+        return {
+            "img",
+            "shared",
+            "frame_ids",
+            "fps",
+            "source_frame_ids",
+            "decoded_pts_ns",
+            "decoded_timing",
+            "decoded_source_role",
+        }
 
     def output_keys(self) -> set[str]:
         return {"img"}
@@ -768,7 +777,9 @@ class StitchUiPlugin(Plugin):
         frame = int(frame_ids[-1]) if frame_ids is not None and len(frame_ids) else None
         process.publish_runtime(frame=frame, fps=context.get("fps"))
         if img is not None:
-            self._process.publish_preview(img, name="Stitched")
+            from hmlib.ui.preview_overlays import source_metadata
+
+            self._process.publish_preview(img, name="Stitched", metadata=source_metadata(context))
         return {"img": img}
 
     def finalize(self) -> None:

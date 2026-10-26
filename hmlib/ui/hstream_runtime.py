@@ -115,6 +115,7 @@ class _Pending:
     success: list[str]
     failure: Callable[[str], str]
     payload: dict
+    completion: Callable[[dict], None] | None = None
 
 
 def shared_playback_fps(left_fps: float, right_fps: float) -> float:
@@ -157,6 +158,7 @@ class RuntimeProtocol:
         start_ns: int = 0,
         initial_preview: str = "program",
         request_timeout: float = 5.0,
+        web_binding: dict | None = None,
     ) -> None:
         self.session = Path(session)
         self.game_dir = Path(game_dir) if game_dir is not None else None
@@ -172,6 +174,7 @@ class RuntimeProtocol:
         self.start_ns = start_ns
         self.frame_offset = 0
         self.request_timeout = request_timeout
+        self.web_binding = dict(web_binding) if web_binding is not None else None
         self._pending: dict[str, _Pending] = {}
         self._session_id = ""
         self._generation = 0
@@ -214,6 +217,8 @@ class RuntimeProtocol:
         payload: dict,
         success: list[str],
         failure: Callable[[str], str] | None = None,
+        *,
+        completion: Callable[[dict], None] | None = None,
     ) -> None:
         self._spec()
         if len(self._pending) >= 32:
@@ -226,6 +231,7 @@ class RuntimeProtocol:
             success,
             failure or (lambda reason: f"runtime command failed: {reason}"),
             payload,
+            completion,
         )
         try:
             write_document(self.session / "runtime-requests" / f"{request_id}.json", payload)
@@ -748,10 +754,7 @@ class RuntimeProtocol:
                 values = pending.payload.get("values", operation.get("values", {}))
                 for window, controls in values.items():
                     self._replay_values.setdefault(window, {}).update(controls)
-                for message in pending.success:
-                    self.emit(message)
-            else:
-                self.emit(pending.failure(str(result.get("error", "runtime request failed"))))
+            self._complete_pending(pending, result)
         try:
             runtime_path = self.session / "runtime.json"
             modified = runtime_path.stat().st_mtime_ns
@@ -807,12 +810,28 @@ class RuntimeProtocol:
                     f"HSTREAM_PREVIEW_RUNTIME status=ready channel=none generation={self._preview_generation}"
                 )
             return
+        identity = (self._session_id, self._preview_generation, self._active_channel)
+        if identity == self._preview_ready_identity:
+            return
         try:
-            path = self._preview_path(self._active_channel)
-            metadata = read_document(path.with_suffix(".json"))
-            if not path.is_file():
-                return
-            identity = (self._session_id, self._preview_generation, self._active_channel)
+            if self.web_binding is not None:
+                from hmlib.ui.hstream_web_preview import read_snapshot
+
+                snapshot, _ = read_snapshot(
+                    self.session,
+                    expected={
+                        **self.web_binding,
+                        "session_id": self._session_id,
+                        "channel": self._active_channel,
+                        "generation": self._preview_generation,
+                    },
+                )
+                metadata = snapshot["source"]
+            else:
+                path = self._preview_path(self._active_channel)
+                metadata = read_document(path.with_suffix(".json"))
+                if not path.is_file():
+                    return
             if identity != self._preview_ready_identity:
                 self._preview_ready_identity = identity
                 self.emit(
@@ -830,8 +849,14 @@ class RuntimeProtocol:
         """Invalidate old receipts before launching a replacement Python child."""
         for request_id, pending in self._pending.items():
             (self.session / "runtime-requests" / f"{request_id}.json").unlink(missing_ok=True)
-            self.emit(pending.failure("pipeline was replaced before acknowledgement"))
+            self._complete_pending(
+                pending, {"ok": False, "error": "pipeline was replaced before acknowledgement"}
+            )
         self._pending.clear()
+        if self.web_binding is not None:
+            from hmlib.ui.hstream_web_preview import retire_owner
+
+            retire_owner(self.session, expected=self.web_binding)
         if self._scoreboard_session is not None:
             self._scoreboard_session.close()
             self._scoreboard_session = None
@@ -846,13 +871,26 @@ class RuntimeProtocol:
         self.emit(f"HSTREAM_SEEK status=ok generation={generation} position_ns={target_ns}")
 
     def stopped(self, reason: str = "pipeline stopped") -> None:
+        if self.web_binding is not None:
+            from hmlib.ui.hstream_web_preview import retire_owner
+
+            retire_owner(self.session, expected=self.web_binding)
         if self._scoreboard_session is not None:
             self._scoreboard_session.close()
             self._scoreboard_session = None
         for request_id, pending in self._pending.items():
             (self.session / "runtime-requests" / f"{request_id}.json").unlink(missing_ok=True)
-            self.emit(pending.failure(reason))
+            self._complete_pending(pending, {"ok": False, "error": reason})
         self._pending.clear()
+
+    def _complete_pending(self, pending: _Pending, result: dict) -> None:
+        if pending.completion is not None:
+            pending.completion(result)
+        elif result.get("ok") is True:
+            for message in pending.success:
+                self.emit(message)
+        else:
+            self.emit(pending.failure(str(result.get("error", "runtime request failed"))))
 
     @property
     def replay_values(self) -> dict[str, dict[str, int]]:
@@ -865,6 +903,7 @@ class RuntimeProtocol:
         return {
             "values": self.replay_values,
             "preview": PREVIEW_NAMES[self._active_channel],
+            "preview_generation": self._preview_generation,
             "overlays": list(self._overlay_layers),
             "paused": self._cooperatively_paused,
         }

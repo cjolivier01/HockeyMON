@@ -738,8 +738,17 @@ class StitchingPlugin(Plugin):
         # The bridge queues only the selected channel in shared desktop runs.
         ui = context.get("shared", {}).get("hm_ui_process")
         if ui is not None and not ui.closed:
+            from hmlib.ui.preview_overlays import source_metadata
+
             for index, source in enumerate(imgs[:2], start=1):
-                ui.publish_preview(wrap_tensor(source), name=f"Camera {index}", snapshot=True)
+                ui.publish_preview(
+                    wrap_tensor(source),
+                    name=f"Camera {index}",
+                    snapshot=True,
+                    metadata=source_metadata(
+                        image_data_list[index - 1], role="left" if index == 1 else "right"
+                    ),
+                )
 
         if self._left_color_pipeline is not None:
             try:

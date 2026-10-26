@@ -108,6 +108,9 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         self._frame_step = frame_step
         self._source_frame_offset = source_frame_offset
         self._next_source_frame = start_frame_number * frame_step + source_frame_offset
+        # Requested positions drive the existing seek/processing policy. Only
+        # complete decoding from the first chapter proves a source ordinal.
+        self._next_exact_source_frame: int | None = None
         self._chapter_frames = None
         self._data_pipeline = data_pipeline
         self._log_messages = log_messages
@@ -141,6 +144,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         self.vh = None
         self.cap = None
         self._vid_iter = None
+        self._sample_decoded_timing = []
         self._mapping_offset = None
         self._thread = None
         self._scale_inscribed_to_original = None
@@ -316,7 +320,7 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
             source_frame -= count
         raise ValueError("Requested source frame is beyond the end of the video playlist")
 
-    def _open_video(self):
+    def _open_video(self, *, continue_exact_ordinal: bool = False):
         self.load_video_info()
         if self._embedded_data_loader is None:
             if self._requested_decoder_type is not None:
@@ -350,6 +354,15 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
             if local_frame:
                 self.cap.seek(frame_number=local_frame)
             self._vid_iter = iter(self.cap)
+            if not continue_exact_ordinal:
+                self._next_exact_source_frame = (
+                    0 if self._current_path_index == 0 and not local_frame else None
+                )
+            if (
+                local_frame
+                or getattr(self._vid_iter, "source_ordinals_complete", False) is not True
+            ):
+                self._next_exact_source_frame = None
         else:
             self.vn = len(self._embedded_data_loader)
         if self.vn is not None and self._log_messages:
@@ -362,16 +375,21 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         if self._embedded_data_loader is not None:
             self._embedded_data_loader.close()
 
-    def goto_next_video(self) -> bool:
+    def goto_next_video(self, *, decoded_to_eof: bool = False) -> bool:
         if not self._path_list:
             return False
         if self._current_path_index + 1 >= len(self._path_list):
             return False
         assert self._embedded_data_loader is None
+        if (
+            not decoded_to_eof
+            or getattr(self._vid_iter, "source_ordinals_complete", False) is not True
+        ):
+            self._next_exact_source_frame = None
         self._next_source_frame = sum(self._chapter_frames[: self._current_path_index + 1])
         self._current_path_index += 1
         self._close_video()
-        self._open_video()
+        self._open_video(continue_exact_ordinal=True)
         return True
 
     @property
@@ -498,26 +516,55 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
         try:
             image = next(self._vid_iter)
         except StopIteration:
-            if not self.goto_next_video():
+            if not self.goto_next_video(decoded_to_eof=True):
                 raise
             image = next(self._vid_iter)
         count = len(image) if image.ndim == 4 else 1
+        if getattr(self._vid_iter, "source_ordinals_complete", False) is not True:
+            self._next_exact_source_frame = None
+        exact_frames = (
+            [self._next_exact_source_frame + index for index in range(count)]
+            if self._next_exact_source_frame is not None
+            else [None] * count
+        )
+        if self._next_exact_source_frame is not None:
+            self._next_exact_source_frame += count
+        decoded = getattr(self._vid_iter, "last_frame_timing", None)
+        if decoded is not None and len(decoded) != count:
+            raise ValueError("Decoded timestamps do not align with the source frame batch")
+        timing = (
+            [item.document(self._current_path_index) for item in decoded]
+            if decoded is not None
+            else [None] * count
+        )
         frames = [self._next_source_frame + index for index in range(count)]
         self._next_source_frame += count
-        return image, frames
+        return image, frames, timing, exact_frames
 
     def _read_next_image(self):
         img = None
         if self.cap is not None:
             if self._frame_step == 1:
-                img, self._sample_source_frames = self._read_source_batch()
+                (
+                    img,
+                    self._sample_source_frames,
+                    self._sample_decoded_timing,
+                    self._sample_exact_source_frames,
+                ) = self._read_source_batch()
             else:
-                images, self._sample_source_frames = [], []
+                (
+                    images,
+                    self._sample_source_frames,
+                    self._sample_decoded_timing,
+                    self._sample_exact_source_frames,
+                ) = ([], [], [], [])
                 for _ in range(self._batch_size):
                     for _ in range(self._frame_step):
-                        image, frames = self._read_source_batch()
+                        image, frames, timing, exact_frames = self._read_source_batch()
                     images.append(image[0] if image.ndim == 4 else image)
                     self._sample_source_frames.extend(frames)
+                    self._sample_decoded_timing.extend(timing)
+                    self._sample_exact_source_frames.extend(exact_frames)
                 img = np.stack(images) if isinstance(images[0], np.ndarray) else torch.stack(images)
         else:
             if self._batch_size == 1:
@@ -618,6 +665,13 @@ class MOTLoadVideoWithOrig(Dataset):  # for inference
 
             data_item: dict[str, Any] = {}
             if self._embedded_data_loader is None:
+                data_item["source_frame_ids"] = list(self._sample_exact_source_frames)
+                data_item["decoded_timing"] = list(self._sample_decoded_timing)
+                from hmlib.video.frame_timing import timing_ns
+
+                data_item["decoded_pts_ns"] = [
+                    timing_ns(item) for item in self._sample_decoded_timing
+                ]
                 data_item["pts_ns"] = [
                     round(frame * 1e9 / self._video_info.fps)
                     for frame in self._sample_source_frames

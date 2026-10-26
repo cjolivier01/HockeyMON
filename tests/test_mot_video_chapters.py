@@ -121,6 +121,7 @@ def should_preserve_source_pts_for_mixed_rate_camera_frames(chapters):
             1_800_000_000,
         ]
         assert [int(batch["frame_ids"][0]) for batch in batches] == [7, 8, 9, 10, 11]
+        assert [batch["source_frame_ids"][0] for batch in batches] == [None] * 5
     finally:
         dataset.close()
 
@@ -150,5 +151,24 @@ def should_sample_each_frame_in_a_mixed_rate_batch(chapters, async_mode):
             [1300000000, 1500000000],
             [1700000000, 1900000000],
         ]
+        assert [batch["source_frame_ids"] for batch in batches] == [[None, None]] * 4
     finally:
         dataset.close()
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def should_retire_global_ordinal_proof_when_a_decoder_discards_a_partial_chapter_batch(
+    chapters, async_mode
+):
+    dataset = loader(chapters, batch_size=3, async_mode=async_mode)
+    try:
+        batches = list(dataset)
+    finally:
+        dataset.close()
+    assert [batch["source_frame_ids"] for batch in batches[:3]] == [[0, 1, 2], [3, 4, 5], [6, 7, 8]]
+    assert [batch["source_frame_ids"] for batch in batches[3:]] == [[None, None, None]] * 3
+    assert [batch["img"][:, 0, 0, 0].tolist() for batch in batches[3:]] == [
+        [10, 11, 12],
+        [13, 14, 15],
+        [16, 17, 18],
+    ]

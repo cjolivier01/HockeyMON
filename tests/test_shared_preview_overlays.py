@@ -31,13 +31,14 @@ def should_draw_each_preview_layer_on_a_private_copy():
 
 def should_copy_geometry_without_copying_large_static_masks():
     mask = np.ones((1024, 2048), dtype=np.uint8)
-    source = [{"matrix": np.eye(3), "rink_mask": mask}]
+    source = [{"matrix": np.eye(3), "rink_mask": mask, "source_frame_id": 17, "decoded_pts_ns": 19}]
     transformed = copy_metadata(source)
     translation = np.eye(3)
     translation[:2, 2] = [-20, -10]
     compose_transform(transformed, 0, translation)
     assert np.array_equal(source[0]["matrix"], np.eye(3))
     assert transformed[0]["rink_mask"] is mask
+    assert transformed[0]["source_frame_id"] == 17 and transformed[0]["decoded_pts_ns"] == 19
     renderer = PreviewOverlayRenderer()
     contours = renderer._rink_polygons(mask)
     assert renderer._rink_polygons(mask) is contours
