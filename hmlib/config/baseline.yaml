@@ -272,6 +272,13 @@ video_out:
   save_frame_dir: null
 
 stitching:
+  rink_map:
+    dimensions_m:
+      length: 60.96
+      width: 25.908
+      blue_line_distance: 7.62
+      goal_inset: 3.3528
+      corner_radius: 8.5344
   # Controlled by --aspen-stitching / --no-aspen-stitching.
   aspen-stitching: true
   enabled: true
