@@ -960,6 +960,34 @@ class PlayTracker(torch.nn.Module):
         online_tlwhs = batch_tlbrs_to_tlwhs(bboxes_tlbr)
         return ids, bboxes_tlbr, online_tlwhs
 
+    def _play_role_mask(self, ids, track_inst):
+        """Select camera subjects without changing the published track instances."""
+        roles = get_nested_value(self._game_config, "detector.role_labels", {})
+        excluded = []
+        for role in ("referee", "goalie"):
+            enabled = get_nested_value(
+                self._game_config, f"rink.tracking.cam_ignore_{role}s", False
+            )
+            if not isinstance(enabled, bool):
+                raise TypeError(f"cam_ignore_{role}s must be a boolean")
+            if enabled and roles.get(role) is not None:
+                excluded.append(roles[role])
+        keep = torch.ones_like(ids, dtype=torch.bool)
+        if not excluded:
+            return keep
+        labels = unwrap_tensor(track_inst.labels).reshape(-1).to(ids.device)
+        source_ids = unwrap_tensor(track_inst.instances_id).reshape(-1).to(ids.device)
+        if labels.shape != source_ids.shape:
+            raise ValueError("Track labels and IDs must align for role filtering")
+        source_mask = get_track_mask(track_inst)
+        if source_mask is not None:
+            source_mask = source_mask.to(device=ids.device, dtype=torch.bool)
+            source_ids, labels = source_ids[source_mask], labels[source_mask]
+        rejected = torch.zeros_like(labels, dtype=torch.bool)
+        for label in excluded:
+            rejected |= labels == label
+        return ~torch.isin(ids, source_ids[rejected])
+
     def _kmeans_cuda_device(self):
         return "cpu"
 
@@ -1144,6 +1172,7 @@ class PlayTracker(torch.nn.Module):
             )
 
             preview_ids = online_ids
+            display_tracks = (online_ids, online_bboxes_tlbr, online_tlwhs)
 
             self.process_jerseys_info(
                 frame_index=frame_index, frame_id=scalar_frame_id, data=results
@@ -1187,6 +1216,10 @@ class PlayTracker(torch.nn.Module):
                     self._hockey_mon.fps_speed_scale * HockeyMON.BASE_FPS,
                     self._apply_ui_controls,
                 )
+            role_keep = self._play_role_mask(online_ids, track_inst)
+            online_ids = online_ids[role_keep]
+            online_bboxes_tlbr = online_bboxes_tlbr[role_keep]
+            online_tlwhs = online_tlwhs[role_keep]
             policy_event = self._record_camera_policy(
                 int(scalar_frame_id),
                 (image_width(online_im), image_height(online_im)),
@@ -1507,6 +1540,7 @@ class PlayTracker(torch.nn.Module):
                                     thickness=1,
                                 )
 
+            online_ids, online_bboxes_tlbr, online_tlwhs = display_tracks
             # Maybe draw trajectories...
             if self._plot_trajectories:
                 for tid in online_ids:
@@ -1770,6 +1804,7 @@ class PlayTracker(torch.nn.Module):
                         if self._playtracker is not None
                         else np.ones(len(boxes), dtype=bool)
                     )
+                    mask &= self._play_role_mask(online_ids, track_inst).detach().cpu().numpy()
                     guided = self._rink_guide.step(
                         int(scalar_frame_id)
                         / (HockeyMON.BASE_FPS * self._hockey_mon.fps_speed_scale),

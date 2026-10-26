@@ -37,6 +37,8 @@ _FILTER_PATHS = {
     for key in (
         "cam_ignore_largest",
         "cam_ignore_largest_count",
+        "cam_ignore_referees",
+        "cam_ignore_goalies",
         "cam_ignore_oversized",
         "cam_oversized_percent",
     )
@@ -92,6 +94,8 @@ class OperatorControls:
         self.process.add_window(_FILTER_WINDOW)
         for name, maximum, label in (
             ("Ignore_Largest_Count", 100, "Ignore largest players (0 = off)"),
+            ("Ignore_Referees", 1, "Ignore referees for play tracking"),
+            ("Ignore_Goalies", 1, "Ignore goalies for play tracking"),
             ("Ignore_Oversized_Players", 1, "Ignore oversized players"),
             ("Oversized_Player_Percent_x10", 10000, "Larger than other players' average"),
         ):
@@ -175,6 +179,8 @@ class OperatorControls:
                 if tracking.get("cam_ignore_largest", False)
                 else 0
             ),
+            "Ignore_Referees": int(bool(tracking.get("cam_ignore_referees", False))),
+            "Ignore_Goalies": int(bool(tracking.get("cam_ignore_goalies", False))),
             "Ignore_Oversized_Players": int(bool(tracking.get("cam_ignore_oversized", False))),
             "Oversized_Player_Percent_x10": round(
                 float(tracking.get("cam_oversized_percent", 100)) * 10
@@ -212,6 +218,8 @@ class OperatorControls:
             for key, value in (
                 ("cam_ignore_largest", count > 0),
                 ("cam_ignore_largest_count", count),
+                ("cam_ignore_referees", bool(values["Ignore_Referees"])),
+                ("cam_ignore_goalies", bool(values["Ignore_Goalies"])),
                 ("cam_ignore_oversized", oversized),
                 ("cam_oversized_percent", percent),
             ):

@@ -18,7 +18,7 @@ RUN_FIELDS = [
         "Detector model",
         "choice",
         "saved",
-        choices=["saved", "deployed", "trained", "distilled", "hockeyref"],
+        choices=["saved", "deployed", "trained", "distilled", "hockeyref", "hockey-roles"],
     ),
     _field(
         "hm_ui.run.precision",

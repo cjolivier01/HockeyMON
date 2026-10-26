@@ -184,3 +184,60 @@ def should_report_a_profile_without_an_automatic_checkpoint():
     """`deployed` has no work dir to search; say so rather than guess."""
     with pytest.raises(ValueError, match="No automatic checkpoint"):
         detector_selection.default_checkpoint("deployed")
+
+
+def should_badge_both_hockey_roles_without_labelling_people(monkeypatch):
+    from hmlib.aspen.plugins import overlay_plugin
+
+    texts = []
+
+    def capture(**kwargs):
+        texts.append(kwargs["text"])
+        return kwargs["image"]
+
+    monkeypatch.setattr(overlay_plugin, "draw_label_box", capture)
+    _render([0, 1, 2], referee_label=2, goalie_label=1)
+    assert texts == ["GOALIE", "REF"]
+    assert detector_selection.PROFILE_CLASSES["hockey-roles"] == ("person", "goalie", "official")
+    assert detector_selection.PROFILE_INPUT_SCALE["hockey-roles"] == (1408, 544)
+
+
+@pytest.mark.parametrize(
+    "ignore_ref,ignore_goalie,expected",
+    [
+        (False, False, [True, True, True]),
+        (True, False, [True, True, False]),
+        (False, True, [True, False, True]),
+        (True, True, [True, False, False]),
+    ],
+)
+def should_filter_only_camera_subjects(ignore_ref, ignore_goalie, expected):
+    from types import SimpleNamespace
+
+    from hmlib.camera.play_tracker import PlayTracker
+
+    tracks = _tracks([0, 1, 2])
+    tracker = SimpleNamespace(
+        _game_config={
+            "detector": {"role_labels": {"referee": 2, "goalie": 1}},
+            "rink": {
+                "tracking": {"cam_ignore_referees": ignore_ref, "cam_ignore_goalies": ignore_goalie}
+            },
+        }
+    )
+    mask = PlayTracker._play_role_mask(tracker, tracks.instances_id, tracks)
+    assert mask.tolist() == expected
+    assert tracks.labels.tolist() == [0, 1, 2]
+    assert tracks.instances_id.tolist() == [0, 1, 2]
+
+
+def should_preserve_roles_when_pose_replaces_detection_boxes():
+    from hmlib.aspen.plugins.pose_to_det_plugin import PoseToDetPlugin
+
+    original = _tracks([0, 1, 2])
+    sample = make_track_data_sample(num_frames=1)
+    sample[0].pred_instances = original
+    boxes = original.bboxes[[2, 0, 1]].tolist()
+    pose = [{"predictions": [{"bboxes": boxes, "bbox_scores": [0.9, 0.9, 0.9]}]}]
+    PoseToDetPlugin()({"data_samples": sample, "pose_results": pose})
+    assert sample[0].pred_instances.labels.tolist() == [2, 0, 1]

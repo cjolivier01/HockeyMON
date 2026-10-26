@@ -18,7 +18,7 @@ from hmlib.ui.desktop import executable
 from hmlib.ui.hstream_launch import get_path, merge, set_path
 from hmlib.ui.workspace.files import identifier, read_json, write_json
 
-PROFILES = {"default": "hockeyref", "distilled-s": "distilled"}
+PROFILES = {"default": "hockeyref", "distilled-s": "distilled", "hockey-roles": "hockey-roles"}
 
 
 def _configuration(game: Path, profile: str) -> tuple[dict, Path, tuple[int, int]]:
