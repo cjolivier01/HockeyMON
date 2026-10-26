@@ -285,3 +285,109 @@ def should_filter_before_learned_camera_features(monkeypatch):
     assert len(captured) == 1 and captured[0].shape[0] == 1
     assert captured[0][0, 0] == tracks.bboxes[0, 0]
     assert len(tracks) == 3
+
+
+@pytest.mark.parametrize("pose_format", ["dict", "sample"])
+@pytest.mark.parametrize("score_field", ["keypoint_scores", "bbox_scores", "scores"])
+@pytest.mark.parametrize("excluded", [(), (1,), (2,), (1, 2)])
+def should_filter_gpt_pose_features_without_mutating_published_poses(
+    pose_format, score_field, excluded
+):
+    from types import SimpleNamespace
+
+    from hmlib.aspen.plugins.camera_controller_plugin import CameraControllerPlugin
+    from hmlib.camera.camera_gpt import CameraGPTConfig
+    from hmlib.camera.camera_transformer import CameraNorm
+
+    class CaptureCamera(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = torch.nn.Parameter(torch.zeros(()))
+            self.features = None
+
+        def forward(self, features, rink_embedding=None):
+            self.features = features.clone()
+            return features.new_tensor([0.5, 0.5, 0.5]).expand(*features.shape[:2], 3)
+
+    plugin = CameraControllerPlugin(controller="rule")
+    plugin._controller = "gpt"
+    plugin._gpt_cfg = CameraGPTConfig(d_in=19, include_pose=True)
+    plugin._norm = CameraNorm(420, 320, 16)
+    plugin._gpt_model = CaptureCamera()
+    tracks = _tracks([0, 1, 2, 0])
+    tracks.set_metainfo({"track_mask": torch.tensor([True, True, True, False])})
+    # Pose cadence/reordering need not match the tracks. Include a padded track
+    # and an unmatched pose to ensure neither leaks into filtered camera input.
+    boxes = torch.cat([tracks.bboxes[[2, 0, 1, 3]], torch.tensor([[800, 0, 820, 40]])])
+    confidence = torch.tensor([0.1, 0.9, 0.3, 0.2, 0.4])
+    if score_field == "keypoint_scores":
+        confidence = confidence[:, None].expand(-1, 2).clone()
+    fields = {"bboxes": boxes, score_field: confidence, "keypoints": torch.ones(5, 2, 2)}
+    snapshot = {key: value.clone() for key, value in fields.items()}
+    prediction = (
+        fields if pose_format == "dict" else SimpleNamespace(pred_instances=InstanceData(**fields))
+    )
+    poses = [{"predictions": [prediction]}]
+    sample = make_track_data_sample(
+        num_frames=1, ori_shape=(320, 420), pred_track_instances=[tracks]
+    )
+    context = {
+        "data_samples": sample,
+        "pose_results": poses,
+        "shared": {
+            "game_config": {
+                "detector": {"role_labels": {"referee": 2, "goalie": 1}},
+                "rink": {
+                    "tracking": {
+                        "cam_ignore_referees": 2 in excluded,
+                        "cam_ignore_goalies": 1 in excluded,
+                    }
+                },
+            }
+        },
+    }
+    plugin(context)
+    keep = [i for i, role in enumerate([2, 0, 1]) if role not in excluded]
+    if not excluded:
+        keep = list(range(5))
+    expected = plugin._pose_features(
+        [{"predictions": [{key: value[keep] for key, value in fields.items()}]}],
+        0,
+        torch.device("cpu"),
+    )
+    torch.testing.assert_close(plugin._gpt_model.features[0, 0, 11:], expected)
+    assert context["pose_results"] is poses
+    assert poses[0]["predictions"][0] is prediction
+    published = fields if pose_format == "dict" else prediction.pred_instances
+    for key, value in snapshot.items():
+        torch.testing.assert_close(published[key], value)
+    assert tracks.labels.tolist() == [0, 1, 2, 0]
+    torch.testing.assert_close(tracks.bboxes, _tracks([0, 1, 2, 0]).bboxes)
+
+
+@pytest.mark.parametrize("pose_indices", [[], [1, 2]])
+def should_zero_camera_pose_features_when_no_pose_matches_a_kept_role(pose_indices):
+    from hmlib.aspen.plugins.camera_controller_plugin import CameraControllerPlugin
+    from hmlib.camera.camera_transformer import CameraNorm
+
+    plugin = CameraControllerPlugin(controller="rule")
+    plugin._norm = CameraNorm(420, 320, 16)
+    tracks = _tracks([0, 1, 2])
+    poses = [
+        {
+            "predictions": [
+                {
+                    "bboxes": tracks.bboxes[pose_indices],
+                    "keypoint_scores": torch.ones(len(pose_indices), 2),
+                }
+            ]
+        }
+    ]
+    features = plugin._pose_features(
+        poses,
+        0,
+        torch.device("cpu"),
+        role_tracks=(tracks.bboxes, torch.tensor([True, False, False])),
+    )
+    torch.testing.assert_close(features, torch.zeros(8))
+    assert len(poses[0]["predictions"][0]["bboxes"]) == len(pose_indices)

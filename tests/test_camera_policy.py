@@ -282,6 +282,58 @@ def should_emit_policy_changes_before_their_exact_frames_in_real_tracker_batches
     assert results["frame_ids"].tolist() == [0, 1, 2]
 
 
+@pytest.mark.parametrize("native", [False, True])
+@pytest.mark.parametrize("role", ["goalie", "referee"])
+def should_export_live_role_toggle_and_reset_boundaries(tmp_path, monkeypatch, native, role):
+    from test_play_tracker_parity import _base_game_config, _build_tracker, _make_results
+
+    from hmlib.camera.hm_ui_bridge import HmUiProcess
+    from hmlib.camera.operator_controls import OperatorControls
+
+    config = _base_game_config()
+    config["detector"] = {"role_labels": {"goalie": 1, "referee": 2}}
+    tracker = _build_tracker(config, {}, cpp_playtracker=native)
+    tracker._hm_ui_process = HmUiProcess(tmpdir=tmp_path / "controls")
+    monkeypatch.setattr(tracker._hm_ui_process, "ensure_started", lambda: None)
+    controls = OperatorControls(tracker)
+    values = iter([0, 1, 1, 0, 0])
+    name = "Ignore_Goalies" if role == "goalie" else "Ignore_Referees"
+
+    def apply():
+        controls.process.set_value("Player Filtering", name, next(values))
+        controls.apply()
+
+    monkeypatch.setattr(tracker, "_apply_ui_controls", apply)
+    inputs = _make_results(5)
+    for frame in inputs["data_samples"].video_data_samples:
+        frame.pred_track_instances.labels = torch.tensor([0, 1, 2, 0])
+    output = tracker.forward(inputs)
+    events = output["camera_policy_events"]
+    assert [event["frame"] for event in events] == [0, 1, 3]
+    assert [event["policy"]["excluded_role_labels"] for event in events] == [
+        [],
+        [config["detector"]["role_labels"][role]],
+        [],
+    ]
+    assert all(len(ids) == 4 for ids in output["player_ids"])
+    saver = SaveCameraPlugin()
+    saver.forward({**output, "work_dir": str(tmp_path), "frame_id": 0})
+    saver.finalize()
+    for filename in ("camera.csv", "camera_fast.csv"):
+        assert read_camera_policy_boundaries(tmp_path / filename, range(5)) == {0, 1, 3}
+
+
+def should_avoid_role_policy_boundaries_when_detector_has_no_roles():
+    from test_play_tracker_parity import _base_game_config, _build_tracker
+
+    tracker = _build_tracker(_base_game_config(), {}, cpp_playtracker=False)
+    assert tracker._record_camera_policy(0, (1920, 1080)) is not None
+    tracker._game_config["rink"]["tracking"].update(
+        cam_ignore_goalies=True, cam_ignore_referees=True
+    )
+    assert tracker._record_camera_policy(1, (1920, 1080)) is None
+
+
 def should_capture_applied_geometry_when_affected_batches_arrive(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from test_play_tracker_parity import _base_game_config, _build_tracker, _make_results
