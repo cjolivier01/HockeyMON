@@ -201,6 +201,12 @@ class OperatorControls:
             for name in self._last_filters
         }
         if values != self._last_filters:
+            role_changed = any(
+                values[name] != self._last_filters[name]
+                for name in ("Ignore_Referees", "Ignore_Goalies")
+            )
+            if role_changed and tracker._camera_controller in ("transformer", "gpt", "drivegpt"):
+                raise ValueError("Role exclusions for learned camera controllers require a restart")
             count = values["Ignore_Largest_Count"]
             oversized = bool(values["Ignore_Oversized_Players"])
             percent = (
