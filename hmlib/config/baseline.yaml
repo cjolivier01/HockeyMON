@@ -198,6 +198,13 @@ hstream_ui:
   export_archive_routes: [program_4k]
   # Shared Qt/browser tone values use integer slider units, including exposure.
   camera_controls:
+    # UI target roles and zero-valued motion overrides retain native tuning.
+    Apply_To_Fast_Box: 0
+    Apply_To_Follower_Box: 1
+    Max_Speed_X_x10: 0
+    Max_Speed_Y_x10: 0
+    Max_Accel_X_x10: 0
+    Max_Accel_Y_x10: 0
     Bring_Up_Shadows: 0
     Lift_Shadow_Black_Point: 0
     Exposure_x100: 0
