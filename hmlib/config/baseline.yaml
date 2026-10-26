@@ -243,6 +243,8 @@ pipeline:
       rink-camera-anticipate: 1
       rink-camera-frame-goals: 0
       rink-camera-adaptive-zoom: 0
+  primary-gie:
+    config-file: config_infer_yolov8_hockey.yaml
   hmstitcher:
     properties:
       # Auto detects source depth; 1 forces P010/FP16, 0 forces standard 8-bit.
