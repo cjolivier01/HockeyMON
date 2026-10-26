@@ -132,6 +132,19 @@ web_preview:
 # Runtime defaults consumed by Aspen plugins
 #
 runtime:
+  # Shared paced local audio/video. The device negotiates its actual lead;
+  # these are buffer/period requests, never a presentation timestamp offset.
+  local_playback:
+    audio_buffer_us: 16683
+    audio_period_us: 4170
+    processing_deadline_ms: 0
+    history_frames: 256
+    mapping_timeout_ms: 30000
+    # PCM queue headroom, in addition to one actual video interval of samples.
+    audio_queue_buffers: 1
+    audio_queue_bytes: 16384
+    preview_frames: 2
+    pause_timeout_ms: 3000
   # Native GPU pool sizing; explicit UI choices last only for the current session.
   gpu_memory_profile: auto
   # Valid values: nvvideoconvert, dsxvideoconvert.
