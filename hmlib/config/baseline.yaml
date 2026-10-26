@@ -183,6 +183,8 @@ runtime:
       maximum_cost_matrix_bytes: 8388608
 
 hstream_ui:
+  highlights:
+    base_name: highlights
   stitching_experiments:
     prefer_player_frames: true
     scan_duration_seconds: 60
