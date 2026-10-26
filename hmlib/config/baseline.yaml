@@ -572,6 +572,7 @@ stitching:
   rink_config: null
   pto_project_file: null
   stitch_frame_time: "00:00:00"
+  sync_method: "audio"
   calibration_frame_count: 4
   control_point_limit: 1500
   frame_offsets:
