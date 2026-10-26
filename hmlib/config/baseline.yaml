@@ -181,6 +181,13 @@ runtime:
       maximum_cost_matrix_bytes: 8388608
 
 hstream_ui:
+  stitching_experiments:
+    prefer_player_frames: true
+    scan_duration_seconds: 60
+    scan_interval_ms: 500
+    preview_duration_seconds: 15
+    preview_loop: true
+    share_saved_rotation: true
   # Shared Qt/browser playback start, with optional millisecond precision.
   playback_start_time: "00:00:00"
   # Shared Qt/browser tone values use integer slider units, including exposure.
@@ -539,6 +546,7 @@ stitching:
   pto_project_file: null
   stitch_frame_time: "00:00:00"
   calibration_frame_count: 4
+  control_point_limit: 1500
   frame_offsets:
     left: null
     right: null
