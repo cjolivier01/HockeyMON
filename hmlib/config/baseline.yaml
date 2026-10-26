@@ -194,6 +194,8 @@ hstream_ui:
   playback_realtime: false
   # Session-only network destinations selected before playback.
   network_routes: []
+  archive_routes: []
+  export_archive_routes: [program_4k]
   # Shared Qt/browser tone values use integer slider units, including exposure.
   camera_controls:
     Bring_Up_Shadows: 0
