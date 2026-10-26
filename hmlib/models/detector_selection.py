@@ -12,7 +12,7 @@ from hmlib.log import get_logger
 logger = get_logger(__name__)
 
 ROOT = Path(__file__).resolve().parents[2]
-PROFILES = ("deployed", "trained", "distilled", "hockeyref")
+PROFILES = ("deployed", "trained", "distilled", "hockeyref", "hockey-roles")
 
 #: Published `hockeyref` weights, pinned by digest.
 #:
@@ -30,14 +30,22 @@ HOCKEYREF_WEIGHTS_URL = (
 )
 HOCKEYREF_WEIGHTS_SHA256 = "1431d6e713364e14d7f2330485ac9a4d5d607c2982a35267fd8a241a2db4e74d"
 
+HOCKEY_ROLES_WEIGHTS_URL = (
+    "https://github.com/cjolivier01/HockeyMONStream/releases/download/pretrained-assets-v1/"
+    "hm_hockey_roles_yolov8_m_1408_544_epoch10-0463621f21d9e847.pth"
+)
+HOCKEY_ROLES_WEIGHTS_SHA256 = "0463621f21d9e847bead9f3a8392c8da6a70ec076a8a03fd9ff833daa3d50a25"
+PROFILE_GOALIE_LABEL = {"hockey-roles": 1}
+
 #: Class index -> name for each profile's detector head. Everything except
-#: `hockeyref` is a single-class person detector; `hockeyref` splits that into
-#: player and referee, which is what lets the overlay tell them apart.
+#: the role profiles is a single-class person detector. Role profiles carry
+#: their own class order so overlay and camera filtering cannot drift.
 PROFILE_CLASSES = {
     "deployed": ("person",),
     "trained": ("person",),
     "distilled": ("person",),
     "hockeyref": ("player", "referee"),
+    "hockey-roles": ("person", "goalie", "official"),
 }
 
 #: Detector class index that denotes a match official, per profile. None means
@@ -47,6 +55,7 @@ PROFILE_REFEREE_LABEL = {
     "trained": None,
     "distilled": None,
     "hockeyref": 1,
+    "hockey-roles": 2,
 }
 
 #: Input size a profile must be served at, when it is sensitive to one. None
@@ -63,6 +72,7 @@ PROFILE_INPUT_SCALE = {
     "trained": None,
     "distilled": None,
     "hockeyref": (1984, 736),
+    "hockey-roles": (1408, 544),
 }
 
 
@@ -139,6 +149,12 @@ def download_pinned_checkpoint(url: str, sha256: str, filename: str) -> str:
 
 def default_checkpoint(profile: str) -> str:
     """Pick a validated checkpoint, never silently substitute the last epoch."""
+    if profile == "hockey-roles":
+        return download_pinned_checkpoint(
+            HOCKEY_ROLES_WEIGHTS_URL,
+            HOCKEY_ROLES_WEIGHTS_SHA256,
+            Path(HOCKEY_ROLES_WEIGHTS_URL).name,
+        )
     if profile == "hockeyref":
         return download_pinned_checkpoint(
             HOCKEYREF_WEIGHTS_URL,
@@ -188,7 +204,7 @@ def resolve_detector(profile: str, deployed_params: dict, checkpoint: str | None
             encoding="utf-8",
         ) as stream:
             model = yaml.safe_load(stream)
-        # `hockeyref` is the one profile with a wider head: player and referee.
+        # Role profiles have a wider head; class order travels with the preset.
         head_classes = len(PROFILE_CLASSES[profile])
         model["bbox_head"]["head_module"]["num_classes"] = head_classes
         model["train_cfg"]["assigner"]["num_classes"] = head_classes
@@ -321,7 +337,7 @@ def configure_detector_selection(args, game_config: dict) -> None:
     params.update(spec)
 
     # Tell the overlay which detector class index means "official". Only the
-    # hockeyref profile has one, and the index is a property of the trained
+    # role profiles have one, and the index is a property of the trained
     # head, so it travels with the selection rather than being configured
     # independently and drifting out of step with it.
     #
@@ -346,6 +362,13 @@ def configure_detector_selection(args, game_config: dict) -> None:
         ):
             plugin.setdefault("params", {})["referee_label"] = referee_label
 
+        if "OverlayPlugin" in cls:
+            plugin.setdefault("params", {})["goalie_label"] = PROFILE_GOALIE_LABEL.get(selected)
+    game_config.setdefault("detector", {})["role_labels"] = {
+        "referee": referee_label,
+        "goalie": PROFILE_GOALIE_LABEL.get(selected),
+    }
+
     _apply_input_scale(game_config, selected)
 
     identity = detector_identity(spec)
@@ -368,7 +391,7 @@ def configure_detector_selection(args, game_config: dict) -> None:
     # `distilled` and `hockeyref` are opt-in: both need a locally trained
     # checkpoint, so sweeping them into every comparison would fail on a
     # checkout that has not trained them.
-    opt_in = {"distilled": args.compare_distilled, "hockeyref": False}
+    opt_in = {"distilled": args.compare_distilled, "hockeyref": False, "hockey-roles": False}
     models = {
         name: spec if name == selected else resolve_detector(name, deployed, overrides.get(name))
         for name in PROFILES

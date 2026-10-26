@@ -227,3 +227,15 @@ def should_pace_playback_at_selected_source_rate_and_allow_unbounded_render(tmp_
     process.publish_runtime(frame=4, fps=10)
     process.wait_for_playback(lambda: None)
     assert now[0] == pytest.approx(0.15)
+
+
+def should_toggle_roles_without_removing_published_tracks(tmp_path):
+    tracker, _ = make_tracker(tmp_path)
+    controls = OperatorControls(tracker)
+    controls.process.set_value("Player Filtering", "Ignore_Referees", 1)
+    controls.apply()
+    assert tracker._game_config["rink"]["tracking"]["cam_ignore_referees"] is True
+    assert tracker._game_config["rink"]["tracking"]["cam_ignore_goalies"] is False
+    controls.process.set_value("Player Filtering", "Ignore_Goalies", 1)
+    controls.apply()
+    assert tracker._game_config["rink"]["tracking"]["cam_ignore_goalies"] is True

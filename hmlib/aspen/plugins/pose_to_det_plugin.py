@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import torch
@@ -27,8 +27,8 @@ class PoseToDetPlugin(Plugin):
         self,
         enabled: bool = True,
         default_label: int = 0,
-        score_key: Optional[str] = None,
-        score_adder: Optional[float] = None,
+        score_key: str | None = None,
+        score_adder: float | None = None,
     ):
         super().__init__(enabled=enabled)
         self._default_label = int(default_label)
@@ -42,38 +42,35 @@ class PoseToDetPlugin(Plugin):
         pose_result_item is expected to be a dict with key 'predictions' -> list of
         PoseDataSample(s). We use the first one.
         """
-        try:
-            preds = pose_result_item.get("predictions")
-            if isinstance(preds, list) and len(preds) >= 1:
-                ds = preds[0]
-                inst = getattr(ds, "pred_instances", None)
-                if inst is not None:
-                    return inst
-                # Support simplified dict predictions loaded from PoseDataFrame
-                if isinstance(ds, dict):
-                    keys = [
-                        "bboxes",
-                        "scores",
-                        "bbox_scores",
-                        "labels",
-                        "keypoints",
-                        "keypoint_scores",
-                    ]
-                    attrs = {k: ds[k] for k in keys if k in ds}
-                    if attrs:
-                        return SimpleNamespace(**attrs)
-        except Exception:
-            pass
+        preds = pose_result_item.get("predictions")
+        if isinstance(preds, list) and len(preds) >= 1:
+            ds = preds[0]
+            inst = getattr(ds, "pred_instances", None)
+            if inst is not None:
+                return inst
+            # Support simplified dict predictions loaded from PoseDataFrame
+            if isinstance(ds, dict):
+                keys = [
+                    "bboxes",
+                    "scores",
+                    "bbox_scores",
+                    "labels",
+                    "keypoints",
+                    "keypoint_scores",
+                ]
+                attrs = {k: ds[k] for k in keys if k in ds}
+                if attrs:
+                    return SimpleNamespace(**attrs)
         return None
 
-    def forward(self, context: Dict[str, Any]):  # type: ignore[override]
+    def forward(self, context: dict[str, Any]):  # type: ignore[override]
         if not self.enabled:
             return {}
 
         if bool(context.get("using_precalculated_detection", False)):
             return {}
 
-        pose_results: Optional[List[Any]] = context.get("pose_results")
+        pose_results: list[Any] | None = context.get("pose_results")
         if not pose_results:
             # Nothing to convert
             return {}
@@ -129,12 +126,7 @@ class PoseToDetPlugin(Plugin):
                 continue
 
             # bboxes
-            bboxes = None
-            try:
-                if hasattr(inst, "bboxes"):
-                    bboxes = inst.bboxes
-            except Exception:
-                bboxes = None
+            bboxes = getattr(inst, "bboxes", None)
 
             # If missing, try to derive boxes from keypoints
             if bboxes is None and hasattr(inst, "keypoints"):
@@ -153,19 +145,11 @@ class PoseToDetPlugin(Plugin):
                 continue
 
             # scores: prefer bbox_scores; if missing, derive from keypoint_scores; fallback to ones.
-            scores = None
-            try:
-                if hasattr(inst, "bbox_scores"):
-                    scores = getattr(inst, "bbox_scores")
-            except Exception:
-                scores = None
+            scores = getattr(inst, "bbox_scores", None)
             if scores is None and hasattr(inst, "keypoint_scores"):
-                try:
-                    kps = inst.keypoint_scores  # (N, K)
-                    if isinstance(kps, torch.Tensor) and kps.ndim >= 2:
-                        scores = torch.mean(kps, dim=1)
-                except Exception:
-                    scores = None
+                kps = inst.keypoint_scores  # (N, K)
+                if isinstance(kps, torch.Tensor) and kps.ndim >= 2:
+                    scores = torch.mean(kps, dim=1)
             # Normalize shapes and lengths
             bboxes = _to_bboxes_2d(bboxes)
             N = int(bboxes.shape[0])
@@ -179,10 +163,22 @@ class PoseToDetPlugin(Plugin):
                 else:
                     scores = torch.ones((N,), dtype=torch.float32, device=bboxes.device)
 
-            # labels: assign default category (e.g., person=0)
+            # Pose boxes inherit the matched detector role; unmatched poses remain people.
             labels = torch.full(
                 (N,), int(self._default_label), dtype=torch.long, device=bboxes.device
             )
+
+            original = img_data_sample.get("pred_instances", None)
+            if original is not None and "labels" in original and len(original.bboxes) and N:
+                from torchvision.ops import box_iou
+
+                source_boxes = original.bboxes
+                if hasattr(source_boxes, "tensor"):
+                    source_boxes = source_boxes.tensor
+                overlap = box_iou(bboxes, source_boxes.to(bboxes.device))
+                best, indices = overlap.max(dim=1)
+                source_labels = original.labels.to(bboxes.device)
+                labels = torch.where(best > 0.5, source_labels[indices], labels)
 
             if self._score_adder is not None and self._score_adder != 0.0:
                 scores += self._score_adder

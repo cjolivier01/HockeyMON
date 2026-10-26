@@ -73,6 +73,7 @@ class OverlayPlugin(Plugin):
         plot_teams: bool = False,
         plot_referees: bool = True,
         referee_label: int | None = None,
+        goalie_label: int | None = None,
         plot_tracking: bool = False,
         plot_all_detections: float | None = None,
         plot_trajectories: bool = False,
@@ -88,6 +89,7 @@ class OverlayPlugin(Plugin):
         self._plot_teams = bool(plot_teams)
         self._plot_referees = bool(plot_referees)
         self._referee_label = None if referee_label is None else int(referee_label)
+        self._goalie_label = None if goalie_label is None else int(goalie_label)
         self._plot_tracking = bool(plot_tracking)
         self._plot_all_detections = plot_all_detections
         self._plot_trajectories = bool(plot_trajectories)
@@ -291,10 +293,10 @@ class OverlayPlugin(Plugin):
     def _track_labels(self, track_inst: Any, ids: torch.Tensor) -> torch.Tensor | None:
         """Per-track detector class index, or None when the head is single-class.
 
-        Only the `hockeyref` detector profile produces a second class, so on
-        every other profile this is absent and referee drawing is a no-op.
+        Role indices belong to the selected detector profile; ordinary person
+        heads leave these unset and draw no role labels.
         """
-        if self._referee_label is None:
+        if self._referee_label is None and self._goalie_label is None:
             return None
         labels = unwrap_tensor(getattr(track_inst, "labels", None))
         if not isinstance(labels, torch.Tensor) or labels.numel() != ids.numel():
@@ -316,7 +318,10 @@ class OverlayPlugin(Plugin):
         """
         if labels is None or not self._plot_referees:
             return img_f
-        is_referee = labels == int(self._referee_label)
+        is_referee = torch.zeros_like(labels, dtype=torch.bool)
+        for role in (self._referee_label, self._goalie_label):
+            if role is not None:
+                is_referee |= labels == role
         if not bool(is_referee.any()):
             return img_f
 
@@ -326,7 +331,7 @@ class OverlayPlugin(Plugin):
             x1, y1, w, _ = bboxes_tlwh[index]
             img_f = draw_label_box(
                 image=img_f,
-                text="REF",
+                text="GOALIE" if int(labels[index]) == self._goalie_label else "REF",
                 center_x=int(float(x1) + float(w) * 0.5),
                 bottom_y=int(float(y1)) - int(font_scale * 4),
                 font_scale=font_scale,
