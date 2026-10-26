@@ -86,6 +86,48 @@ aspen:
     max_concurrent: 3
     cuda_streams: true
 
+# Initial preview-only diagnostics, shared by Qt and browser controls.
+preview_overlays:
+  players: false
+  play: false
+  rink: false
+
+# Shared Qt rendering size and browser overlay reference coordinates.
+preview_reference:
+  program_width: 1600
+  program_height: 900
+  source_width: 1280
+  source_height: 720
+
+# Private selectable browser preview. Enabled only by an explicit native
+# --web-preview-run-id, with one supervisor-owned WEBRTC sink. The browser
+# receives its receipt limits in the native presentation capability.
+web_preview:
+  width: 1600
+  height: 900
+  rate_numerator: 30
+  rate_denominator: 1
+  surface_pool_frames: 3
+  conversion_pool_frames: 8
+  bitrate: 8000000
+  audio_bitrate: 128000
+  stun_server: ""
+  authored_connect_timeout_ms: 60000
+  authored_disconnect_timeout_ms: 30000
+  idr_interval: 30
+  h264_profile: 0
+  encoder_tuning: 3
+  rtp_payload: 96
+  pending_frames: 64
+  pending_events: 256
+  presentation_history: 512
+  poll_interval_ms: 25
+  events_per_batch: 32
+  queue_frames: 1
+  browser_max_frames: 512
+  browser_max_age_ms: 3000
+  initial_channel: program
+
 #
 # Runtime defaults consumed by Aspen plugins
 #
@@ -139,6 +181,19 @@ runtime:
       maximum_cost_matrix_bytes: 8388608
 
 hstream_ui:
+  # Shared Qt/browser playback start, with optional millisecond precision.
+  playback_start_time: "00:00:00"
+  # Shared Qt/browser tone values use integer slider units, including exposure.
+  camera_controls:
+    Bring_Up_Shadows: 0
+    Lift_Shadow_Black_Point: 0
+    Exposure_x100: 0
+  runtime_controls:
+    debounce_ms: 120
+    ack_timeout_ms: 3000
+    # Outlast the native teardown watchdog, then bound forced process reaping.
+    stop_timeout_ms: 30000
+    kill_timeout_ms: 5000
   # Program detector models offered in the Detection tab. config_prefix names a
   # configs/config_infer_*.yaml family: the bare prefix is FP32 and the selected
   # precision appends _fp16/_bf16/_int8. The first entry is the default.
@@ -157,6 +212,10 @@ hstream_ui:
 # Native player pose cadence and display defaults. Enabling/drawing pose remains
 # an explicit choice; these preferences do not enable the model.
 pipeline:
+  hmstitcher:
+    properties:
+      # Auto detects source depth; 1 forces P010/FP16, 0 forces standard 8-bit.
+      high-bit-depth: auto
   player-analytics:
     pose:
       # Updates per second per player, or "fps" to infer on every video frame.
