@@ -205,6 +205,8 @@ hstream_ui:
     # Outlast the native teardown watchdog, then bound forced process reaping.
     stop_timeout_ms: 30000
     kill_timeout_ms: 5000
+    # Native source reconstruction plus its bounded decoded-keyframe fallback.
+    seek_timeout_ms: 330000
   # Program detector models offered in the Detection tab. config_prefix names a
   # configs/config_infer_*.yaml family: the bare prefix is FP32 and the selected
   # precision appends _fp16/_bf16/_int8. The first entry is the default.
