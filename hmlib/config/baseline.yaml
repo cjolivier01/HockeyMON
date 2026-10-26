@@ -1037,3 +1037,49 @@ output:
     size: compact
     position: upper-right
     pool-frames: 8
+
+# Independent Camera Experiments dialog preferences, shared by Qt and browser.
+camera_experiments:
+  client_timeout_ms: 120000
+  media_kind: original-cameras
+  start_seconds: 0
+  duration_seconds: 10
+  video_offset_seconds: 0
+  source_confirmed: false
+  loop: true
+  realtime: true
+  players: false
+  play: false
+  rink: false
+  apply_to_fast_box: false
+  apply_to_follower_box: true
+  rink_aware: false
+  anticipate: true
+  frame_goals: false
+  adaptive_zoom: false
+  trial_name_prefix: Trial
+  plot_layers:
+    Recorded: true
+    Program: true
+    Crop: true
+    Fast: false
+    Players: false
+    Cluster: false
+    Breakaway: true
+  controls:
+    Zoom_In_Aggressiveness: 25
+    Stop_Direction_Change_Delay_Frames: 0
+    Cancel_Stop_On_Opposite_Direction: 0
+    Stop_Cancel_Hysteresis_Frames: 0
+    Stop_Delay_Cooldown_Frames: 0
+    Time_To_Dest_Speed_Limit_Frames: 0
+    Overshoot_Stop_Delay_Frames: 0
+    Post_Nonstop_Stop_Delay_Frames: 0
+    Overshoot_Speed_Ratio_x100: 0
+    Max_Speed_X_x10: 0
+    Max_Speed_Y_x10: 0
+    Max_Accel_X_x10: 0
+    Max_Accel_Y_x10: 0
+    Ignore_Largest_Count: 0
+    Ignore_Oversized_Players: 0
+    Oversized_Player_Percent: 50
