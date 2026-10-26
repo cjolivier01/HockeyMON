@@ -563,6 +563,11 @@ stitching:
   # Required: there is no compiled-in default. The last second of the recording
   # is cleaner ice than the first stitched frame, which is usually warmup.
   rink_mask_frame_time_default: "-00:00:01"
+  # Retain the selected, unrotated panorama for lossless live mask regeneration.
+  # Bounds cover RGBA half precision at the shared 256 Mi-pixel canvas limit.
+  rink_mask_input:
+    max_raw_bytes: 2147483648
+    max_file_bytes: 2214592512
   # Unselected keeps legacy zero rotation; select a venue in the game config.
   rink_config: null
   pto_project_file: null
