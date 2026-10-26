@@ -190,6 +190,10 @@ hstream_ui:
     share_saved_rotation: true
   # Shared Qt/browser playback start, with optional millisecond precision.
   playback_start_time: "00:00:00"
+  # Session-only pacing choice shared by Qt and the browser.
+  playback_realtime: false
+  # Session-only network destinations selected before playback.
+  network_routes: []
   # Shared Qt/browser tone values use integer slider units, including exposure.
   camera_controls:
     Bring_Up_Shadows: 0
