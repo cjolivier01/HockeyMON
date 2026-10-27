@@ -46,3 +46,15 @@ def should_remove_spectators_without_changing_role_ids_or_attributes():
 def should_reject_mask_with_wrong_dimensions():
     with pytest.raises(ValueError, match="Mask shape"):
         exporter.paint_background(np.zeros((3, 4, 3)), np.zeros((4, 3)), [])
+
+
+def should_keep_two_class_team_id_categories():
+    data = {
+        "categories": [{"id": 1, "name": "person"}, {"id": 2, "name": "ref"}],
+        "images": [{"id": 1}],
+        "annotations": [
+            {"id": 1, "image_id": 1, "category_id": 1},
+            {"id": 2, "image_id": 1, "category_id": 2},
+        ],
+    }
+    assert exporter.select_annotations(data) == data

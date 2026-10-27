@@ -45,7 +45,7 @@ def paint_background(image, rink_mask, annotations, gray=128):
 def select_annotations(data, limit=0):
     """Keep original IDs and attributes, dropping the spectator category/boxes."""
     categories = data["categories"]
-    allowed = {"player", "goalie", "official", "keeper", "ref"}
+    allowed = {"person", "player", "goalie", "official", "keeper", "ref"}
     unknown = {c["name"] for c in categories} - allowed - {"spectator"}
     if unknown:
         raise ValueError(f"Unexpected categories: {sorted(unknown)}")
@@ -80,8 +80,11 @@ def write_frame(path, image):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--annotations", type=Path, nargs="+", required=True)
-    parser.add_argument("--image-root", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--annotations", type=Path, nargs="+")
+    source.add_argument("--team-id-root", type=Path, help="Koshkina team-id/York directory")
+    parser.add_argument("--team-id-val-games", nargs="+", default=["game7", "game8", "game9"])
+    parser.add_argument("--image-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=2)
@@ -105,10 +108,29 @@ def main():
         parser.error("Batch size, workers and threads must be positive; limit nonnegative")
     if not 0 <= args.gray <= 255 or not 0 <= args.score_threshold <= 1:
         parser.error("Gray must be in [0,255]; score threshold in [0,1]")
-    if len({p.name for p in args.annotations}) != len(args.annotations):
+    if args.annotations and len({p.name for p in args.annotations}) != len(args.annotations):
         parser.error("Annotation files must have distinct basenames")
     if args.output.exists():
         parser.error("Output directory already exists; use a new directory")
+
+    source_report = None
+    if args.team_id_root:
+        from team_id_annotations import load_team_id
+
+        if args.image_root:
+            parser.error("--team-id-root supplies its image root; omit --image-root")
+        args.image_root = args.team_id_root
+        splits, source_report = load_team_id(args.team_id_root, args.team_id_val_games)
+        sources = [(f"{name}.json", data) for name, data in splits.items()]
+        print(
+            "Team-ID usable frames:",
+            {name: len(data["images"]) for name, data in sources},
+            flush=True,
+        )
+    else:
+        if not args.image_root:
+            parser.error("--annotations requires --image-root")
+        sources = [(p.name, p) for p in args.annotations]
 
     import torch
     from mmcv.transforms import Compose
@@ -129,14 +151,23 @@ def main():
     args.output.mkdir(parents=True)
     # A failed export never has a completion manifest; annotations publish per split.
     metadata = {k: str(v) for k, v in vars(args).items()}
-    metadata["annotations"] = [str(p.resolve()) for p in args.annotations]
+    metadata["annotations"] = [str(p.resolve()) for p in (args.annotations or [])]
     metadata["rule"] = "preserve ice OR on-ice annotation box; remove spectator annotations"
     (args.output / "export-settings.json").write_text(json.dumps(metadata, indent=2))
+    if source_report is not None:
+        (args.output / "team-id-source-report.json").write_text(json.dumps(source_report, indent=2))
     start = time.perf_counter()
     total = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        for annotation_path in args.annotations:
-            data = select_annotations(json.loads(annotation_path.read_text()), args.limit)
+        for annotation_name, source_data in sources:
+            data = select_annotations(
+                (
+                    json.loads(source_data.read_text())
+                    if isinstance(source_data, Path)
+                    else source_data
+                ),
+                args.limit,
+            )
             by_image = defaultdict(list)
             for annotation in data["annotations"]:
                 by_image[annotation["image_id"]].append(annotation)
@@ -173,11 +204,11 @@ def main():
                     future.result()
                 total += len(batch)
                 print(
-                    f"{annotation_path.name}: {offset + len(batch)}/{len(records)}; "
+                    f"{annotation_name}: {offset + len(batch)}/{len(records)}; "
                     f"{total / (time.perf_counter() - start):.2f} frames/s",
                     flush=True,
                 )
-            destination = args.output / "annotations" / annotation_path.name
+            destination = args.output / "annotations" / annotation_name
             destination.parent.mkdir(exist_ok=True)
             destination.write_text(json.dumps(data))
     (args.output / "COMPLETE.json").write_text(json.dumps({"images": total}))
