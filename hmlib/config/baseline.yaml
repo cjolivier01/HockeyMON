@@ -200,6 +200,9 @@ hstream_ui:
   show_crop_dialog: true
   show_leveling_dialog: true
   show_scoreboard_dialog: true
+  int8_preparation:
+    samples: 64
+    play_when_ready: true
   highlights:
     base_name: highlights
   stitching_experiments:

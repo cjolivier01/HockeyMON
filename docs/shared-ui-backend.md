@@ -259,3 +259,8 @@ The end-to-end workflow also exercises real GPU processing, all three archive
 resolutions and telemetry, native replay/Camera Experiments and native leveling.
 UI PR descriptions include externally hosted before/after screenshots; screenshot
 files do not belong in either repository's Git tree.
+
+The synchronized `hstream_ui.int8_preparation` block supplies the shared desktop
+dialog's required sample count and Play-when-ready defaults. The desktop passes
+the resolved count to `hm-cli --prepare-detector`; Python preparation and its
+artifact protocol are unchanged. Browser recording preparation remains native-only.
