@@ -296,7 +296,14 @@ class PlayTrackerPlugin(Plugin):
         if rp is not None:
             results["rink_profile"] = rp
         # Optional per-frame annotations propagated if present
-        for k in ("jersey_results", "action_results"):
+        for k in (
+            "jersey_results",
+            "action_results",
+            "source_frame_ids",
+            "decoded_pts_ns",
+            "decoded_timing",
+            "decoded_source_role",
+        ):
             v = context.get(k)
             if v is not None:
                 results[k] = v
@@ -349,6 +356,10 @@ class PlayTrackerPlugin(Plugin):
             "shared",
             "arena",
             "tracker_stream_token",
+            "source_frame_ids",
+            "decoded_pts_ns",
+            "decoded_timing",
+            "decoded_source_role",
         }
 
     def output_keys(self) -> set[str]:

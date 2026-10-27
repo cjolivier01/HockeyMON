@@ -132,6 +132,21 @@ web_preview:
 # Runtime defaults consumed by Aspen plugins
 #
 runtime:
+  # Shared paced local audio/video. The device negotiates its actual lead;
+  # these are buffer/period requests, never a presentation timestamp offset.
+  local_playback:
+    audio_buffer_us: 16683
+    audio_period_us: 4170
+    processing_deadline_ms: 0
+    history_frames: 256
+    mapping_timeout_ms: 30000
+    # PCM queue headroom, in addition to one actual video interval of samples.
+    audio_queue_buffers: 1
+    audio_queue_bytes: 16384
+    preview_frames: 2
+    pause_timeout_ms: 3000
+  # Native GPU pool sizing; explicit UI choices last only for the current session.
+  gpu_memory_profile: auto
   # Valid values: nvvideoconvert, dsxvideoconvert.
   video_converter: "nvvideoconvert"
 
@@ -181,10 +196,39 @@ runtime:
       maximum_cost_matrix_bytes: 8388608
 
 hstream_ui:
+  # Open native review dialogs automatically when their workflow needs input.
+  show_crop_dialog: true
+  show_leveling_dialog: true
+  show_scoreboard_dialog: true
+  int8_preparation:
+    samples: 64
+    play_when_ready: true
+  highlights:
+    base_name: highlights
+  stitching_experiments:
+    prefer_player_frames: true
+    scan_duration_seconds: 60
+    scan_interval_ms: 500
+    preview_duration_seconds: 15
+    preview_loop: true
+    share_saved_rotation: true
   # Shared Qt/browser playback start, with optional millisecond precision.
   playback_start_time: "00:00:00"
+  # Session-only pacing choice shared by Qt and the browser.
+  playback_realtime: false
+  # Session-only network destinations selected before playback.
+  network_routes: []
+  archive_routes: []
+  export_archive_routes: [program_4k]
   # Shared Qt/browser tone values use integer slider units, including exposure.
   camera_controls:
+    # UI target roles and zero-valued motion overrides retain native tuning.
+    Apply_To_Fast_Box: 0
+    Apply_To_Follower_Box: 1
+    Max_Speed_X_x10: 0
+    Max_Speed_Y_x10: 0
+    Max_Accel_X_x10: 0
+    Max_Accel_Y_x10: 0
     Bring_Up_Shadows: 0
     Lift_Shadow_Black_Point: 0
     Exposure_x100: 0
@@ -194,6 +238,8 @@ hstream_ui:
     # Outlast the native teardown watchdog, then bound forced process reaping.
     stop_timeout_ms: 30000
     kill_timeout_ms: 5000
+    # Native source reconstruction plus its bounded decoded-keyframe fallback.
+    seek_timeout_ms: 330000
   # Program detector models offered in the Detection tab. config_prefix names a
   # configs/config_infer_*.yaml family: the bare prefix is FP32 and the selected
   # precision appends _fp16/_bf16/_int8. The first entry is the default.
@@ -212,6 +258,15 @@ hstream_ui:
 # Native player pose cadence and display defaults. Enabling/drawing pose remains
 # an explicit choice; these preferences do not enable the model.
 pipeline:
+  ds-playtracker:
+    private-properties:
+      # Next-run Program framing; a reviewed map must match the calibration.
+      rink-camera-enable: 0
+      rink-camera-anticipate: 1
+      rink-camera-frame-goals: 0
+      rink-camera-adaptive-zoom: 0
+  primary-gie:
+    config-file: config_infer_yolov8_hockey.yaml
   hmstitcher:
     properties:
       # Auto detects source depth; 1 forces P010/FP16, 0 forces standard 8-bit.
@@ -265,6 +320,13 @@ video_out:
   save_frame_dir: null
 
 stitching:
+  rink_map:
+    dimensions_m:
+      length: 60.96
+      width: 25.908
+      blue_line_distance: 7.62
+      goal_inset: 3.3528
+      corner_radius: 8.5344
   # Controlled by --aspen-stitching / --no-aspen-stitching.
   aspen-stitching: true
   enabled: true
@@ -534,11 +596,18 @@ stitching:
   # Required: there is no compiled-in default. The last second of the recording
   # is cleaner ice than the first stitched frame, which is usually warmup.
   rink_mask_frame_time_default: "-00:00:01"
+  # Retain the selected, unrotated panorama for lossless live mask regeneration.
+  # Bounds cover RGBA half precision at the shared 256 Mi-pixel canvas limit.
+  rink_mask_input:
+    max_raw_bytes: 2147483648
+    max_file_bytes: 2214592512
   # Unselected keeps legacy zero rotation; select a venue in the game config.
   rink_config: null
   pto_project_file: null
   stitch_frame_time: "00:00:00"
+  sync_method: "audio"
   calibration_frame_count: 4
+  control_point_limit: 1500
   frame_offsets:
     left: null
     right: null
@@ -1007,3 +1076,49 @@ output:
     size: compact
     position: upper-right
     pool-frames: 8
+
+# Independent Camera Experiments dialog preferences, shared by Qt and browser.
+camera_experiments:
+  client_timeout_ms: 120000
+  media_kind: original-cameras
+  start_seconds: 0
+  duration_seconds: 10
+  video_offset_seconds: 0
+  source_confirmed: false
+  loop: true
+  realtime: true
+  players: false
+  play: false
+  rink: false
+  apply_to_fast_box: false
+  apply_to_follower_box: true
+  rink_aware: false
+  anticipate: true
+  frame_goals: false
+  adaptive_zoom: false
+  trial_name_prefix: Trial
+  plot_layers:
+    Recorded: true
+    Program: true
+    Crop: true
+    Fast: false
+    Players: false
+    Cluster: false
+    Breakaway: true
+  controls:
+    Zoom_In_Aggressiveness: 25
+    Stop_Direction_Change_Delay_Frames: 0
+    Cancel_Stop_On_Opposite_Direction: 0
+    Stop_Cancel_Hysteresis_Frames: 0
+    Stop_Delay_Cooldown_Frames: 0
+    Time_To_Dest_Speed_Limit_Frames: 0
+    Overshoot_Stop_Delay_Frames: 0
+    Post_Nonstop_Stop_Delay_Frames: 0
+    Overshoot_Speed_Ratio_x100: 0
+    Max_Speed_X_x10: 0
+    Max_Speed_Y_x10: 0
+    Max_Accel_X_x10: 0
+    Max_Accel_Y_x10: 0
+    Ignore_Largest_Count: 0
+    Ignore_Oversized_Players: 0
+    Oversized_Player_Percent: 50

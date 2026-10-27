@@ -60,6 +60,9 @@ class _PreviewJob:
     max_width: int
     metadata: dict | None = None
     overlays: tuple[bool, bool, bool] = (False, False, False)
+    generation: int = 1
+    source_size: tuple[int, int] | None = None
+    web_identity: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -147,6 +150,20 @@ class HmUiProcess:
             name in requested_layers for name in ("players", "play", "rink")
         )
         self._preview_overlay_renderer = None
+        self._preview_generation = 1
+        self._web_preview = None
+        if "HM_WEB_PROGRAM_REQUEST" in os.environ:
+            from hmlib.ui.hstream_web_preview import CHANNELS, WebPreviewPublisher
+
+            self._web_preview = WebPreviewPublisher(self._tmpdir, self.session_id)
+            self._selected_preview_only = True
+            channel = self._web_preview.initial_channel
+            selected = (
+                "none"
+                if channel == "none"
+                else next(name for name, value in CHANNELS.items() if value == channel)
+            )
+            self._select_preview(selected, 1, restoring=True)
 
     def add_window(self, name: str) -> None:
         self._windows.setdefault(name, [])
@@ -295,12 +312,12 @@ class HmUiProcess:
         self._check_spec_version(state)
         selected_preview = state.get("selected_preview")
         if (
-            isinstance(selected_preview, str)
+            self._web_preview is None
+            and isinstance(selected_preview, str)
             and selected_preview in self.preview_paths
             and selected_preview != self._selected_preview_name
         ):
-            self._selected_preview_name = selected_preview
-            self._last_preview_write_monotonic[selected_preview] = 0.0
+            self._select_preview(selected_preview, self._preview_generation + 1)
         changed = self._apply_state_values(state)
         self._last_poll_values_changed = changed
         actions = state.get("actions")
@@ -369,9 +386,8 @@ class HmUiProcess:
                 self._apply_runtime_controls(saved["values"], apply_controls)
                 if "preview" in saved:
                     name = saved["preview"]
-                    if name != "none" and name not in self.preview_paths:
-                        raise ValueError("Restored preview is unavailable")
-                    self._selected_preview_name = name
+                    generation = saved.get("preview_generation", 1)
+                    self._select_preview(name, generation, restoring=True)
                 if "overlays" in saved:
                     layers = saved["overlays"]
                     if (
@@ -381,6 +397,10 @@ class HmUiProcess:
                     ):
                         raise ValueError("Restored preview overlays require three booleans")
                     self.preview_overlay_layers = tuple(layers)
+                if "rate" in saved:
+                    if type(saved["rate"]) not in {int, float}:
+                        raise ValueError("Restored playback rate must be numeric")
+                    self.apply_playback_action(f"rate:{saved['rate']}")
                 if "paused" in saved:
                     if type(saved["paused"]) is not bool:
                         raise ValueError("Restored playback pause must be a boolean")
@@ -423,9 +443,7 @@ class HmUiProcess:
                     self._apply_runtime_controls(request["values"], apply_controls)
                 elif kind == "preview":
                     name = request["name"]
-                    if name != "none" and name not in self.preview_paths:
-                        raise ValueError(f"Preview source is unavailable: {name}")
-                    self._selected_preview_name = name
+                    self._select_preview(name, request["generation"])
                     self._write_state()
                 elif kind == "clock-reset":
                     self._frame_clock_position = None
@@ -508,6 +526,8 @@ class HmUiProcess:
             return False
         if not self._runtime_enabled:
             raise ValueError("Playback controls are unavailable in this UI")
+        if self._web_preview is not None and self.stop_requested and kind != "stop":
+            raise ValueError("Web frame owner is stopping")
         self._last_batch_time = None
         self._frame_clock_position = None
         self._frame_clock_wall = None
@@ -521,6 +541,12 @@ class HmUiProcess:
             self.stop_requested = True
             self.paused = False
             self._step_batches = 0
+            if self._web_preview is not None:
+                # Retire under the encoder's commit lock before acknowledging
+                # Stop. In-flight/queued encodes may never republish this owner.
+                with self._preview_condition:
+                    self._pending_preview_jobs.clear()
+                    self._web_preview.retire()
         elif not self.stop_requested:
             self.paused = kind != "resume"
             self._step_batches = self._step_batches + 1 if kind == "step" else 0
@@ -566,6 +592,7 @@ class HmUiProcess:
         self._write_json_atomic(
             self.runtime_path,
             {
+                "session_id": self.session_id,
                 "state": (
                     "stopping" if self.stop_requested else "paused" if self.paused else "running"
                 ),
@@ -674,8 +701,13 @@ class HmUiProcess:
         with self._preview_condition:
             if self._preview_worker_stop:
                 return
+            if self._web_preview is not None and self.stop_requested:
+                return
+            if self._selected_preview_only and name != self._selected_preview_name:
+                return
             if now - self._last_preview_write_monotonic[name] < min_interval_seconds:
                 return
+            source_size = (int(image_width(img)), int(image_height(img)))
             if snapshot:
                 # Source tabs must retain decoded pixels before the processing
                 # graph can grade/draw on them. Own only a bounded frame, and
@@ -696,12 +728,31 @@ class HmUiProcess:
                 img = frame if isinstance(frame, np.ndarray) else wrap_tensor(frame)
             # Keep one pending frame per stream. Replacing a queued frame makes
             # preview publication lossy and bounded instead of slowing tracking.
+            selected_metadata = (
+                metadata[-1] if isinstance(metadata, list) and metadata else metadata
+            )
+            if selected_metadata == []:
+                selected_metadata = None
+            if self._web_preview is not None and selected_metadata is not None:
+                selected_metadata = self._web_preview.bind_frame_metadata(name, selected_metadata)
             self._pending_preview_jobs[name] = _PreviewJob(
                 img=img,
                 show_scaled=show_scaled,
                 max_width=int(max_width),
-                metadata=(metadata[-1] if isinstance(metadata, list) and metadata else metadata),
+                metadata=selected_metadata,
                 overlays=self.preview_overlay_layers,
+                generation=self._preview_generation,
+                source_size=source_size,
+                web_identity=(
+                    self._web_preview.identity(
+                        name,
+                        self._preview_generation,
+                        selected_metadata,
+                        self.preview_overlay_layers,
+                    )
+                    if self._web_preview is not None
+                    else None
+                ),
             )
             self._last_preview_write_monotonic[name] = now
             if self._preview_worker is None:
@@ -712,6 +763,24 @@ class HmUiProcess:
                 )
                 self._preview_worker.start()
             self._preview_condition.notify()
+
+    def _select_preview(self, name: str, generation: int, *, restoring: bool = False) -> None:
+        if name != "none" and name not in self.preview_paths:
+            raise ValueError(f"Preview source is unavailable: {name}")
+        if type(generation) is not int or not 0 < generation < 2**53:
+            raise ValueError("Preview generation must be a positive integer")
+        with self._preview_condition:
+            if generation < self._preview_generation or (
+                generation == self._preview_generation and not restoring
+            ):
+                raise ValueError("Preview generation was already applied")
+            if self._web_preview is not None:
+                self._web_preview.select(name, generation)
+            self._selected_preview_name = name
+            self._preview_generation = generation
+            self._pending_preview_jobs.clear()
+            if name != "none":
+                self._last_preview_write_monotonic[name] = 0.0
 
     def flush_previews(self, timeout: float = 5.0) -> bool:
         """Wait for queued preview work, primarily for orderly shutdown and tests."""
@@ -762,8 +831,10 @@ class HmUiProcess:
                 )
                 self._preview_batch_warned = True
             frame = frame[-1]
-        source_width = int(image_width(frame))
-        source_height = int(image_height(frame))
+        source_width, source_height = job.source_size or (
+            int(image_width(frame)),
+            int(image_height(frame)),
+        )
         # Resize before a CUDA-to-host transfer when the source is a GPU tensor.
         frame = make_visible_image(
             frame,
@@ -789,7 +860,7 @@ class HmUiProcess:
         if frame.ndim != 3 or frame.shape[-1] not in (1, 3, 4):
             raise ValueError(f"hm-ui preview expected HxWxC image, got shape={frame.shape}")
         frame = np.ascontiguousarray(frame)
-        if job.metadata is not None and any(job.overlays):
+        if job.metadata is not None and "matrix" in job.metadata and any(job.overlays):
             if self._preview_overlay_renderer is None:
                 from hmlib.ui.preview_overlays import PreviewOverlayRenderer
 
@@ -804,17 +875,38 @@ class HmUiProcess:
         )
         if not ok:
             raise RuntimeError("OpenCV failed to encode hm-ui preview frame")
-        preview_path = self.preview_paths[name]
-        preview_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = preview_path.with_suffix(preview_path.suffix + ".tmp")
-        tmp.write_bytes(encoded.tobytes())
-        os.replace(tmp, preview_path)
-        # Publish separately from the control spec: the preview worker must not
-        # race the tracking thread's control/default updates to spec.json.
-        self._write_json_atomic(
-            preview_path.with_suffix(".json"),
-            {"width": source_width, "height": source_height},
-        )
+        with self._preview_condition:
+            if self._preview_worker_stop or (
+                self._selected_preview_only
+                and (
+                    name != self._selected_preview_name
+                    or job.generation != self._preview_generation
+                )
+            ):
+                return
+            if self._web_preview is not None and self.stop_requested:
+                return
+            if self._web_preview is not None and job.overlays != self.preview_overlay_layers:
+                return
+            preview_path = self.preview_paths[name]
+            preview_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = preview_path.with_suffix(preview_path.suffix + ".tmp")
+            encoded_bytes = encoded.tobytes()
+            tmp.write_bytes(encoded_bytes)
+            os.replace(tmp, preview_path)
+            # Preserve the desktop's fixed JPEG and dimensions. Browser readers
+            # use the atomic manifest and its separate immutable JPEG instead.
+            self._write_json_atomic(
+                preview_path.with_suffix(".json"),
+                {"width": source_width, "height": source_height},
+            )
+            if self._web_preview is not None:
+                self._web_preview.publish(
+                    job.web_identity,
+                    encoded_bytes,
+                    (source_width, source_height),
+                    (int(frame.shape[1]), int(frame.shape[0])),
+                )
 
     def ensure_started(self) -> None:
         if self._closed:
@@ -857,6 +949,8 @@ class HmUiProcess:
         self._last_action_seq = 0
 
     def close(self) -> None:
+        if self._closed:
+            return
         if self._process is not None and self._process.poll() is None:
             self._process.terminate()
             try:
@@ -867,7 +961,11 @@ class HmUiProcess:
         with self._preview_condition:
             self._preview_worker_stop = True
             self._pending_preview_jobs.clear()
-            self._preview_condition.notify_all()
+            try:
+                if self._web_preview is not None:
+                    self._web_preview.retire()
+            finally:
+                self._preview_condition.notify_all()
         if self._preview_worker is not None:
             self._preview_worker.join(timeout=5.0)
         if self._preview_worker is not None and self._preview_worker.is_alive():
@@ -881,6 +979,7 @@ class HmUiProcess:
             self._write_json_atomic(
                 self.runtime_path,
                 {
+                    "session_id": self.session_id,
                     "state": "finished",
                     "frame": self._runtime_frame,
                     "fps": self._runtime_fps,

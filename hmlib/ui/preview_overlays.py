@@ -13,6 +13,42 @@ import cv2
 import numpy as np
 
 
+def source_metadata(context: dict, index: int = -1, *, role: str | None = None) -> dict:
+    """Copy exact loader identities; delivered frame/FPS estimates are excluded."""
+    result = {}
+    selected_role = context.get("decoded_source_role", role)
+    if selected_role is not None:
+        if selected_role not in {"source", "left", "right"} or (
+            role is not None and role != selected_role
+        ):
+            raise ValueError("Preview timing has a conflicting source role")
+        result["decoded_source_role"] = selected_role
+    for source, target in (
+        ("source_frame_ids", "source_frame_id"),
+        ("decoded_pts_ns", "decoded_pts_ns"),
+    ):
+        values = context.get(source)
+        if values is None:
+            continue
+        if not isinstance(values, (list, tuple)) or not -len(values) <= index < len(values):
+            raise ValueError("Preview source identities do not align with the frame batch")
+        value = values[index]
+        if value is not None and (type(value) is not int or not 0 <= value < 2**63):
+            raise ValueError("Preview source identities require nonnegative integers")
+        result[target] = value
+    timings = context.get("decoded_timing")
+    if timings is not None:
+        if not isinstance(timings, (list, tuple)) or not -len(timings) <= index < len(timings):
+            raise ValueError("Decoded timing does not align with the preview batch")
+        timing = timings[index]
+        if timing is not None:
+            from hmlib.video.frame_timing import timestamp_from_document
+
+            timestamp_from_document(timing)
+            result["decoded_timing"] = dict(timing)
+    return result
+
+
 def copy_metadata(metadata: list[dict] | None) -> list[dict] | None:
     if metadata is None:
         return None

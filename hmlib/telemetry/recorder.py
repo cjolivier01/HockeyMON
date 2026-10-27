@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import threading
 import uuid
@@ -114,6 +115,26 @@ class TelemetryRecorder:
                     configuration,
                 ),
             )
+            self._initial_event_id = 1
+            if "HM_WEB_PROGRAM_REQUEST" in os.environ:
+                from hmlib.ui.hstream_web import worker_binding
+                from hmlib.ui.hstream_web_content import binding, canonical
+
+                _, request = worker_binding()
+                connection.execute(
+                    "INSERT INTO config_events VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        self.run_id,
+                        2,
+                        1,
+                        "web-program-binding",
+                        "request-v1",
+                        canonical(binding(request)).decode(),
+                        "",
+                        "",
+                    ),
+                )
+                self._initial_event_id = 2
             connection.commit()
         finally:
             connection.close()
@@ -169,7 +190,7 @@ class TelemetryRecorder:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
             self._sample_id = self._geometry_id = 0
-            self._event_id = 1
+            self._event_id = self._initial_event_id
             self._geometry_key = None
             self._mask_reference = None
             self._last_frame = None

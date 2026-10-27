@@ -9,6 +9,10 @@ from pathlib import Path
 
 
 def main() -> None:
+    if "HM_WEB_PROGRAM_REQUEST" in os.environ:
+        from hmlib.ui.hstream_web import verify_worker_environment
+
+        verify_worker_environment()
     from hmlib.ui.hstream_runtime import write_document
 
     session = Path(os.environ["HM_UI_SESSION_DIR"])

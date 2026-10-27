@@ -144,8 +144,9 @@ class _FakeHmUiProcess:
         self.changed = True
         self.queue_action("reset-system" if system else "reset-open")
 
-    def publish_preview(self, img, *, name: str) -> None:
+    def publish_preview(self, img, *, name: str, metadata=None) -> None:
         self.previews.append((img, name))
+        self.preview_metadata = metadata
 
     def close(self) -> None:
         self.closed = True
@@ -210,12 +211,13 @@ def should_apply_and_save_stitch_only_rust_controls(monkeypatch):
     }
     plugin = StitchUiPlugin()
     image = object()
-    plugin.forward({"img": image, "shared": shared})
+    plugin.forward({"img": image, "shared": shared, "source_frame_ids": [10]})
 
     process = _FakeHmUiProcess.instances[0]
     assert process.kwargs["preview_names"] == ("Stitched", "Camera 1", "Camera 2")
     assert shared["hm_ui_process"] is process
     assert process.previews[-1] == (image, "Stitched")
+    assert process.preview_metadata == {"source_frame_id": 10}
 
     process.values["Stitch Alignment"]["Stitch_Rotate_Degrees"] = 80
     process.values["Tracker Controls (Stitched Color)"]["Brightness_Multiplier_x100"] = 125

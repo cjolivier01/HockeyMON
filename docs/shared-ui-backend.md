@@ -72,6 +72,18 @@ and native browser overlay coordinates. Its `web_preview` section bounds the
 native selectable transport; these values do not enable that transport in the
 Python backend or replace its existing preview protocol.
 
+The synchronized baseline carries the required native calibration prompt
+preferences `hstream_ui.show_crop_dialog` and `hstream_ui.show_leveling_dialog`,
+both enabled. Qt and browser Defaults save overrides for these preferences and
+the `stitching.stitch_frame_time` reference time. Native calibration owns the
+dialogs; Python retains the shared values without adding another prompt policy.
+
+The same baseline also owns `hstream_ui.show_scoreboard_dialog`, enabled by
+default. The shared Qt launcher resolves private and game overrides and retains
+an explicit `HM_NO_SCOREBOARD` environment override. The browser exports the
+same startup default while preserving saved false values. Live scoreboard
+selection remains independent of automatic missing-selection prompts.
+
 The desktop owns a private session and process group. `hm-cli` translates stdin
 commands into authenticated, bounded requests. The frame owner applies a complete
 request and returns a receipt; enqueueing does not acknowledge a successful
@@ -247,3 +259,8 @@ The end-to-end workflow also exercises real GPU processing, all three archive
 resolutions and telemetry, native replay/Camera Experiments and native leveling.
 UI PR descriptions include externally hosted before/after screenshots; screenshot
 files do not belong in either repository's Git tree.
+
+The synchronized `hstream_ui.int8_preparation` block supplies the shared desktop
+dialog's required sample count and Play-when-ready defaults. The desktop passes
+the resolved count to `hm-cli --prepare-detector`; Python preparation and its
+artifact protocol are unchanged. Browser recording preparation remains native-only.

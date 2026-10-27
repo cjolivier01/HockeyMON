@@ -1091,8 +1091,12 @@ class PlayTracker(torch.nn.Module):
 
         original_images = unwrap_tensor(results.pop("original_images"))
 
+        from hmlib.ui.preview_overlays import source_metadata
+
         if self._stitch_rotation_controller is None:
-            self._publish_hm_ui_preview(original_images, name="Camera 1")
+            self._publish_hm_ui_preview(
+                original_images, name="Camera 1", metadata=source_metadata(results)
+            )
 
         # Figure out what device this image should be on
         image_device = self._device
@@ -1805,6 +1809,7 @@ class PlayTracker(torch.nn.Module):
             if shared_preview_metadata is not None:
                 shared_preview_metadata.append(
                     {
+                        **source_metadata(results, frame_index),
                         "matrix": np.eye(3),
                         "boxes": online_bboxes_tlbr.detach().clone(),
                         "ids": preview_ids.detach().clone(),

@@ -292,6 +292,7 @@ def should_clear_previous_worker_artifacts_and_replay_acknowledged_controls(
     assert json.loads((root / "replay-controls.json").read_text()) == {
         "values": {"Program": {"HStream_Exposure_x100": 80}},
         "preview": "Stitched",
+        "preview_generation": 1,
         "overlays": [True, False, True],
         "paused": False,
     }

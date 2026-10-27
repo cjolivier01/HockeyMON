@@ -24,6 +24,7 @@ from hmlib.ui import show_image
 from hmlib.utils.gpu import StreamTensorBase, wrap_tensor
 from hmlib.utils.image import make_channels_first, make_channels_last, resize_image
 from hmlib.video.ffmpeg import BasicVideoInfo, get_ffmpeg_decoder_process
+from hmlib.video.frame_timing import DecodedTimestamp
 from hmlib.video.py_amd_codec import PyAmdVideoCodec, PyAmdVideoDecoder, PyAmdVideoEncoder
 
 JETSON_UTILS_PY_PATH = "/mnt/monster-data/colivier/src/jetson-utils/python/python"
@@ -551,13 +552,17 @@ class PyNvVideoCodecIterator:
         decoder,
         device: torch.device,
         cuda_stream: torch.cuda.Stream,
+        time_base: Fraction,
         batch_size: int = 1,
     ):
         self._decoder = decoder
         self._batch_size = batch_size
         self._device = device
         self._cuda_stream = cuda_stream
+        self._time_base = time_base
+        self.last_frame_timing: list[DecodedTimestamp] = []
         self.frames_delivered_count: int = 0
+        self.source_ordinals_complete = True
 
     def __next__(self):
         with torch.cuda.stream(self._cuda_stream):
@@ -566,9 +571,11 @@ class PyNvVideoCodecIterator:
                 raise StopIteration()
 
             batch_tensors = []
+            timing = []
             for frame in frames:
                 planes = frame.cuda()
                 if planes is None:
+                    self.source_ordinals_complete = False
                     continue
                 plane_tensors = [torch.as_tensor(p, device=self._device) for p in planes]
                 if len(plane_tensors) >= 3:
@@ -578,11 +585,14 @@ class PyNvVideoCodecIterator:
                     plane_tensors[2] = tmp
                 tensor = torch.stack(plane_tensors, dim=0)
                 batch_tensors.append(tensor)
+                pts = frame.getPTS()
+                timing.append(DecodedTimestamp(None if pts == -(2**63) else pts, self._time_base))
 
             if not batch_tensors:
                 raise StopIteration()
 
             self.frames_delivered_count += len(batch_tensors)
+            self.last_frame_timing = timing
             return wrap_tensor(torch.stack(batch_tensors, dim=0))
 
     def __iter__(self):
@@ -594,6 +604,8 @@ class PyAmdVideoCodecIterator:
         self._decoder = decoder
         self._batch_size = batch_size
         self.frames_delivered_count: int = 0
+        self.last_frame_timing: list[DecodedTimestamp] = []
+        self.source_ordinals_complete = True
 
     def __next__(self):
         batch = self._decoder.read_batch(self._batch_size)
@@ -601,6 +613,7 @@ class PyAmdVideoCodecIterator:
             raise StopIteration()
         batch_ref = batch.ref() if isinstance(batch, StreamTensorBase) else batch
         self.frames_delivered_count += int(batch_ref.shape[0])
+        self.last_frame_timing = list(self._decoder.last_frame_timing)
         return batch
 
     def __iter__(self):
@@ -612,6 +625,7 @@ class CVVideoCaptureIterator:
         self._cap = cap
         self._batch_size = batch_size
         self.frames_delivered_count = 0
+        self.source_ordinals_complete = True
 
     def __next__(self):
         if self._batch_size == 1:
@@ -625,6 +639,8 @@ class CVVideoCaptureIterator:
             for _ in range(self._batch_size):
                 res, frame = self._cap.read()
                 if not res:
+                    if frames:
+                        self.source_ordinals_complete = False
                     raise StopIteration()
                 frames.append(frame.transpose(2, 0, 1))
             self.frames_delivered_count += self._batch_size
@@ -813,6 +829,7 @@ class VideoStreamReader:
                 self._video_in,
                 device=self._device,
                 cuda_stream=self._cuda_stream,
+                time_base=Fraction(self._video_info._ffstream.time_base),
                 batch_size=self._batch_size,
             )
         elif self._type == "pyamdcodec":

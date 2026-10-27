@@ -111,6 +111,11 @@ def publish_artifacts(
     desktop receipt; filenames and game IDs never determine those roles.
     """
     directory = Path(directory)
+    web_program = "HM_WEB_PROGRAM_REQUEST" in os.environ
+    if web_program:
+        from hmlib.ui.hstream_web import validate_publication_directory
+
+        validate_publication_directory(directory, generation_directories)
     names = list(sources)
     kinds = {} if kinds is None else dict(kinds)
     if set(kinds) - set(sources) or set(kinds.values()) - {
@@ -263,8 +268,19 @@ def publish_artifacts(
             from hmlib.ui.workspace.files import write_json
 
             path = Path(receipt)
-            records = json.loads(path.read_text()) if path.exists() else []
-            records.extend(
+            if web_program:
+                from hmlib.ui.hstream_web import read_publications
+
+                expected = (
+                    Path(os.environ["HM_WEB_PROGRAM_REQUEST"]).parent
+                    / "work/hockeymon-session/publication.json"
+                )
+                if path != expected:
+                    raise ValueError("Web publication journal escaped its private session")
+                records = read_publications(Path(os.environ["HM_WEB_PROGRAM_REQUEST"]).parent)
+            else:
+                records = json.loads(path.read_text()) if path.exists() else []
+            additions = [
                 {
                     "name": name,
                     "path": str(target.resolve()),
@@ -272,8 +288,21 @@ def publish_artifacts(
                     **({"kind": kinds[name]} if name in kinds else {}),
                 }
                 for name, target in candidates.items()
-            )
-            write_json(path, records)
+            ]
+            if web_program:
+                from hmlib.ui.hstream_web import _write_json, publication_records
+
+                expected_receipt = (
+                    Path(os.environ["HM_WEB_PROGRAM_REQUEST"]).parent
+                    / "work/hockeymon-session/publication.json"
+                )
+                if path != expected_receipt:
+                    raise ValueError("Web publication journal escaped its private session")
+                records.extend(publication_records(additions))
+                _write_json(path, records)
+            else:
+                records.extend(additions)
+                write_json(path, records)
         return PublishedArtifacts(suffix, candidates)
     finally:
         os.close(lock_fd)
