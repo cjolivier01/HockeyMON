@@ -78,6 +78,12 @@ both enabled. Qt and browser Defaults save overrides for these preferences and
 the `stitching.stitch_frame_time` reference time. Native calibration owns the
 dialogs; Python retains the shared values without adding another prompt policy.
 
+The same baseline also owns `hstream_ui.show_scoreboard_dialog`, enabled by
+default. The shared Qt launcher resolves private and game overrides and retains
+an explicit `HM_NO_SCOREBOARD` environment override. The browser exports the
+same startup default while preserving saved false values. Live scoreboard
+selection remains independent of automatic missing-selection prompts.
+
 The desktop owns a private session and process group. `hm-cli` translates stdin
 commands into authenticated, bounded requests. The frame owner applies a complete
 request and returns a receipt; enqueueing does not acknowledge a successful

@@ -196,9 +196,10 @@ runtime:
       maximum_cost_matrix_bytes: 8388608
 
 hstream_ui:
-  # Review these steps automatically during stitching calibration.
+  # Open native review dialogs automatically when their workflow needs input.
   show_crop_dialog: true
   show_leveling_dialog: true
+  show_scoreboard_dialog: true
   highlights:
     base_name: highlights
   stitching_experiments:
