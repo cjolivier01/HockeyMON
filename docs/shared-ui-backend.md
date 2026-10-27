@@ -72,6 +72,12 @@ and native browser overlay coordinates. Its `web_preview` section bounds the
 native selectable transport; these values do not enable that transport in the
 Python backend or replace its existing preview protocol.
 
+The synchronized baseline carries the required native calibration prompt
+preferences `hstream_ui.show_crop_dialog` and `hstream_ui.show_leveling_dialog`,
+both enabled. Qt and browser Defaults save overrides for these preferences and
+the `stitching.stitch_frame_time` reference time. Native calibration owns the
+dialogs; Python retains the shared values without adding another prompt policy.
+
 The desktop owns a private session and process group. `hm-cli` translates stdin
 commands into authenticated, bounded requests. The frame owner applies a complete
 request and returns a receipt; enqueueing does not acknowledge a successful
