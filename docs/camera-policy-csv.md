@@ -10,10 +10,13 @@ are shared with each companion: `trial_camera-3.csv` pairs with
 
 The tracker freezes each event after live controls are applied and before that
 frame advances the camera policy. A batch may contain several events. The
-snapshot contains camera settings, controller mode, applied fast/follower
-selectors, applied stitch rotation, and canvas/play-area dimensions. Resetting or
+snapshot contains camera settings, controller mode, effective excluded role
+class indices, applied fast/follower selectors, applied stitch rotation, and
+canvas/play-area dimensions. Resetting or
 reloading camera settings creates a boundary when those effective values
-change. Repeating unchanged controls does not create another boundary. Color
+change. Repeating unchanged controls does not create another boundary.
+Role toggles and resets create boundaries only when the selected detector's
+effective exclusions change; single-class detectors cannot exclude roles. Color
 settings are excluded from camera-policy comparisons. Aspen stitching attaches
 the rotation used to render each batch, so a UI request during a batch creates
 a geometry boundary when the affected pixels arrive. Legacy stitching uses

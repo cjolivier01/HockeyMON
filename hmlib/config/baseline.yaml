@@ -250,6 +250,9 @@ hstream_ui:
     - id: distilled-s
       label: Distilled (YOLOv8-s, 1408x544)
       config_prefix: config_infer_yolov8s_hockey
+    - id: hockey-roles
+      label: Hockey roles — epoch 10 (YOLOv8-m, 1408x544)
+      config_prefix: config_infer_yolov8m_hockey_roles
 
   drivegpt_database:
     # Initial checkbox state; capture disables seeking for the run.
@@ -848,6 +851,9 @@ rink:
     #
     # Some tracking config
     #
+    # Role exclusions affect play framing only; detections and boxes remain visible.
+    cam_ignore_referees: false
+    cam_ignore_goalies: false
     # Legacy switch for count-based filtering. False keeps existing rink overrides disabled.
     cam_ignore_largest: true
     # Largest player areas to exclude from play tracking; 0 disables this filter.

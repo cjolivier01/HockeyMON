@@ -43,6 +43,8 @@ _TUNING_CONTROLS = {
     "zoom-in-aggressiveness": ("Zoom_In_Aggressiveness", 1),
     "ignore-largest-bbox-count": ("Ignore_Largest_Count", 1),
     "oversized-bbox-percent": ("Oversized_Player_Percent_x10", 10),
+    "ignore-referees": ("Ignore_Referees", 1),
+    "ignore-goalies": ("Ignore_Goalies", 1),
     "ignore-oversized-bboxes": ("Ignore_Oversized_Players", 1),
     "cancel-stop-on-opposite-dir": ("Cancel_Stop_On_Opposite_Direction", 1),
     "cancel-stop-hysteresis-frames": ("Stop_Cancel_Hysteresis_Frames", 1),

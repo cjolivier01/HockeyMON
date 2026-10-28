@@ -118,3 +118,5 @@
 - Context flow: `forward` threads a shared mutable `context` (injects `shared` and `trunks` namespaces); trunks can declare `input_keys`/`output_keys` and, when `minimal_context` is true, only requested keys plus `shared` are passed; outputs update context, `DeleteKey` removes entries, and each trunk's outputs are stored under `context["trunks"][name]`.
 - Device selection for stream usage is inferred from `context`/`shared` (`device`, `cuda_stream`, tensor devices) with CUDA current-device fallback; profiling is plumbed through `shared["profiler"]` using trunk `profile_scope`.
 - Shutdown: `finalize()` is invoked on trunks if present; DAG is available via `to_networkx`/`to_dot` helpers and `display_graphviz`.
+
+- `hmlib/models/detector_selection.py` owns the pinned epoch-10 `hockey-roles` profile, input geometry and role indices. Camera role exclusions apply only to framing subjects; published tracks remain intact. The shared desktop/runtime bindings and role overlays are documented in `docs/hockey-roles-detector.md`.

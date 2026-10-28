@@ -25,6 +25,7 @@ def make_tracker(tmp_path, native=True):
     tracker = SimpleNamespace(
         _hm_ui_process=process,
         _game_config=config,
+        _camera_controller="rule",
         _system_game_config=copy.deepcopy(config),
         _cam_ignore_largest=True,
         _cam_ignore_largest_count=2,
@@ -227,3 +228,25 @@ def should_pace_playback_at_selected_source_rate_and_allow_unbounded_render(tmp_
     process.publish_runtime(frame=4, fps=10)
     process.wait_for_playback(lambda: None)
     assert now[0] == pytest.approx(0.15)
+
+
+def should_toggle_roles_without_removing_published_tracks(tmp_path):
+    tracker, _ = make_tracker(tmp_path)
+    controls = OperatorControls(tracker)
+    controls.process.set_value("Player Filtering", "Ignore_Referees", 1)
+    controls.apply()
+    assert tracker._game_config["rink"]["tracking"]["cam_ignore_referees"] is True
+    assert tracker._game_config["rink"]["tracking"]["cam_ignore_goalies"] is False
+    controls.process.set_value("Player Filtering", "Ignore_Goalies", 1)
+    controls.apply()
+    assert tracker._game_config["rink"]["tracking"]["cam_ignore_goalies"] is True
+
+
+def should_require_restart_for_learned_camera_role_changes(tmp_path):
+    tracker, _ = make_tracker(tmp_path)
+    tracker._camera_controller = "transformer"
+    controls = OperatorControls(tracker)
+    controls.process.set_value("Player Filtering", "Ignore_Referees", 1)
+    with pytest.raises(ValueError, match="require a restart"):
+        controls.apply()
+    assert not tracker._game_config["rink"]["tracking"].get("cam_ignore_referees", False)
