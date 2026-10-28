@@ -200,6 +200,11 @@ hstream_ui:
   show_crop_dialog: true
   show_leveling_dialog: true
   show_scoreboard_dialog: true
+  # Next-playback preview preferences; encoded outputs have separate rink-map settings.
+  preview_rink_map:
+    enable: true
+    size: standard
+    position: upper-right
   int8_preparation:
     samples: 64
     play_when_ready: true
