@@ -1,6 +1,13 @@
 HockeyMON
 
-![Fast play tracking sample](docs/images/tv-12-1-r2_fast_play.gif)
+![Looping clip of hockey, cropped to the camera the play tracker chose. A red track id and a thin ellipse follow each skater, a blue rectangle marks the fast region of interest the camera is chasing, two circles at the centre of the frame show how far that region has to move before the camera follows it, and a cyan line runs from the centre to the middle of the blue rectangle](docs/images/blackhawks-p3_play_tracking.webp)
+
+*6.5 continuous seconds of `hmtrack` output. The frame itself is the camera —
+the outline on its edge is that box. The blue rectangle is the fast region of
+interest it is chasing, wider than the shot for most of the clip so one of its
+sides runs off the edge, and the cyan line is how far the camera still has to
+go. Nothing was drawn after the run; the
+[image notes](docs/images/README.md) name every overlay.*
 
 ## Docs
 - Repository guidelines: see [AGENTS.md](AGENTS.md).
