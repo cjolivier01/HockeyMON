@@ -36,7 +36,6 @@ LOCAL_EDITABLE_PACKAGES = (
     "openmm/mmpose",
     "openmm/mmocr",
     "openmm/mmsegmentation",
-    "openmm/mmpretrain",
     "openmm/mmyolo",
     "openmm/mmaction2",
     "xmodels/str/parseq",

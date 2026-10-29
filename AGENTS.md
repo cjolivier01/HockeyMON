@@ -50,9 +50,14 @@
 
 ### Worktrees
 
+- Start new work in a worktree: `git worktree add -b <task> ../hm-<task>`. An explicit instruction to work elsewhere wins.
 - Create every worktree as a sibling of the repository, never inside it: `../hm-<task>`, not `.claude/worktrees/<task>` or any other subdirectory.
+- If this checkout is already a worktree, keep the work here rather than nesting another one. Check with `[ "$(git rev-parse --git-dir)" != "$(git rev-parse --git-common-dir)" ]`.
+- Leave the primary checkout (usually on `master`) unmodified; use it to fetch, compare revisions and review.
 - A worktree under the repository root carries its own `BUILD.bazel` files, so `//...` expands into it and the build fails on targets that belong to another checkout. `.bazelignore` excludes `.claude` for this reason; a worktree anywhere else under the root would still break `bazelisk build //...`.
-- Remove a worktree once its branch has merged, and keep the branch name task-focused on the same terms as any other branch.
+- Bazel keys its output base on the workspace path, so each worktree builds cold and keeps its own `bazel-*` symlinks.
+- `git worktree add` does not populate submodules; run `git submodule update --init --recursive` in the new worktree when one of the `external/` checkouts is needed.
+- Remove a worktree once its branch has merged, and keep the branch name task-focused on the same terms as any other branch. Run `git worktree prune` if the directory was deleted by hand, otherwise the stale entry keeps its branch locked.
 
 ### Nested repositories and submodules
 
