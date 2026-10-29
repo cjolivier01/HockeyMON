@@ -313,10 +313,11 @@ video_out:
   # ignored on CUDA and selects nicest on VIC. A direct pipeline.sink*.
   # interpolation-method in an app/overlay YAML wins a same-layer tie.
   # algo2 is GPU-Super on CUDA and 10-tap on VIC. Program is ~7466x4200, so
-  # this reduces ~1.94x per axis: bilinear's fixed 2x2 footprint misses about
-  # half the source pixels and aliases, while cubic and lanczos ring the
-  # scoreboard. Super averages the real footprint and cannot overshoot. AMD
-  # renders the crop directly at UHD and logs that it ignored this setting.
+  # this reduces ~1.94x per axis, and bilinear's footprint is two source
+  # pixels wide whatever the ratio: too narrow to cover that, so it aliases,
+  # while cubic and lanczos ring the scoreboard. Super averages the real
+  # footprint and cannot overshoot. AMD has no second resize to apply this
+  # to and logs that it selects nothing there; its crop averages instead.
   program_4k_interpolation: "algo2"
   show_image: false
   show_scaled: null
