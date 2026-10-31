@@ -579,6 +579,9 @@ stitching:
   # Resolved per-camera optics, keyed by each original first-chapter path.
   # Empty keeps shared values; Auto fills separate prescriptions when needed.
   input_cameras: {}
+  # Source trims in seconds, keyed by the first selected chapter. Sync refines
+  # these starting points before calibration and playback. Empty trims nothing.
+  input_start_times: {}
   # Independent input-camera sources. Null follows the selector: both Auto for
   # the auto profile, both manual for named profiles. Explicit booleans allow
   # metadata FOV with manual correction, or manual FOV with automatic correction.
