@@ -576,6 +576,12 @@ stitching:
         center_offset: [0, 0]
     # END GENERATED CAMERA LENS CATALOG
   camera_config: "auto"
+  # Resolved per-camera optics, keyed by each original first-chapter path.
+  # Empty keeps shared values; Auto fills separate prescriptions when needed.
+  input_cameras: {}
+  # Source trims in seconds, keyed by the first selected chapter. Sync refines
+  # these starting points before calibration and playback. Empty trims nothing.
+  input_start_times: {}
   # Independent input-camera sources. Null follows the selector: both Auto for
   # the auto profile, both manual for named profiles. Explicit booleans allow
   # metadata FOV with manual correction, or manual FOV with automatic correction.
@@ -631,8 +637,8 @@ stitching:
   control_point_matcher: "akaze-hamming"
   # Native automatic matches: independent geometric checks before spatial capping.
   control_point_filtering:
-    epipolar_ransac: true
-    homography_consistency: true
+    epipolar_ransac: false
+    homography_consistency: false
   # Applies only to SuperPoint, which defaults to 2k on every platform; auto also
   # resolves to 2k. Native and 1k remain explicit choices. Other matchers,
   # including the default AKAZE, retain their fixed processing sizes.
