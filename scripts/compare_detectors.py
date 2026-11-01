@@ -16,11 +16,10 @@ fair comparison. Unmatched detections are therefore not scored, and there
 is no additional COCO top-100 truncation. False-positive rates and spectator
 coverage need a separate, exhaustively human-labelled evaluation set.
 
-Both models are served at the graph's 1632x608 rather than the 1408x544 they
-were trained at, because that is what `tracking.yaml` runs and the deployed
-number is the one worth knowing. YOLOv8 is fully convolutional, and the
-baseline was trained at 1408x544 and deployed at 1632x608 too, so neither
-model is favoured.
+Both models are served at the graph's 1632x608 because that is what
+`tracking.yaml` runs and the deployed number is the one worth knowing. YOLOv8
+is fully convolutional: the baseline was trained at 1408x544 and the new mixed
+model at 1984x736, while both are compared at the same deployed resolution.
 
 The new model is evaluated from its EMA weights, which is what mmengine's
 `EMAHook` swaps in for validation.
@@ -244,7 +243,7 @@ def main() -> int:
     parser.add_argument(
         "--new-config",
         type=Path,
-        default=Path("openmm/configs/hm/hm_hockey_tracking_yolov8_m_1408_544.py"),
+        default=Path("openmm/configs/hm/hm_hockey_tracking_yolov8_m_1984_736.py"),
     )
     parser.add_argument("--graph", default="hmlib/config/aspen/tracking.yaml")
     parser.add_argument("--count", type=int, default=600, help="val images to score")
