@@ -7,6 +7,10 @@ workflow:
   command_timeout_seconds: 30
   shutdown_timeout_seconds: 30
   observer_timeout_seconds: 86400
+  metadata_resources:
+    cpus: 1
+    memory_mb: 4096
+    time_seconds: 600
 
 #
 # Camera type
