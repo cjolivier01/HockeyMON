@@ -1,3 +1,17 @@
+# Optional offline workflow orchestration. Site-specific resources are installed
+# separately; an absent registry leaves distributed submission unavailable.
+workflow:
+  registry: null
+  max_parallel: 1
+  poll_interval_ms: 1000
+  command_timeout_seconds: 30
+  shutdown_timeout_seconds: 30
+  observer_timeout_seconds: 86400
+  metadata_resources:
+    cpus: 1
+    memory_mb: 4096
+    time_seconds: 600
+
 #
 # Camera type
 #
