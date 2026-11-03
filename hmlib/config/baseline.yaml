@@ -264,13 +264,13 @@ hstream_ui:
   # precision appends _fp16/_bf16/_int8. The first entry is the default.
   detector_models:
     - id: default
-      label: Default (YOLOv8-m, 1984x736)
+      label: Default — CrowdHuman epoch 90 (YOLOv8-m, 1984x736)
       config_prefix: config_infer_yolov8_hockey
     - id: distilled-s
       label: Distilled (YOLOv8-s, 1408x544)
       config_prefix: config_infer_yolov8s_hockey
     - id: hockey-roles
-      label: Hockey roles — epoch 10 (YOLOv8-m, 1408x544)
+      label: Hockey roles — mixed iter 487500 (YOLOv8-m, 1984x736)
       config_prefix: config_infer_yolov8m_hockey_roles
 
   drivegpt_database:

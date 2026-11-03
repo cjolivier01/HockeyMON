@@ -14,7 +14,7 @@ logger = get_logger(__name__)
 ROOT = Path(__file__).resolve().parents[2]
 PROFILES = ("deployed", "trained", "distilled", "hockeyref", "hockey-roles")
 
-#: Published `hockeyref` weights, pinned by digest.
+#: Published detector weights, pinned by digest.
 #:
 #: Unlike the other trained profiles this one does not look in
 #: `openmm/work_dirs/`: those weights only exist on the machine that ran the
@@ -32,9 +32,9 @@ HOCKEYREF_WEIGHTS_SHA256 = "1431d6e713364e14d7f2330485ac9a4d5d607c2982a35267fd8a
 
 HOCKEY_ROLES_WEIGHTS_URL = (
     "https://github.com/cjolivier01/HockeyMONStream/releases/download/pretrained-assets-v1/"
-    "hm_hockey_roles_yolov8_m_1408_544_epoch10-0463621f21d9e847.pth"
+    "hm_hockey_roles_yolov8_m_1984_736_iter487500-dab4745091a41c31.pth"
 )
-HOCKEY_ROLES_WEIGHTS_SHA256 = "0463621f21d9e847bead9f3a8392c8da6a70ec076a8a03fd9ff833daa3d50a25"
+HOCKEY_ROLES_WEIGHTS_SHA256 = "dab4745091a41c31c096adb20c5431e307ebc808c0f2c8fcb0fecde6e465d0ab"
 PROFILE_GOALIE_LABEL = {"hockey-roles": 1}
 
 #: Class index -> name for each profile's detector head. Everything except
@@ -72,7 +72,7 @@ PROFILE_INPUT_SCALE = {
     "trained": None,
     "distilled": None,
     "hockeyref": (1984, 736),
-    "hockey-roles": (1408, 544),
+    "hockey-roles": (1984, 736),
 }
 
 

@@ -336,6 +336,7 @@ def should_avoid_role_policy_boundaries_when_detector_has_no_roles():
 
 def should_capture_applied_geometry_when_affected_batches_arrive(tmp_path, monkeypatch):
     from types import SimpleNamespace
+
     from test_play_tracker_parity import _base_game_config, _build_tracker, _make_results
 
     tracker = _build_tracker(_base_game_config(), {}, cpp_playtracker=False)
@@ -376,6 +377,7 @@ def should_capture_applied_geometry_when_affected_batches_arrive(tmp_path, monke
 
 def should_pin_legacy_geometry_instead_of_reading_later_controller_requests():
     from types import SimpleNamespace
+
     from test_play_tracker_parity import _base_game_config, _build_tracker
 
     tracker = _build_tracker(_base_game_config(), {}, cpp_playtracker=False)
@@ -388,6 +390,7 @@ def should_pin_legacy_geometry_instead_of_reading_later_controller_requests():
 
 def should_attach_rendered_rotation_even_if_request_changes_during_stitching(monkeypatch):
     from types import SimpleNamespace
+
     from hmlib.aspen.plugins.stitching_plugin import StitchingPlugin
 
     plugin = StitchingPlugin(post_stitch_rotate_degrees=2.0)

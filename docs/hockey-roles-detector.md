@@ -1,11 +1,12 @@
-# Epoch-10 hockey roles detector
+# Hockey roles detector
 
-Select **Hockey roles — epoch 10 (YOLOv8-m, 1408x544)** in the shared detector menu,
-or pass `--detector-model hockey-roles` to hmtrack. The existing default is unchanged.
+Select **Hockey roles — mixed iter 487500 (YOLOv8-m, 1984x736)** in the shared detector menu,
+or pass `--detector-model hockey-roles` to hmtrack. The default is the newer
+single-class CrowdHuman epoch-90 checkpoint at the same resolution.
 The pinned checkpoint downloads from HockeyMONStream's `pretrained-assets-v1`
 release and is verified on every cache reuse. It is COCO initialized and trained
 with CrowdHuman and gray-background hockey, with classes person (0), goalie (1),
-and official (2). The inference graph is resized to its trained 1408×544 geometry.
+and official (2). The inference graph is resized to its trained 1984×736 geometry.
 
 Program tracking offers separate **Ignore referees for play tracking** and
 **Ignore goalies for play tracking** switches. Both default off. They change camera

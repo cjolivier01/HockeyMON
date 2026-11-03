@@ -199,7 +199,7 @@ def should_badge_both_hockey_roles_without_labelling_people(monkeypatch):
     _render([0, 1, 2], referee_label=2, goalie_label=1)
     assert texts == ["GOALIE", "REF"]
     assert detector_selection.PROFILE_CLASSES["hockey-roles"] == ("person", "goalie", "official")
-    assert detector_selection.PROFILE_INPUT_SCALE["hockey-roles"] == (1408, 544)
+    assert detector_selection.PROFILE_INPUT_SCALE["hockey-roles"] == (1984, 736)
 
 
 @pytest.mark.parametrize(

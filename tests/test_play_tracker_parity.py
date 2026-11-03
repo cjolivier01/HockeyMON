@@ -1,12 +1,10 @@
-# ruff: noqa: E402
-
 from __future__ import annotations
 
 import copy
 import os
 import sys
+from collections.abc import Iterable
 from types import SimpleNamespace
-from typing import Dict, Iterable, Tuple
 
 import pytest
 import torch
@@ -30,7 +28,7 @@ DEFAULT_CLUSTER_CENTROIDS = [
 ]
 
 
-def _base_game_config() -> Dict:
+def _base_game_config() -> dict:
     return {
         "rink": {
             "camera": {
@@ -91,7 +89,7 @@ def _base_game_config() -> Dict:
     }
 
 
-def _build_tracker(game_cfg: Dict, overrides: Dict, cpp_playtracker: bool) -> PlayTracker:
+def _build_tracker(game_cfg: dict, overrides: dict, cpp_playtracker: bool) -> PlayTracker:
     hockey_mon = HockeyMON(
         image_width=IMAGE_WIDTH,
         image_height=IMAGE_HEIGHT,
@@ -157,7 +155,7 @@ def _make_frame(frame_id: int, track_ids: Iterable[int]) -> SimpleNamespace:
     )
 
 
-def _make_results(num_frames: int = 3) -> Dict:
+def _make_results(num_frames: int = 3) -> dict:
     frames = [_make_frame(idx, track_ids=(1, 2, 3, 4)) for idx in range(num_frames)]
     data_samples = SimpleNamespace(video_data_samples=frames)
     original_images = torch.zeros((num_frames, 3, 540, 960), dtype=torch.float32)
@@ -167,7 +165,7 @@ def _make_results(num_frames: int = 3) -> Dict:
     }
 
 
-def _make_results_from_box_list(per_frame_boxes: Iterable[torch.Tensor]) -> Dict:
+def _make_results_from_box_list(per_frame_boxes: Iterable[torch.Tensor]) -> dict:
     frames = []
     for idx, boxes in enumerate(per_frame_boxes):
         if boxes is None:
@@ -197,7 +195,7 @@ def _make_results_from_box_list(per_frame_boxes: Iterable[torch.Tensor]) -> Dict
     }
 
 
-def _run_play_trackers(overrides: Dict | None = None) -> Tuple[Dict, Dict]:
+def _run_play_trackers(overrides: dict | None = None) -> tuple[dict, dict]:
     overrides = overrides or {}
     game_cfg = _base_game_config()
     for key in (
@@ -383,10 +381,9 @@ def should_match_when_speed_ratios_change():
     ],
 )
 def should_match_native_excluded_player_ids(tlwhs, count, enabled, percent, expected):
+    from hmlib.bbox.box_functions import player_size_exclusion_mask
     from hockeymon import AllLivingBoxConfig, BBox, PlayTrackerConfig
     from hockeymon import PlayTracker as NativePlayTracker
-
-    from hmlib.bbox.box_functions import player_size_exclusion_mask
 
     boxes = torch.tensor(tlwhs, dtype=torch.float32)
     keep = player_size_exclusion_mask(boxes, count, enabled, percent)
