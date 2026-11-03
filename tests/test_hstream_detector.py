@@ -109,7 +109,7 @@ def should_prepare_from_native_recording_samples_and_publish_validated_python_ar
             samples(directory)
             print("HSTREAM_INT8_SAMPLE completed=16 total=16 timeline_ns=15000000000")
         elif "hmlib.cli.hmtrack" in command:
-            assert command[command.index("--detector-model") + 1] == "hockeyref"
+            assert command[command.index("--detector-model") + 1] == "deployed"
             assert "--detector-onnx-calib-frames=16" in command
             assert "--camera-ui=0" in command and "--no-save-video" in command
             reel = Path(command[command.index("--input-video") + 1])
@@ -144,7 +144,7 @@ def should_prepare_from_native_recording_samples_and_publish_validated_python_ar
     manifest = json.loads(Path(result["manifest"]).read_text())
     model = Path(result["engine"])
     assert model.is_file() and model.parent == Path(result["manifest"]).parent
-    assert manifest["model"] == "default" and manifest["profile"] == "hockeyref"
+    assert manifest["model"] == "default" and manifest["profile"] == "deployed"
     assert manifest["sha256"] == detector.model_preparation._digest(model)
     assert manifest["frames"] == 16 and len(manifest["image_sha256"]) == 16
     selection = {

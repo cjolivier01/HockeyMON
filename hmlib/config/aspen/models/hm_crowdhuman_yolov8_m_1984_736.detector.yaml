@@ -30,7 +30,7 @@ bbox_head:
       eps: 0.001
       momentum: 0.03
       type: BN
-    num_classes: 80
+    num_classes: 1
     reg_max: 16
     type: mmyolo.YOLOv8HeadModule
     widen_factor: 0.75
@@ -106,7 +106,7 @@ train_cfg:
     alpha: 0.5
     beta: 6.0
     eps: 1.0e-09
-    num_classes: 80
+    num_classes: 1
     topk: 10
     type: mmyolo.BatchTaskAlignedAssigner
     use_ciou: true

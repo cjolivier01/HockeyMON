@@ -7,6 +7,9 @@ The pinned checkpoint downloads from HockeyMONStream's `pretrained-assets-v1`
 release and is verified on every cache reuse. It is COCO initialized and trained
 with CrowdHuman and gray-background hockey, with classes person (0), goalie (1),
 and official (2). The inference graph is resized to its trained 1984×736 geometry.
+Iteration 487500 is the selected balanced checkpoint: CrowdHuman mAP is 0.530 and
+hockey mAP is 0.823. Iteration 225000 has the absolute highest hockey mAP by
+0.001, but its CrowdHuman mAP is lower at 0.527.
 
 Program tracking offers separate **Ignore referees for play tracking** and
 **Ignore goalies for play tracking** switches. Both default off. They change camera

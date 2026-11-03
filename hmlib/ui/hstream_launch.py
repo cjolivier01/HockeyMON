@@ -759,7 +759,7 @@ def _translate_native_settings(
     if selected:
         name = Path(selected).stem
         families = {
-            "config_infer_yolov8_hockey": "hockeyref",
+            "config_infer_yolov8_hockey": "deployed",
             "config_infer_yolov8s_hockey": "distilled",
             "config_infer_yolov8m_hockey_roles": "hockey-roles",
         }
