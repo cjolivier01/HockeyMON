@@ -68,7 +68,7 @@ PROFILE_REFEREE_LABEL = {
 #: and 4 officials, badging navy skaters as referees. Stripes are fine,
 #: high-frequency texture -- an 18% smaller input is where that signal goes.
 PROFILE_INPUT_SCALE = {
-    "deployed": None,
+    "deployed": (1984, 736),
     "trained": None,
     "distilled": None,
     "hockeyref": (1984, 736),

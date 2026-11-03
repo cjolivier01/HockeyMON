@@ -86,10 +86,15 @@ class DetectorComparisonTests(unittest.TestCase):
             previous["aspen"]["inference_pipeline"], self.config["aspen"]["inference_pipeline"]
         )
 
-    def test_default_profile_leaves_deployment_untouched(self):
+    def test_default_profile_uses_trained_geometry_without_cli_selection(self):
         original = copy.deepcopy(self.config)
         configure_detector_selection(make_parser().parse_args([]), self.config)
         self.assertEqual(original, self.config)
+        pipeline = self.config["aspen"]["inference_pipeline"]
+        resize = next(stage for stage in pipeline if stage["type"] == "HmResize")
+        pad = next(stage for stage in pipeline if stage["type"] == "HmPad")
+        self.assertEqual(resize["img_scale"], [1984, 736])
+        self.assertEqual(pad["size"], [736, 1984])
 
     def test_comparison_configures_all_models_without_changing_tracker_dependencies(self):
         trained = self.root / "trained.pth"

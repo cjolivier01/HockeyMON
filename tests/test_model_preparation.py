@@ -112,6 +112,10 @@ def should_preserve_model_identity_and_reject_conflicting_detector_selection(tmp
     def config():
         return {
             "aspen": {
+                    "inference_pipeline": [
+                        {"type": "HmResize", "img_scale": [1632, 608]},
+                        {"type": "HmPad", "size": [608, 1632]},
+                    ],
                 "plugins": {
                     "detector_factory": {
                         "params": {"detector": model, "onnx": {"path": str(artifact)}}
