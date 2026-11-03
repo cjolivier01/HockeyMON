@@ -2,7 +2,7 @@
 # separately; an absent registry leaves distributed submission unavailable.
 workflow:
   registry: null
-  max_parallel: 1
+  max_parallel: 3
   poll_interval_ms: 1000
   command_timeout_seconds: 30
   shutdown_timeout_seconds: 30
