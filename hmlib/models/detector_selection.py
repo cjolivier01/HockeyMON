@@ -69,8 +69,8 @@ PROFILE_REFEREE_LABEL = {
 #: high-frequency texture -- an 18% smaller input is where that signal goes.
 PROFILE_INPUT_SCALE = {
     "deployed": (1984, 736),
-    "trained": None,
-    "distilled": None,
+    "trained": (1408, 544),
+    "distilled": (1408, 544),
     "hockeyref": (1984, 736),
     "hockey-roles": (1984, 736),
 }

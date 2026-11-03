@@ -82,9 +82,14 @@ class DetectorComparisonTests(unittest.TestCase):
         self.assertEqual(params["detector"]["bbox_head"]["head_module"]["num_classes"], 1)
         self.assertIsNone(params["detector"]["init_cfg"])
         self.assertIn("detector-", params["trt"]["engine"])
-        self.assertEqual(
+        self.assertNotEqual(
             previous["aspen"]["inference_pipeline"], self.config["aspen"]["inference_pipeline"]
         )
+        pipeline = self.config["aspen"]["inference_pipeline"]
+        resize = next(stage for stage in pipeline if stage["type"] == "HmResize")
+        pad = next(stage for stage in pipeline if stage["type"] == "HmPad")
+        self.assertEqual(resize["img_scale"], [1408, 544])
+        self.assertEqual(pad["size"], [544, 1408])
 
     def test_default_profile_uses_trained_geometry_without_cli_selection(self):
         original = copy.deepcopy(self.config)
@@ -128,6 +133,11 @@ class DetectorComparisonTests(unittest.TestCase):
         self.assertEqual(comparison["selected"], "trained")
         self.assertEqual(set(comparison["models"]), {"deployed", "trained", "distilled"})
         self.assertEqual(comparison["models"]["distilled"]["checkpoint"], str(distilled))
+        pipeline = self.config["aspen"]["inference_pipeline"]
+        resize = next(stage for stage in pipeline if stage["type"] == "HmResize")
+        pad = next(stage for stage in pipeline if stage["type"] == "HmPad")
+        self.assertEqual(resize["img_scale"], [1408, 544])
+        self.assertEqual(pad["size"], [544, 1408])
         for name, plugin in plugins.items():
             self.assertEqual(plugin.get("depends"), before[name].get("depends"))
 
