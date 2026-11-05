@@ -2870,6 +2870,9 @@ def main() -> int | None:
     from hmlib.ui.shared_analytics import restore_worker_shared_analytics
 
     restore_worker_shared_analytics(args.game_config, args.game_id)
+    from hmlib.ui.hstream_scoreboard_state import restore_worker_native_scoreboard
+
+    restore_worker_native_scoreboard(args.game_config, args.game_id)
     game_config = resolve_global_refs(args.game_config)
     args.game_config = game_config
 

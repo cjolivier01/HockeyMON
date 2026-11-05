@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from functools import lru_cache
@@ -236,7 +237,10 @@ def shared_native_calibration() -> NativeCalibration | None:
 
 
 def _native_operation(
-    arguments: list[str], *, cancelled: threading.Event | None = None
+    arguments: list[str],
+    *,
+    cancelled: threading.Event | None = None,
+    timeout: float | None = None,
 ) -> dict[str, Any]:
     command = [str(_exporter_path(None)), *arguments]
     if cancelled is None:
@@ -244,7 +248,7 @@ def _native_operation(
     else:
         from hmlib.ui.process_guard import run_cancellable
 
-        completed = run_cancellable(command, cancelled=cancelled)
+        completed = run_cancellable(command, cancelled=cancelled, timeout=timeout)
     if completed.returncode:
         detail = completed.stderr.strip() or completed.stdout.strip()
         raise RuntimeError(
@@ -288,27 +292,66 @@ def read_scoreboard_canvas(
         raise
 
 
+class ScoreboardSaveError(RuntimeError):
+    """A failed save with an explicit native transaction outcome."""
+
+    def __init__(self, message: str, *, outcome: str) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+
+
 def save_native_scoreboard(
-    game_dir: Path, points: list[list[int]], canvas: dict[str, Any]
+    game_dir: Path,
+    points: list[list[int]],
+    canvas: dict[str, Any],
+    *,
+    deadline: float | None = None,
 ) -> list[list[int]]:
     """Persist a selection only while the pinned native canvas is still current."""
+    from hmlib.ui.process_guard import ProcessCleanupError
+
     with tempfile.TemporaryDirectory(prefix="hm-scoreboard-save-") as temporary:
         request_path = Path(temporary) / "request.yaml"
-        request_path.write_text(yaml.safe_dump({"points": points, "canvas": canvas}))
-        result = _native_operation(
-            [
-                "--game-dir",
-                str(Path(game_dir).resolve()),
-                "--save-scoreboard",
-                str(request_path),
-            ]
-        )
+        request = {"points": points, "canvas": canvas}
+        if deadline is not None:
+            if not math.isfinite(deadline) or deadline <= 0:
+                raise ValueError("Scoreboard save deadline must be a positive monotonic timestamp")
+            request["deadline"] = deadline
+        request_path.write_text(yaml.safe_dump(request))
+        try:
+            result = _native_operation(
+                [
+                    "--game-dir",
+                    str(Path(game_dir).resolve()),
+                    "--save-scoreboard",
+                    str(request_path),
+                ],
+                cancelled=threading.Event(),
+                # Native lock waits expire before mutation. Allow a commit
+                # already in progress to return its definitive result; if it
+                # cannot, reap the helper and report an unknown outcome.
+                timeout=max(0, deadline - time.monotonic()) + 5 if deadline is not None else None,
+            )
+        except ProcessCleanupError:
+            # An unreaped mutator is a pipeline ownership failure, not a
+            # recoverable selection error. Its process owner must shut down.
+            raise
+        except (OSError, RuntimeError, ValueError, TypeError, subprocess.SubprocessError) as error:
+            raise ScoreboardSaveError(
+                f"Scoreboard Save outcome is unknown; reopen the selector to verify: {error}",
+                outcome="unknown",
+            ) from error
+        if result.get("status") == "unchanged":
+            raise ScoreboardSaveError(result["error"], outcome="unchanged")
     return result["points"]
 
 
-def validate_live_output_epoch(game_dir: Path, serialized_epoch: str) -> dict[str, Any]:
+def validate_live_output_epoch(
+    game_dir: Path, serialized_epoch: str, *, native: NativeCalibration | None = None
+) -> dict[str, Any]:
     """Validate a UI-owned rotation/scoreboard epoch before the runtime applies it."""
-    native = shared_native_calibration()
+    if native is None:
+        native = shared_native_calibration()
     if native is None or Path(game_dir).resolve() != native.game_directory:
         raise ValueError("Live output epoch requires this game's native calibration snapshot")
     with tempfile.TemporaryDirectory(prefix="hm-output-epoch-") as temporary:

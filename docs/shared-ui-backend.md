@@ -135,10 +135,29 @@ source overrides also infer their rink mask from the active frame without readin
 or replacing the saved game's masks or contour metadata, even at equal dimensions.
 Normal saved single-source playback retains its mask cache. Source coordinates do not inherit a saved pair's crop offset. Selection remains available
 while paused. Dual-source selection uses the native-owned canvas and provenance.
+Its private run selection binds the session and game to the accepted Hugin and
+stitched-output generations. Initial explicit corners or a disabled selection
+own the dialog draft; successful native saves replace that selection. Workers
+restore it after reloading original YAML and CLI overrides. A validated live
+output epoch updates the polygon and rotation together, retaining native
+invalidation across seeks. Seek export uses those accepted settings. When the
+saved native canvas still represents the completed base output, the replacement
+worker revalidates the serialized live epoch against native authorization before
+restoring rotation and its private mask. A changed calibration, unrelated output
+generation or expired authorization fails instead of reusing stale corners.
 Selector canvas export and proposal inference run under the same subprocess
 guard as playback. Closing a selector cancels lock waits and reaps those helpers
 before reporting closure; supervisor death also releases their native locks.
 An incomplete cleanup remains an error even if the selector thread has exited.
+Scoreboard Save carries the frame-owner request's monotonic deadline into native
+transaction lock acquisition and checks it again before publication. An HTTP
+acknowledgement timeout retains the request and its eventual receipt. Cancel
+claims the previous selection was kept only after a definitive unchanged result;
+a late commit or unknown outcome is reported explicitly. Interrupted Save helpers
+are reaped, and an incomplete cleanup stops the frame owner.
+Reopening waits for an outstanding Save receipt, so replacing the selector cannot
+forget a pending mutation. Once ready to reopen, the old selector refuses further
+submissions before it closes.
 
 Local monitor audio follows source time, pause, seek and Render video. It opens
 the current source chapter lazily and does not concatenate an entire game before

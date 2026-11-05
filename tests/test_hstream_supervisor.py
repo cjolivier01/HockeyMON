@@ -199,6 +199,62 @@ def should_keep_resolved_frame_origin_precision_and_effective_config_during_nati
     assert supervisor.plan.limit_seconds == 4
 
 
+@pytest.mark.parametrize("published", [False, True])
+def should_export_accepted_native_epoch_before_reapplying_original_seek_overrides(
+    supervisor, monkeypatch, published
+):
+    from hmlib.stitching import native_calibration
+    from hmlib.ui.hstream_runtime import write_document
+
+    selected = [[0, 0]] * 4
+    supervisor.plan.config["stitching"]["post_stitch_rotate_degrees"] = 1
+    state = {
+        "version": 1,
+        "session": str(supervisor.session.resolve()),
+        "game_directory": str(supervisor.plan.game.resolve()),
+        "hugin_generation": "hugin-1",
+        "output_generation": "output-2",
+        "base_output_generation": "output-1",
+        "serialized_epoch": "4:auth15:0,0,0,0,0,0,0,02",
+        "rotation": 2,
+        "points": selected,
+    }
+    write_document(supervisor.session / "native-scoreboard.json", state)
+
+    def export(game, output, *, effective_config, max_output_width):
+        effective = yaml.safe_load(effective_config.read_text())
+        assert effective["stitching"]["post_stitch_rotate_degrees"] == 2
+        assert effective["rink"]["scoreboard"]["perspective_polygon"] == selected
+        return SimpleNamespace(
+            directory=output,
+            game_directory=game,
+            generation="hugin-1",
+            output_generation="output-2" if published else "output-1",
+            post_stitch_rotate_degrees=2 if published else 0,
+            frame_offsets=(0, 0),
+        )
+
+    monkeypatch.setattr(native_calibration, "prepare_native_calibration", export)
+    monkeypatch.setattr(
+        native_calibration,
+        "validate_live_output_epoch",
+        lambda game, serialized, *, native: {
+            "output_generation": "output-2",
+            "authorization_id": "auth",
+            "post_stitch_rotate_degrees": 2,
+            "scoreboard_property_value": "0,0,0,0,0,0,0,0",
+        },
+    )
+    supervisor._refresh_calibration()
+    assert supervisor.plan.config["stitching"]["post_stitch_rotate_degrees"] == 2
+    assert supervisor.plan.config["rink"]["scoreboard"]["perspective_polygon"] == selected
+    assert ("hm_shared_runtime" in supervisor.plan.config) is not published
+    state["output_generation"] = "stale-output"
+    write_document(supervisor.session / "native-scoreboard.json", state)
+    with pytest.raises(ValueError, match="different output generation|differs from its authorized"):
+        supervisor._refresh_calibration()
+
+
 def should_keep_default_worker_files_in_durable_output_storage(supervisor, monkeypatch):
     work = supervisor.working_directory
     assert work.is_dir()

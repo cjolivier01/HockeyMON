@@ -21,6 +21,7 @@ from hmlib.ui.process_guard import ProcessCancelledError, ProcessCleanupError, r
 
 logger = logging.getLogger(__name__)
 _DISABLED = [[0, 0], [0, 0], [0, 0], [0, 0]]
+_SAVE_TIMEOUT_SECONDS = 8
 
 
 def _points(value, width: int, height: int) -> list[list[int]]:
@@ -116,13 +117,17 @@ def publish_source_canvas(game_id: str, config: dict, image) -> None:
     )
 
 
-def apply_scoreboard_selection(game_id: str, config: dict, points: list, canvas: dict) -> None:
+def apply_scoreboard_selection(
+    game_id: str, config: dict, points: list, canvas: dict, *, deadline: float | None = None
+) -> None:
     """Persist through the native transaction, then publish to Python transforms."""
     from hmlib.config import get_game_dir
     from hmlib.stitching.native_calibration import save_native_scoreboard
+    from hmlib.ui.hstream_scoreboard_state import native_selection_for_canvas, save_native_selection
 
     points = _points(points, canvas["width"], canvas["height"])
     private = None
+    native_selection = None
     if "source_game_directory" in canvas:
         reference = Path(os.environ["HM_UI_SESSION_DIR"]).resolve() / "scoreboard-source"
         if Path(canvas["source_game_directory"]) != reference or canvas["game_directory"] != str(
@@ -131,8 +136,17 @@ def apply_scoreboard_selection(game_id: str, config: dict, points: list, canvas:
             raise ValueError("Scoreboard canvas belongs to a different run or game")
         if canvas["persist_to_game"]:
             private = read_document(reference / "config.yaml", yaml_document=True)
+    elif os.environ.get("HM_SHARED_UI_BACKEND") == "1":
+        native_selection = native_selection_for_canvas(
+            Path(os.environ["HM_UI_SESSION_DIR"]), Path(get_game_dir(game_id)), canvas
+        )
     try:
-        ordered = save_native_scoreboard(Path(get_game_dir(game_id)), points, canvas)
+        ordered = save_native_scoreboard(
+            Path(get_game_dir(game_id)),
+            points,
+            canvas,
+            **({"deadline": deadline} if deadline is not None else {}),
+        )
     except subprocess.CalledProcessError as error:
         raise ValueError(f"Native scoreboard save failed: {error.stderr or error}") from error
     if private is not None:
@@ -142,6 +156,13 @@ def apply_scoreboard_selection(game_id: str, config: dict, points: list, canvas:
         private.setdefault("rink", {}).setdefault("scoreboard", {})["perspective_polygon"] = ordered
         try:
             write_document(reference / "config.yaml", private)
+        except OSError as error:
+            raise RuntimeError(
+                "Scoreboard saved to the game, but updating this run's selection failed"
+            ) from error
+    if native_selection is not None:
+        try:
+            save_native_selection(Path(os.environ["HM_UI_SESSION_DIR"]), native_selection, ordered)
         except OSError as error:
             raise RuntimeError(
                 "Scoreboard saved to the game, but updating this run's selection failed"
@@ -171,6 +192,9 @@ class ScoreboardSession:
         self._submission = threading.Lock()
         self._completed = False
         self._cleanup_error = None
+        self._save_paths = None
+        self._save_outcome = "unchanged"
+        self._save_error = ""
         self._thread = None
 
     def start(self) -> None:
@@ -260,6 +284,7 @@ class ScoreboardSession:
                         if not owner._submission.acquire(blocking=False):
                             raise ValueError("Another scoreboard submission is in progress")
                         try:
+                            owner._check_previous_save()
                             if owner._completed or owner._closed.is_set():
                                 raise ValueError("Scoreboard session is already complete")
                             if path == "/cancel":
@@ -333,10 +358,16 @@ class ScoreboardSession:
                 Path(self.canvas["image_path"]).unlink(missing_ok=True)
 
     def _prepare_initial(self) -> None:
+        from hmlib.ui.hstream_scoreboard_state import native_selection_for_canvas
+
         reference = self.canvas.get("source_game_directory")
         config_dir = Path(reference) if reference else self.game_dir
         config = read_document(config_dir / "config.yaml", yaml_document=True)
         saved = config.get("rink", {}).get("scoreboard", {}).get("perspective_polygon")
+        if not reference:
+            active = native_selection_for_canvas(self.session, self.game_dir, self.canvas)
+            if active is not None:
+                saved = active["points"]
         if saved is not None:
             points = _points(saved, self.canvas["width"], self.canvas["height"])
             self.initial = {
@@ -383,35 +414,97 @@ class ScoreboardSession:
                 "message"
             ] += " This selection applies only to the current source override."
 
+    def _reconcile_save(self) -> None:
+        if self._save_paths is None:
+            return
+        request_path, result_path = self._save_paths
+        try:
+            result = read_document(result_path)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, TypeError) as error:
+            self._save_outcome = "unknown"
+            self._save_error = f"Cannot read the Save result: {error}"
+        else:
+            if result.get("session_id") != self.session_id:
+                self._save_outcome = "unknown"
+                self._save_error = "Stale scoreboard acknowledgement"
+            elif result.get("ok") is True:
+                self._save_outcome = "saved"
+            else:
+                self._save_outcome = (
+                    "unchanged" if result.get("outcome") == "unchanged" else "unknown"
+                )
+                self._save_error = result.get("error", "Scoreboard Save failed")
+        request_path.unlink(missing_ok=True)
+        result_path.unlink(missing_ok=True)
+        self._save_paths = None
+
+    def _check_previous_save(self) -> None:
+        self._reconcile_save()
+        if self._save_outcome == "pending":
+            raise ValueError(
+                "Scoreboard Save outcome is still pending; cancellation cannot confirm the previous selection"
+            )
+        if self._save_outcome == "unknown":
+            raise ValueError(
+                "Scoreboard Save outcome is unknown; reopen the selector to verify the selection. "
+                + self._save_error
+            )
+        if self._save_outcome == "saved":
+            raise ValueError("Scoreboard Save completed; the selection was saved, not cancelled")
+
+    def prepare_reopen(self) -> None:
+        """Seal submissions before replacing a dialog with no pending mutation."""
+        if not self._submission.acquire(blocking=False):
+            raise ValueError("Scoreboard submission is still in progress; wait before reopening")
+        try:
+            self._reconcile_save()
+            if self._save_outcome == "pending":
+                raise ValueError("Scoreboard Save outcome is still pending; wait before reopening")
+            self._completed = True
+        finally:
+            self._submission.release()
+
     def _save(self, points: list) -> None:
+        self._check_previous_save()
         identifier = uuid.uuid4().hex
         request_path = self.session / "runtime-requests" / f"{identifier}.json"
         result_path = self.session / "runtime-results" / f"{identifier}.json"
-        deadline = time.monotonic() + 8
-        write_document(
-            request_path,
-            {
-                "session_id": self.session_id,
-                "deadline": deadline,
-                "kind": "operation",
-                "operation": {"kind": "scoreboard", "points": points, "canvas": self.canvas},
-            },
-        )
+        deadline = time.monotonic() + _SAVE_TIMEOUT_SECONDS
+        self._save_paths = request_path, result_path
+        self._save_outcome = "pending"
         try:
-            while not self._closed.wait(0.02):
-                try:
-                    result = read_document(result_path)
-                except FileNotFoundError:
-                    if time.monotonic() >= deadline:
-                        raise ValueError("Pipeline did not acknowledge the scoreboard selection")
-                    continue
-                if result.get("session_id") != self.session_id or result.get("ok") is not True:
-                    raise ValueError(result.get("error", "Stale scoreboard acknowledgement"))
+            write_document(
+                request_path,
+                {
+                    "session_id": self.session_id,
+                    "deadline": deadline,
+                    "kind": "operation",
+                    "operation": {"kind": "scoreboard", "points": points, "canvas": self.canvas},
+                },
+            )
+        except (OSError, ValueError, TypeError) as error:
+            self._save_outcome = "unknown"
+            self._save_error = str(error)
+            raise
+        while not self._closed.wait(0.02):
+            self._reconcile_save()
+            if self._save_outcome == "saved":
                 return
-            raise ValueError("Pipeline stopped before applying the scoreboard selection")
-        finally:
-            request_path.unlink(missing_ok=True)
-            result_path.unlink(missing_ok=True)
+            if self._save_outcome == "unchanged":
+                raise ValueError(self._save_error)
+            if self._save_outcome == "unknown":
+                self._check_previous_save()
+            if time.monotonic() >= deadline:
+                # Keep the request and its eventual receipt. A deadline cannot
+                # establish whether native publication already started.
+                raise ValueError(
+                    "Scoreboard Save acknowledgement timed out; outcome is pending and cancellation cannot confirm the previous selection"
+                )
+        self._save_outcome = "unknown"
+        self._save_error = "Pipeline stopped before its Save result was received"
+        self._check_previous_save()
 
     def close(self) -> None:
         self._closed.set()
