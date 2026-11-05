@@ -30,7 +30,7 @@ bbox_head:
       eps: 0.001
       momentum: 0.03
       type: BN
-    num_classes: 80
+    num_classes: 1
     reg_max: 16
     type: mmyolo.YOLOv8HeadModule
     widen_factor: 0.75
@@ -71,7 +71,7 @@ data_preprocessor:
   type: mmyolo.YOLOv5DetDataPreprocessor
 init_cfg:
   # checkpoint: https://download.openmmlab.com/mmyolo/v0/yolov8/yolov8_m_syncbn_fast_8xb16-500e_coco/yolov8_m_syncbn_fast_8xb16-500e_coco_20230115_192200-c22e560a.pth
-  checkpoint: https://github.com/cjolivier01/HockeyMON/releases/download/v0.0.1/hm_crowdhuman_e85_yolov8_m_1984_736.pth
+  checkpoint: https://github.com/cjolivier01/HockeyMONStream/releases/download/pretrained-assets-v1/hm_crowdhuman_yolov8_m_1984_736_epoch90-47e63395bb36353e.pth
   type: Pretrained
 neck:
   act_cfg:
@@ -106,7 +106,7 @@ train_cfg:
     alpha: 0.5
     beta: 6.0
     eps: 1.0e-09
-    num_classes: 80
+    num_classes: 1
     topk: 10
     type: mmyolo.BatchTaskAlignedAssigner
     use_ciou: true

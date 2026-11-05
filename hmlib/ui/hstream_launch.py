@@ -749,6 +749,7 @@ def _translate_native_settings(
         families = {
             "default": "config_infer_yolov8_hockey",
             "distilled-s": "config_infer_yolov8s_hockey",
+            "hockey-roles": "config_infer_yolov8m_hockey_roles",
         }
         model = shared_detector.get("model", "default")
         if model not in families:
@@ -758,8 +759,9 @@ def _translate_native_settings(
     if selected:
         name = Path(selected).stem
         families = {
-            "config_infer_yolov8_hockey": "hockeyref",
+            "config_infer_yolov8_hockey": "deployed",
             "config_infer_yolov8s_hockey": "distilled",
+            "config_infer_yolov8m_hockey_roles": "hockey-roles",
         }
         family = next(
             (prefix for prefix in families if name == prefix or name.startswith(prefix + "_")), None

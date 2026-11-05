@@ -16,7 +16,7 @@ aspen:
       # We will scale downm the image to fit within img_scale
       # before HmPad maybe pads it to be this size
       # vimg_scale: [1312, 480]
-      img_scale: [1632, 608]
+      img_scale: [1984, 736]
       # img_scale: [1952, 704]
       # img_scale: [1984, 736]
       keep_ratio: true
@@ -37,7 +37,7 @@ aspen:
       # size_divisor: 32
       # size: [736, 1984]  # Actual size of tensor, which is H-W ordering
       # size: [480, 1312]  # Actual size of tensor, which is H-W ordering
-      size: [608, 1632]  # Actual size of tensor, which is H-W ordering
+      size: [736, 1984]  # Actual size of tensor, which is H-W ordering
       # size: [480, 1312]
     - type: mmdet.PackTrackInputs
       meta_keys: [img_metas, hm_real_time_fps]

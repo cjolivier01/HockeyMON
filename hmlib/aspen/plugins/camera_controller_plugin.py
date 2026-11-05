@@ -22,6 +22,7 @@ from hmlib.camera.camera_transformer import (
 )
 from hmlib.camera.clusters import ClusterMan
 from hmlib.camera.rink_context import StaticRinkEncoderCache
+from hmlib.camera.role_filter import camera_role_mask, excluded_role_labels
 from hmlib.log import logger
 from hmlib.tracking_utils.utils import get_track_mask
 from hmlib.utils.gpu import unwrap_tensor, wrap_tensor
@@ -279,7 +280,11 @@ class CameraControllerPlugin(Plugin):
         return torch.device("cpu")
 
     def _pose_features(
-        self, pose_results: Optional[List[Any]], frame_index: int, device: torch.device
+        self,
+        pose_results: Optional[List[Any]],
+        frame_index: int,
+        device: torch.device,
+        role_tracks: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Extract a fixed-length (8) pose feature vector for the current frame."""
         feat = torch.zeros((8,), device=device, dtype=torch.float32)
@@ -304,6 +309,34 @@ class CameraControllerPlugin(Plugin):
                 scores = getattr(inst0, "scores", None)
         except Exception:
             return feat
+
+        if role_tracks is not None:
+            # Pose cadence and ordering differ from tracks. Associate against
+            # all valid tracks before selecting roles, as the pose display does.
+            # Only local feature inputs are sliced; published poses stay intact.
+            if bxs is None:
+                return feat
+            from torchvision.ops import box_iou
+
+            bxs = torch.as_tensor(unwrap_tensor(bxs), device=device, dtype=torch.float32).reshape(
+                -1, 4
+            )
+            track_boxes, role_keep = role_tracks
+            if not len(bxs) or not len(track_boxes):
+                return feat
+            overlap, matches = box_iou(bxs, track_boxes.to(dtype=bxs.dtype)).max(dim=1)
+            keep = (overlap >= 0.3) & role_keep[matches]
+
+            def select_scores(value):
+                if value is None:
+                    return None
+                value = torch.as_tensor(unwrap_tensor(value), device=device)
+                if value.ndim == 0 or value.shape[0] != len(bxs):
+                    raise ValueError("Camera pose scores and boxes must align for role filtering")
+                return value[keep]
+
+            kps, bbox_scores, scores = map(select_scores, (kps, bbox_scores, scores))
+            bxs = bxs[keep]
 
         if bxs is not None:
             try:
@@ -633,6 +666,21 @@ class CameraControllerPlugin(Plugin):
                 self._prev_h = None
                 self._prev_y = None
             track_mask = get_track_mask(inst)
+            pose_role_tracks = None
+            role_config = (context.get("shared") or {}).get("game_config") or {}
+            if excluded_role_labels(role_config):
+                labels = unwrap_tensor(inst.labels).reshape(-1).to(det_tlbr.device)
+                if labels.numel() != det_tlbr.shape[0]:
+                    raise ValueError("Camera track labels and boxes must align")
+                role_mask = camera_role_mask(labels, role_config)
+                pose_role_tracks = (
+                    (det_tlbr, role_mask)
+                    if track_mask is None
+                    else (det_tlbr[track_mask], role_mask[track_mask])
+                )
+                track_mask = (
+                    role_mask if track_mask is None else track_mask.to(role_mask.device) & role_mask
+                )
             if isinstance(track_mask, torch.Tensor):
                 det_tlbr = det_tlbr[track_mask]
             if det_tlbr.numel() == 0:
@@ -758,7 +806,9 @@ class CameraControllerPlugin(Plugin):
                 and self._gpt_cfg is not None
             ):
                 pose_feat = (
-                    self._pose_features(pose_results, frame_index, device)
+                    self._pose_features(
+                        pose_results, frame_index, device, role_tracks=pose_role_tracks
+                    )
                     if bool(getattr(self._gpt_cfg, "include_pose", False))
                     else None
                 )
