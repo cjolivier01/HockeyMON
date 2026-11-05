@@ -247,16 +247,19 @@ def should_reject_non_regular_protocol_documents(tmp_path):
 def should_apply_native_output_epoch_and_controls_as_one_transaction(
     runtime, monkeypatch, tmp_path
 ):
+    from types import SimpleNamespace
+
     from hmlib import config
     from hmlib.camera.play_tracker import PlayTracker
     from hmlib.stitching import native_calibration
+    from hmlib.ui.hstream_scoreboard_state import restore_worker_native_scoreboard
 
     ui, protocol, messages = runtime
     monkeypatch.setattr(config, "get_game_dir", lambda _: tmp_path)
     monkeypatch.setattr(
         native_calibration,
         "validate_live_output_epoch",
-        lambda game, serialized: {
+        lambda game, serialized, **kwargs: {
             "post_stitch_rotate_degrees": 2.0,
             "authorization_id": "auth",
             "output_generation": "output-2",
@@ -283,6 +286,16 @@ def should_apply_native_output_epoch_and_controls_as_one_transaction(
     owner._hm_ui_process = ui
     owner._stitch_rotation_controller = Controller()
     owner._apply_current_ui_control_values = lambda: True
+    native = SimpleNamespace(
+        game_directory=tmp_path,
+        generation="hugin-1",
+        output_generation="output-1",
+        post_stitch_rotate_degrees=0,
+    )
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(tmp_path))
+    monkeypatch.setattr(native_calibration, "shared_native_calibration", lambda: native)
+    restore_worker_native_scoreboard(owner._game_config, "test")
     assert protocol.handle_line(
         "@set-properties playcropper0 exposure=0.37;hmstitcher0 stitched-output-epoch=4:auth2"
     )
@@ -297,6 +310,22 @@ def should_apply_native_output_epoch_and_controls_as_one_transaction(
     assert owner._game_config["rink"]["scoreboard"]["perspective_polygon"] == [[0, 0]] * 4
     assert ui.control_values()["Tracker Controls (Color)"]["HStream_Exposure_x100"] == 37
     assert messages[-1] == "runtime property hmstitcher0 stitched-output-epoch=4:auth2"
+    # A seek reloads the original explicit polygon and rotation. Neither may
+    # override the accepted epoch's invalidation on its new native canvas.
+    replacement = {
+        "stitching": {"post_stitch_rotate_degrees": 1},
+        "rink": {"scoreboard": {"perspective_polygon": [[1, 1], [4, 1], [4, 4], [1, 4]]}},
+    }
+    restore_worker_native_scoreboard(replacement, "test")
+    assert replacement["rink"]["scoreboard"]["perspective_polygon"] == [[0, 0]] * 4
+    assert replacement["stitching"]["post_stitch_rotate_degrees"] == 2
+    assert replacement["hm_shared_runtime"]["output_generation"] == "output-2"
+    # Once native publication catches up, the completed snapshot owns rotation
+    # and the temporary authorization is no longer needed.
+    native.output_generation = "output-2"
+    native.post_stitch_rotate_degrees = 2
+    restore_worker_native_scoreboard(replacement, "test")
+    assert "hm_shared_runtime" not in replacement
 
 
 def should_report_actual_precision_and_reject_lost_precision():
@@ -408,7 +437,8 @@ def should_hold_frames_after_pause_receipt_and_service_operations_until_release(
         assert read_document(ui.runtime_path)["frame"] == 10
         protocol._queue({"kind": "operation", "operation": {"kind": "scoreboard"}}, [])
         assert operation_done.wait(2)
-        assert operations == [{"kind": "scoreboard"}]
+        assert len(operations) == 1 and operations[0]["kind"] == "scoreboard"
+        assert operations[0]["deadline"] > time.monotonic()
         assert not finished.wait(0.1)
         assert read_document(ui.runtime_path)["frame"] == 10
         assert protocol.handle_line("@process-resume 1" if release == "resume" else "q")
@@ -513,6 +543,53 @@ def should_report_recoverable_operation_errors_without_stopping_pipeline(runtime
     ui.apply_runtime_requests(lambda: True)
     protocol.poll()
     assert messages[-1] == "runtime property playcropper0 exposure=0.31"
+
+
+def should_stop_frame_owner_when_a_scoreboard_mutator_cannot_be_reaped(runtime):
+    from hmlib.ui.process_guard import ProcessCleanupError
+
+    ui, protocol, messages = runtime
+    protocol._queue({"kind": "operation", "operation": {"kind": "scoreboard"}}, [])
+
+    def incomplete_cleanup(operation):
+        assert operation["deadline"] > time.monotonic()
+        raise ProcessCleanupError("Native mutator has not exited")
+
+    with pytest.raises(ProcessCleanupError, match="has not exited"):
+        ui.apply_runtime_requests(lambda: True, incomplete_cleanup)
+    assert not list((ui._tmpdir / "runtime-results").glob("*.json"))
+    assert not any("runtime command failed" in message for message in messages)
+
+
+def should_retain_pending_scoreboard_save_when_reselecting(runtime, monkeypatch):
+    from hmlib.ui.hstream_scoreboard import ScoreboardSession
+
+    ui, protocol, messages = runtime
+    protocol.game_dir = ui._tmpdir
+    previous = ScoreboardSession(ui._tmpdir, ui._tmpdir, ui.session_id, messages.append)
+    request_path = ui._tmpdir / "runtime-requests" / "save.json"
+    result_path = ui._tmpdir / "runtime-results" / "save.json"
+    write_document(request_path, {"session_id": ui.session_id})
+    previous._save_paths = request_path, result_path
+    previous._save_outcome = "pending"
+    protocol._scoreboard_session = previous
+
+    assert not protocol.handle_line("@set-property playcropper0 scoreboard-reselect=1")
+    assert "pending; wait before reopening" in messages[-1]
+    assert protocol._scoreboard_session is previous
+    assert not previous._closed.is_set()
+    assert request_path.exists()
+
+    write_document(result_path, {"session_id": ui.session_id, "ok": True})
+    started = []
+    monkeypatch.setattr(ScoreboardSession, "start", lambda self: started.append(self))
+    assert protocol.handle_line("@set-property playcropper0 scoreboard-reselect=1")
+    assert started == [protocol._scoreboard_session]
+    assert protocol._scoreboard_session is not previous
+    assert previous._closed.is_set()
+    assert previous._completed
+    assert not request_path.exists()
+    protocol.stopped()
 
 
 @pytest.mark.parametrize("offset, fps", [(300, 30), (600, 30), (0, 15)])

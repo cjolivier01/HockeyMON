@@ -340,6 +340,7 @@ class RuntimeProtocol:
 
                 self._spec()
                 if self._scoreboard_session is not None:
+                    self._scoreboard_session.prepare_reopen()
                     self._scoreboard_session.close()
                 self._scoreboard_session = ScoreboardSession(
                     self.game_dir, self.session, self._session_id, self.emit

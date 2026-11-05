@@ -2869,6 +2869,11 @@ class PlayTracker(torch.nn.Module):
                     "authorization_id": epoch["authorization_id"],
                     "post_stitch_rotate_degrees": rotation,
                 }
+                from hmlib.ui.hstream_scoreboard_state import publish_native_scoreboard_epoch
+
+                publish_native_scoreboard_epoch(
+                    self._game_id, previous_config, epoch, request["serialized"]
+                )
             except (OSError, RuntimeError, TypeError, ValueError, KeyError):
                 from hmlib.camera.hm_ui_bridge import RuntimeRollbackError
 
@@ -2891,7 +2896,11 @@ class PlayTracker(torch.nn.Module):
             from hmlib.ui.hstream_scoreboard import apply_scoreboard_selection
 
             apply_scoreboard_selection(
-                self._game_id, self._game_config, request["points"], request["canvas"]
+                self._game_id,
+                self._game_config,
+                request["points"],
+                request["canvas"],
+                deadline=request["deadline"],
             )
             return
         raise ValueError(f"Unknown shared runtime operation: {request['kind']}")

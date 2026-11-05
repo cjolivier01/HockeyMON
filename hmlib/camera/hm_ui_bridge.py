@@ -374,7 +374,9 @@ class HmUiProcess:
         operation: Callable[[dict], None] | None = None,
     ) -> None:
         """Validate and apply whole desktop requests on the frame-owning thread."""
+        from hmlib.stitching.native_calibration import ScoreboardSaveError
         from hmlib.ui.hstream_runtime import read_document
+        from hmlib.ui.process_guard import ProcessCleanupError
 
         if not self._replay_controls_restored:
             replay = self._tmpdir / "replay-controls.json"
@@ -427,6 +429,8 @@ class HmUiProcess:
             if result_path.exists():
                 path.unlink(missing_ok=True)
                 continue
+            request = {}
+            operation_started = False
             try:
                 request = read_document(path)
                 if request.get("session_id") != self.session_id:
@@ -452,14 +456,27 @@ class HmUiProcess:
                     if not self.apply_playback_action(request["action"]):
                         raise ValueError("Unknown playback request")
                 elif kind == "operation" and operation is not None:
-                    operation(request["operation"])
+                    arguments = request["operation"]
+                    if arguments.get("kind") == "scoreboard":
+                        arguments = {**arguments, "deadline": deadline}
+                    operation_started = True
+                    operation(arguments)
                 else:
                     raise ValueError(f"Unknown runtime request kind: {kind}")
                 result = {"ok": True, "session_id": self.session_id}
-            except RuntimeRollbackError:
+            except (RuntimeRollbackError, ProcessCleanupError):
                 raise
             except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
                 result = {"ok": False, "error": str(error), "session_id": self.session_id}
+                if isinstance(error, ScoreboardSaveError):
+                    result["outcome"] = error.outcome
+                elif (
+                    request.get("kind") == "operation"
+                    and isinstance(request.get("operation"), dict)
+                    and request.get("operation", {}).get("kind") == "scoreboard"
+                    and not operation_started
+                ):
+                    result["outcome"] = "unchanged"
                 logger.warning("Shared desktop runtime request failed: %s", error)
             self._write_json_atomic(result_path, result)
             path.unlink(missing_ok=True)

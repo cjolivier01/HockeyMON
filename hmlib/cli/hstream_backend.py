@@ -572,6 +572,10 @@ class Supervisor:
 
         from hmlib.stitching.native_calibration import prepare_native_calibration
         from hmlib.ui.hstream_launch import make_plan, set_path
+        from hmlib.ui.hstream_scoreboard_state import (
+            prepare_native_scoreboard_export,
+            restore_native_scoreboard,
+        )
 
         plan = make_plan(self.args, initial=self.initial)
         if self.prepared_analytics is not None:
@@ -585,6 +589,7 @@ class Supervisor:
         plan.limit_seconds = self.duration
         if self.environment["HM_SHARED_HIGH_BIT_DEPTH"] == "1":
             set_path(plan.config, "stitching.dtype", "float32")
+        prepare_native_scoreboard_export(plan.config, self.session, plan.game)
         effective_config = self.session / "native-launch.yaml"
         effective_config.write_text(yaml.safe_dump(plan.config, sort_keys=False))
         self.snapshot = prepare_native_calibration(
@@ -593,6 +598,8 @@ class Supervisor:
             effective_config=effective_config,
             max_output_width=_native_max_output_width(plan.config),
         )
+        if (self.session / "native-scoreboard.json").exists():
+            restore_native_scoreboard(plan.config, self.session, self.snapshot)
         self.environment["HM_SHARED_NATIVE_CALIBRATION"] = str(self.snapshot.directory)
         self.protocol.frame_offset = self.snapshot.frame_offsets[0]
         self.plan = plan

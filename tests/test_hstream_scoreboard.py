@@ -4,6 +4,7 @@ import json
 import shutil
 import threading
 import time
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -120,6 +121,7 @@ def should_reject_bad_corners_and_cancel_without_mutation(selector):
         request(server, "/save", {"points": points})
     assert rejected.value.code == 409
     assert not (session / "runtime-requests").exists()
+
     with request(server, "/cancel", {}) as response:
         assert response.status == 200
     deadline = time.monotonic() + 1
@@ -130,6 +132,50 @@ def should_reject_bad_corners_and_cancel_without_mutation(selector):
         time.sleep(0.01)
     assert any(message.startswith("Scoreboard selection cancelled;") for message in messages)
     assert not (session / "runtime-requests").exists()
+
+
+@pytest.mark.parametrize("outcome", ["unchanged", "saved", "unknown"])
+def should_retain_timed_out_save_until_cancel_has_a_definitive_outcome(
+    selector, monkeypatch, outcome
+):
+    server, session, messages, points = selector
+    monkeypatch.setattr("hmlib.ui.hstream_scoreboard._SAVE_TIMEOUT_SECONDS", 0.05)
+    with pytest.raises(HTTPError) as timed_out:
+        request(server, "/save", {"points": points})
+    assert timed_out.value.code == 409
+    assert "outcome is pending" in json.load(timed_out.value)["error"]
+    pending = list((session / "runtime-requests").glob("*.json"))
+    assert len(pending) == 1
+    with pytest.raises(HTTPError) as unresolved:
+        request(server, "/cancel", {})
+    assert "still pending" in json.load(unresolved.value)["error"]
+    assert pending[0].exists(), "HTTP timeout must not erase an in-flight native operation"
+    with pytest.raises(ValueError, match="pending; wait before reopening"):
+        server.prepare_reopen()
+    result = {"ok": outcome == "saved", "session_id": "session-1"}
+    if outcome != "saved":
+        result.update(outcome=outcome, error="Native transaction " + outcome)
+    write_document(session / "runtime-results" / pending[0].name, result)
+    if outcome == "unchanged":
+        with request(server, "/cancel", {}) as response:
+            assert "keeping the previous selection" in json.load(response)["message"]
+    else:
+        with pytest.raises(HTTPError) as rejected:
+            request(server, "/cancel", {})
+        assert outcome in json.load(rejected.value)["error"]
+        assert not any("keeping the previous selection" in message for message in messages)
+    assert not pending[0].exists()
+    server.prepare_reopen()
+
+
+def should_refuse_reopening_during_an_active_submission(selector):
+    server, _session, _messages, _points = selector
+    with server._submission, pytest.raises(ValueError, match="submission is still in progress"):
+        server.prepare_reopen()
+    server.prepare_reopen()
+    with pytest.raises(HTTPError) as rejected:
+        request(server, "/save", {"points": _points})
+    assert "already complete" in json.load(rejected.value)["error"]
 
 
 @pytest.mark.parametrize("owns_saved_source", [False, True])
@@ -242,3 +288,151 @@ def should_retain_source_selection_through_initial_launch_save_seek_and_reopen(
     rebuild(selected)
     assert (game / "s.png").read_bytes() == saved_image
     assert (private / "s.png").read_bytes() == pinned_image
+
+
+@pytest.mark.parametrize("initial_disabled", [False, True])
+@pytest.mark.parametrize("selected_disabled", [False, True])
+def should_retain_native_selection_after_original_overrides_and_reopen(
+    tmp_path, monkeypatch, initial_disabled, selected_disabled
+):
+    import copy
+
+    import hmlib.config as configuration
+    from hmlib.stitching import native_calibration
+    from hmlib.ui.hstream_scoreboard import apply_scoreboard_selection
+    from hmlib.ui.hstream_scoreboard_state import restore_worker_native_scoreboard
+
+    game, session = tmp_path / "game", tmp_path / "session"
+    game.mkdir()
+    session.mkdir()
+    saved = [[2, 2], [30, 2], [30, 10], [2, 10]]
+    initial = [[0, 0]] * 4 if initial_disabled else [[10, 4], [40, 4], [40, 20], [10, 20]]
+    selected = [[0, 0]] * 4 if selected_disabled else [[4, 8], [44, 8], [44, 24], [4, 24]]
+    write_document(game / "config.yaml", {"rink": {"scoreboard": {"perspective_polygon": saved}}})
+    monkeypatch.setattr(configuration, "get_game_dir", lambda game_id: str(game))
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(session))
+    native = SimpleNamespace(
+        game_directory=game,
+        generation="hugin-1",
+        output_generation="output-1",
+        post_stitch_rotate_degrees=0,
+    )
+    monkeypatch.setattr(native_calibration, "shared_native_calibration", lambda: native)
+    canvas = {
+        "width": 64,
+        "height": 40,
+        "game_directory": str(game),
+        "expected_generation": {
+            "hugin_generation": "hugin-1",
+            "stitched_output_generation": "output-1",
+        },
+    }
+
+    def rebuild(expected):
+        # hmtrack invokes the restore only after the initial YAML/CLI is reloaded.
+        runtime = {"rink": {"scoreboard": {"perspective_polygon": copy.deepcopy(initial)}}}
+        restore_worker_native_scoreboard(runtime, "game")
+        assert runtime["rink"]["scoreboard"]["perspective_polygon"] == expected
+        dialog = ScoreboardSession(game, session, "worker-id", lambda message: None)
+        dialog.canvas = canvas
+        dialog._prepare_initial()
+        assert dialog.initial["points"] == ([] if expected == [[0, 0]] * 4 else expected)
+        return runtime
+
+    runtime = rebuild(initial)
+    rebuild(initial)
+    assert read_document(game / "config.yaml")["rink"]["scoreboard"]["perspective_polygon"] == saved
+
+    def native_save(directory, points, pinned):
+        assert directory == game and pinned == canvas
+        write_document(
+            game / "config.yaml", {"rink": {"scoreboard": {"perspective_polygon": points}}}
+        )
+        return points
+
+    monkeypatch.setattr(native_calibration, "save_native_scoreboard", native_save)
+    apply_scoreboard_selection("game", runtime, selected, canvas)
+    rebuild(selected)
+    assert runtime["rink"]["scoreboard"]["perspective_polygon"] == selected
+
+
+@pytest.mark.parametrize(
+    "field", ["session", "game_directory", "hugin_generation", "output_generation"]
+)
+def should_reject_native_selection_for_a_different_owner_or_generation(
+    tmp_path, monkeypatch, field
+):
+    import hmlib.config as configuration
+    from hmlib.stitching import native_calibration
+    from hmlib.ui.hstream_scoreboard_state import restore_worker_native_scoreboard
+
+    native = SimpleNamespace(
+        game_directory=tmp_path,
+        generation="hugin-1",
+        output_generation="output-1",
+        post_stitch_rotate_degrees=0,
+    )
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(tmp_path))
+    monkeypatch.setattr(configuration, "get_game_dir", lambda game_id: str(tmp_path))
+    monkeypatch.setattr(native_calibration, "shared_native_calibration", lambda: native)
+    restore_worker_native_scoreboard({}, "game")
+    path = tmp_path / "native-scoreboard.json"
+    state = read_document(path)
+    state[field] = "another-owner"
+    write_document(path, state)
+    with pytest.raises(ValueError, match="different"):
+        restore_worker_native_scoreboard({}, "game")
+
+
+def should_reject_completed_canvas_and_expired_epoch_after_live_rotation(tmp_path, monkeypatch):
+    import hmlib.config as configuration
+    from hmlib.stitching import native_calibration
+    from hmlib.ui.hstream_scoreboard_state import (
+        native_selection_for_canvas,
+        publish_native_scoreboard_epoch,
+        restore_worker_native_scoreboard,
+    )
+
+    native = SimpleNamespace(
+        game_directory=tmp_path,
+        generation="hugin-1",
+        output_generation="output-1",
+        post_stitch_rotate_degrees=0,
+    )
+    monkeypatch.setenv("HM_SHARED_UI_BACKEND", "1")
+    monkeypatch.setenv("HM_UI_SESSION_DIR", str(tmp_path))
+    monkeypatch.setattr(configuration, "get_game_dir", lambda game_id: str(tmp_path))
+    monkeypatch.setattr(native_calibration, "shared_native_calibration", lambda: native)
+    runtime = {}
+    restore_worker_native_scoreboard(runtime, "game")
+    publish_native_scoreboard_epoch(
+        "game",
+        runtime,
+        {
+            "output_generation": "output-2",
+            "post_stitch_rotate_degrees": 2,
+            "scoreboard_property_value": "0,0,0,0,0,0,0,0",
+        },
+        "accepted-epoch",
+    )
+    with pytest.raises(ValueError, match="different active output generation"):
+        native_selection_for_canvas(
+            tmp_path,
+            tmp_path,
+            {
+                "expected_generation": {
+                    "hugin_generation": "hugin-1",
+                    "stitched_output_generation": "output-1",
+                }
+            },
+        )
+
+    def validate(game, serialized, *, native):
+        assert game == tmp_path and serialized == "accepted-epoch"
+        raise RuntimeError("Live output epoch authorization was superseded")
+
+    monkeypatch.setattr(native_calibration, "validate_live_output_epoch", validate)
+    with pytest.raises(RuntimeError, match="superseded"):
+        restore_worker_native_scoreboard({}, "game")

@@ -338,3 +338,60 @@ def should_fail_selector_close_when_guard_cleanup_has_not_completed(tmp_path, mo
     assert messages == [
         "runtime command failed: scoreboard subprocess ownership: Helper still owns its lock"
     ]
+
+
+def should_forward_save_deadline_and_distinguish_unchanged_from_unknown(tmp_path, monkeypatch):
+    deadline = time.monotonic() + 1
+    points = [[0, 0]] * 4
+
+    def cancelled(arguments, **kwargs):
+        request = yaml.safe_load(Path(arguments[-1]).read_text())
+        assert request == {"points": points, "canvas": {}, "deadline": deadline}
+        assert isinstance(kwargs["cancelled"], threading.Event)
+        assert 5 <= kwargs["timeout"] <= 6
+        return {"status": "unchanged", "error": "Expired before mutation"}
+
+    monkeypatch.setattr(native, "_native_operation", cancelled)
+    with pytest.raises(native.ScoreboardSaveError, match="Expired") as rejected:
+        native.save_native_scoreboard(tmp_path, points, {}, deadline=deadline)
+    assert rejected.value.outcome == "unchanged"
+
+    def interrupted(*args, **kwargs):
+        raise subprocess.TimeoutExpired("owned helper", 5)
+
+    monkeypatch.setattr(native, "_native_operation", interrupted)
+    with pytest.raises(native.ScoreboardSaveError, match="outcome is unknown") as unknown:
+        native.save_native_scoreboard(tmp_path, points, {}, deadline=deadline)
+    assert unknown.value.outcome == "unknown"
+
+    from hmlib.ui.process_guard import ProcessCleanupError
+
+    def cleanup_failed(*args, **kwargs):
+        raise ProcessCleanupError("Mutator is still owned by the guard")
+
+    monkeypatch.setattr(native, "_native_operation", cleanup_failed)
+    with pytest.raises(ProcessCleanupError, match="still owned"):
+        native.save_native_scoreboard(tmp_path, points, {}, deadline=deadline)
+
+
+def should_reap_a_timed_out_save_before_reporting_an_unknown_outcome(blocked_exporter):
+    game, _session, _helper = blocked_exporter
+    errors = []
+
+    def save():
+        try:
+            native.save_native_scoreboard(game, [[0, 0]] * 4, {}, deadline=time.monotonic() + 0.1)
+        except native.ScoreboardSaveError as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=save)
+    worker.start()
+    try:
+        pids = _wait_for_helper(game)
+    finally:
+        worker.join(timeout=12)
+    assert not worker.is_alive()
+    assert len(errors) == 1 and errors[0].outcome == "unknown"
+    assert all(not Path(f"/proc/{pid}").exists() for pid in pids.values()), pids
+    with (game / "artifact.lock").open("r") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
