@@ -289,10 +289,11 @@ pipeline:
       rink-camera-adaptive-zoom: 0
   primary-gie:
     config-file: config_infer_yolov8_hockey.yaml
-    # Native detector: two overlapping full-height crops in one inference batch.
+    # Native detector: overlapping crops in one inference batch.
     tiled-inference:
       enable: 0
-      overlap: 0.2  # Fraction of each tile's width shared by both tiles.
+      tiles: 2  # 2 full-height halves or 4 quadrants; ignored while disabled.
+      overlap: 0.2  # Fraction of each tile shared along each split axis.
       merge-iou: 0.5  # Same-class cross-tile duplicate suppression.
   hmstitcher:
     properties:
