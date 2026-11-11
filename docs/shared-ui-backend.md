@@ -283,3 +283,9 @@ The synchronized `hstream_ui.int8_preparation` block supplies the shared desktop
 dialog's required sample count and Play-when-ready defaults. The desktop passes
 the resolved count to `hm-cli --prepare-detector`; Python preparation and its
 artifact protocol are unchanged. Browser recording preparation remains native-only.
+
+The shared Stitched view also opens **Rink warp…**, an independent browser
+editor for a frozen panorama still. Its `hstream_ui.rink_warp` baseline values
+are synchronized with HStream. Guides and PNG exports remain local; neither the
+Python backend nor calibration/playback geometry consumes them. HStream owns
+the editor, GPU/CPU reference geometry and both desktop/web launch paths.

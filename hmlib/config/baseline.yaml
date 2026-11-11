@@ -224,6 +224,19 @@ hstream_ui:
     play_when_ready: true
   highlights:
     base_name: highlights
+  # Standalone still-frame editor; these do not change playback geometry.
+  rink_warp:
+    target_rows: [0.62, 0.96]
+    horizontal_crop: [0.0, 1.0]
+    strength: 1.0
+    aspect_balance: 1.0
+    guide_count: 13
+    active_guide: lower
+    fit_degree: 4
+    symmetric: false
+    show_guides: true
+    show_mask: true
+    preview_max_dimension: 8192
   stitching_experiments:
     prefer_player_frames: true
     scan_duration_seconds: 60

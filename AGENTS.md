@@ -128,3 +128,5 @@
 - Shutdown: `finalize()` is invoked on trunks if present; DAG is available via `to_networkx`/`to_dot` helpers and `display_graphviz`.
 
 - `hmlib/models/detector_selection.py` owns the pinned iter-487500 `hockey-roles` profile, input geometry and role indices. Camera role exclusions apply only to framing subjects; published tracks remain intact. The shared desktop/runtime bindings and role overlays are documented in `docs/hockey-roles-detector.md`.
+
+- `hstream_ui.rink_warp` supplies synchronized defaults for the shared desktop/browser still editor owned by HStream. It exports local guide documents and images without changing Python playback or calibration. See `docs/shared-ui-backend.md`.
