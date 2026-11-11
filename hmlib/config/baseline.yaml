@@ -646,6 +646,8 @@ stitching:
   stitch_frame_time: "00:00:00"
   sync_method: "audio"
   calibration_frame_count: 4
+  # FFmpeg still extraction: 0-9, all lossless. Prefer speed for full-resolution PNGs.
+  calibration_png_compression_level: 1
   control_point_limit: 1500
   frame_offsets:
     left: null
