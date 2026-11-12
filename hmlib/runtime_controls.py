@@ -181,7 +181,8 @@ def apply_worker_runtime_preferences(config, args):
         and not args.start_frame
     ):
         args.start_frame_time = str(start)
-    if not _boolean(config["telemetry"]["enabled"]):
+    capture = config.get("hm_shared_ui", {}).get("telemetry", config["telemetry"]["enabled"])
+    if not _boolean(capture):
         for plugin in config.get("aspen", {}).get("plugins", {}).values():
             if str(plugin.get("class", "")).endswith(
                 ("SaveCameraPlugin", "SaveTrackingPlugin", "SaveDetectionsPlugin", "SavePosePlugin")

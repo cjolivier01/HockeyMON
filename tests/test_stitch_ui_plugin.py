@@ -875,3 +875,46 @@ def should_not_save_a_repair_that_a_cli_override_will_replace() -> None:
         stitch_ui_module.repair_blend_before_stitch(
             game, "game-1", run_blend_overrides=("blend_mode",)
         )
+
+
+def should_save_and_reset_tone_over_an_existing_canonical_preset(tmp_path, monkeypatch):
+    import yaml
+    import hmlib.config as configuration
+    from hmlib.runtime_controls import normalize_control_layer
+
+    game = tmp_path / "tone-game"
+    game.mkdir()
+    monkeypatch.setitem(
+        configuration.save_private_config.__globals__, "GAME_DIR_BASE", str(tmp_path)
+    )
+    system = normalize_control_layer(_config(rotation=0))
+    current = copy.deepcopy(system)
+    configuration.recursive_update(current, {"video_out": {"tone": {"exposure": 0.2}}})
+    configuration.save_private_config(
+        game.name, {"video_out": {"tone": {"exposure": 0.2}}}, verbose=False
+    )
+    monkeypatch.setattr(stitch_ui_module, "HmUiProcess", _FakeHmUiProcess)
+    monkeypatch.setattr(stitch_ui_module, "get_config", lambda **_kwargs: copy.deepcopy(system))
+    shared = {"camera_ui": 1, "game_id": game.name, "game_config": current}
+    plugin = StitchUiPlugin()
+    plugin.forward({"img": object(), "shared": shared})
+    process = _FakeHmUiProcess.instances[-1]
+    process.values["Tracker Controls (Stitched Color)"]["Exposure_EV_x10"] = (
+        plugin._exposure_ev_to_slider(0.4)
+    )
+    process.changed = True
+    process.queue_action("save")
+    plugin.forward({"img": object(), "shared": shared})
+    saved = yaml.safe_load((game / "config.yaml").read_text())
+    assert saved["video_out"]["tone"]["exposure"] == 0.8
+    assert "exposure_ev" not in saved.get("rink", {}).get("camera", {}).get("color", {})
+    assert (
+        configuration.get_game_config_private(game.name)["rink"]["camera"]["color"]["exposure_ev"]
+        == 0.4
+    )
+    process.queue_reset(system=True)
+    process.queue_action("save")
+    plugin.forward({"img": object(), "shared": shared})
+    saved = yaml.safe_load((game / "config.yaml").read_text())
+    assert "tone" not in saved.get("video_out", {})
+    plugin.finalize()

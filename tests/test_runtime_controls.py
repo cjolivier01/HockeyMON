@@ -120,3 +120,17 @@ def should_load_canonical_tone_for_direct_python_consumers_and_save_only_canonic
     assert saved == {"video_out": {"tone": {"exposure": 0.8, "lift_shadow_black_point": False}}}
     loaded = configuration.get_game_config_private("test-game")
     assert loaded["rink"]["camera"]["color"]["exposure_ev"] == 0.4
+
+
+def should_preserve_explicit_shared_job_capture_over_baseline_telemetry():
+    from hmlib.runtime_controls import apply_worker_runtime_preferences
+
+    config = {
+        "playback": {"start_seconds": 0, "realtime": False},
+        "telemetry": {"enabled": False},
+        "hm_shared_ui": {"telemetry": True},
+        "aspen": {"plugins": {"capture": {"class": "module.SaveTrackingPlugin", "enabled": True}}},
+    }
+    args = SimpleNamespace(explicit_arg_names=[], start_frame_time=None, start_frame=0)
+    apply_worker_runtime_preferences(config, args)
+    assert config["aspen"]["plugins"]["capture"]["enabled"] is True
