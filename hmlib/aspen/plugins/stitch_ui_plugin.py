@@ -463,6 +463,15 @@ class StitchUiPlugin(Plugin):
     def _set_runtime_path(self, path: tuple[str, ...], value: Any) -> None:
         if self._set_path(self._game_config, path, value):
             self._dirty_paths.add(path)
+        if len(path) == 4 and path[:3] == ("rink", "camera", "color"):
+            from hmlib.runtime_controls import PYTHON_TONE_KEYS
+
+            if path[-1] in PYTHON_TONE_KEYS:
+                key, factor, boolean = PYTHON_TONE_KEYS[path[-1]]
+                native = value if value is _MISSING or boolean else value * factor
+                canonical = ("video_out", "tone", key)
+                if self._set_path(self._game_config, canonical, native):
+                    self._dirty_paths.add(canonical)
 
     def _apply_color_window(self, window_name: str, prefix: tuple[str, ...]) -> None:
         assert self._process is not None

@@ -16,6 +16,7 @@ from hmlib.config import (
     get_game_config_private,
     get_nested_value,
     normalize_runtime_config,
+    recursive_update,
     resolve_global_refs,
     save_private_config,
     set_nested_value,
@@ -2326,11 +2327,11 @@ class hm_opts(object):
         if not isinstance(config, dict) or not overrides:
             return False
 
-        changed = False
+        layer = {}
         for key_path, pval in _iter_config_override_updates(config, overrides):
-            set_nested_value(config, key_path, pval, create_missing=False)
-            changed = True
-        return changed
+            set_nested_value(layer, key_path, pval)
+        recursive_update(config, layer)
+        return bool(layer)
 
     @staticmethod
     def persist_private_config_overrides(
@@ -2416,12 +2417,12 @@ class hm_opts(object):
                 set_nested_value(private_cfg, show_image_path, True)
                 changed = True
 
+        override_layer = {}
         for key_path, pval in override_updates:
-            current_value = get_nested_value(private_cfg, key_path, _MISSING_ARG)
-            if current_value is not _MISSING_ARG and current_value == pval:
-                continue
-            set_nested_value(private_cfg, key_path, copy.deepcopy(pval))
-            changed = True
+            set_nested_value(override_layer, key_path, copy.deepcopy(pval))
+        before_overrides = copy.deepcopy(private_cfg)
+        recursive_update(private_cfg, override_layer)
+        changed |= before_overrides != private_cfg
 
         if changed:
             save_private_config(game_id=game_id, data=private_cfg, verbose=verbose)

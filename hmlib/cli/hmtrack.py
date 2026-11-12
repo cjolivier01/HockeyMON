@@ -2861,6 +2861,9 @@ def main() -> int | None:
     # Let hm_opts apply --config-override before resolving GLOBAL.* refs.
     args.game_config = game_config
     args = hm_opts.init(args, parser)
+    from hmlib.runtime_controls import apply_worker_runtime_preferences
+
+    apply_worker_runtime_preferences(args.game_config, args)
     hm_opts.persist_private_config_overrides(
         args,
         parser=parser,

@@ -55,7 +55,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--options", action="append", default=[])
     result.add_argument("--enable-sources", default="URI-MULTIPLE")
     result.add_argument("--enable-sinks", default="RENDER")
-    result.add_argument("--start-time", default="00:00:00")
+    result.add_argument("--start-time")
     result.add_argument("--stitch-frame-time")
     result.add_argument("-t", "--time-limit", type=float)
     result.add_argument("--render-realtime", action="store_true")
@@ -170,7 +170,10 @@ def native_application_config(runner: Path) -> Path:
 
 
 def merge(left: dict, right: dict) -> dict:
-    result = copy.deepcopy(left)
+    from hmlib.runtime_controls import normalize_control_layer
+
+    result = normalize_control_layer(left)
+    right = normalize_control_layer(right)
     for key, value in right.items():
         result[key] = (
             merge(result[key], value)
@@ -420,6 +423,7 @@ def make_plan(
             if not separator:
                 raise ValueError(f"Expected --options=key=value: {entry}")
             options[key] = yaml.safe_load(text)
+    option_layer = {}
     for key, value in options.items():
         if key in NATIVE_TRANSPORT:
             if value != NATIVE_TRANSPORT[key]:
@@ -441,6 +445,9 @@ def make_plan(
                 "pipeline.player-analytics.",
                 "pipeline.tracker.",
                 "hstream_ui.camera_controls.",
+                "video_out.tone.",
+                "playback.",
+                "telemetry.",
                 "hstream_ui.hockeymon.detector.",
                 "runtime.gpu_memory_profile",
             )
@@ -458,7 +465,8 @@ def make_plan(
             raise ValueError(
                 f"The HockeyMON backend does not implement native launch setting {key}"
             )
-        set_path(config, key, value)
+        set_path(option_layer, key, value)
+    config = merge(config, option_layer)
     _translate_native_settings(
         config, sinks, memory_profile_explicit="runtime.gpu_memory_profile" in options
     )
@@ -593,6 +601,12 @@ def make_plan(
     )
     generated += prepared
     generated = prefer_explicit_launch_arguments(generated, explicit, "track")
+    from hmlib.runtime_controls import playback_preferences
+
+    start, realtime = playback_preferences(config)
+    if args.start_time is None:
+        args.start_time = str(start)
+    args.render_realtime = args.render_realtime or ("RENDER" in sinks and realtime)
     arguments = ["--game-id", args.game_id, *generated, f"--start-time={args.start_time}"]
     if not get_path(config, "pipeline.hmaudio.enable", True):
         arguments.append("--no-audio")
@@ -606,7 +620,11 @@ def make_plan(
     # determines which generation the shared archive browser can expose.
     if not any(token.split("=", 1)[0] == "--deploy-dir" for token in explicit):
         arguments += ["--deploy-dir", str(game)]
-    telemetry = "pipeline.ds-playtracker.private-properties.telemetry-db-dir" in options
+    telemetry = get_path(
+        config, "hstream_ui.job.capture_telemetry", get_path(config, "telemetry.enabled")
+    )
+    if type(telemetry) is not bool:
+        raise ValueError("telemetry.enabled must be boolean")
     if not telemetry:
         for name, plugin in config.get("aspen", {}).get("plugins", {}).items():
             if str(plugin.get("class", "")).endswith(
@@ -721,19 +739,13 @@ def _translate_native_settings(
             or get_path(config, "hm_ui.run.memory_profile") is None
         ):
             set_path(config, "hm_ui.run.memory_profile", profiles[memory_profile])
-    controls = get_path(config, "hstream_ui.camera_controls", {})
-    for name, key, divisor in (
-        ("Bring_Up_Shadows", "shadow_lift", 1),
-        ("Lift_Shadow_Black_Point", "shadow_lift_black_point", 1),
-        ("Exposure_x100", "exposure_ev", 200),
-    ):
-        if name in controls:
-            value = (
-                bool(controls[name])
-                if key.endswith("black_point")
-                else float(controls[name]) / divisor
-            )
-            set_path(config, f"rink.camera.color.{key}", value)
+    from hmlib.runtime_controls import normalize_control_layer
+
+    # Compatibility for direct translator callers; normal launch layers have
+    # already resolved canonical and Python color aliases together.
+    canonical = normalize_control_layer(config)
+    for key, value in get_path(canonical, "rink.camera.color", {}).items():
+        set_path(config, "rink.camera.color." + key, value)
     high_bit = str(
         get_path(config, "pipeline.hmstitcher.properties.high-bit-depth", "auto")
     ).lower()

@@ -176,7 +176,6 @@ runtime:
     maximum_encoded_packet_bytes: 67108864
     maximum_runtime_command_bytes: 8192
     compact_stitch_workspace: true
-    playback_start_seconds: 0
     model_cache:
       enable: true
       # {user_cache} follows XDG_CACHE_HOME, otherwise HOME/.cache.
@@ -192,10 +191,6 @@ runtime:
       height: 2160
       bitrate_kbps: 20000
       keyframe_interval: 60
-      realtime: false
-      shadow_lift_percent: 0
-      lift_shadow_black_point: false
-      exposure: 0
     tracker:
       low_score: 0.25
       high_score: 0.6
@@ -208,6 +203,15 @@ runtime:
       confirmation_frames: 2
       maximum_tracks: 512
       maximum_cost_matrix_bytes: 8388608
+
+# Runtime launch preferences, consumed without opening a UI.
+playback:
+  start_seconds: 0
+  # Pace interactive preview; archive-only jobs remain unpaced.
+  realtime: false
+telemetry:
+  # Program capture disables seeking for the run.
+  enabled: true
 
 hstream_ui:
   # Open native review dialogs automatically when their workflow needs input.
@@ -228,29 +232,13 @@ hstream_ui:
     prefer_player_frames: true
     scan_duration_seconds: 60
     scan_interval_ms: 500
-    preview_duration_seconds: 15
-    preview_loop: true
+    preview_duration_seconds: 60
+    preview_loop: false
     share_saved_rotation: true
-  # Shared Qt/browser playback start, with optional millisecond precision.
-  playback_start_time: "00:00:00"
-  # Session-only pacing choice shared by Qt and the browser.
-  playback_realtime: false
   # Session-only network destinations selected before playback.
   network_routes: []
   archive_routes: []
   export_archive_routes: [program_4k]
-  # Shared Qt/browser tone values use integer slider units, including exposure.
-  camera_controls:
-    # UI target roles and zero-valued motion overrides retain native tuning.
-    Apply_To_Fast_Box: 0
-    Apply_To_Follower_Box: 1
-    Max_Speed_X_x10: 0
-    Max_Speed_Y_x10: 0
-    Max_Accel_X_x10: 0
-    Max_Accel_Y_x10: 0
-    Bring_Up_Shadows: 0
-    Lift_Shadow_Black_Point: 0
-    Exposure_x100: 0
   runtime_controls:
     debounce_ms: 120
     ack_timeout_ms: 3000
@@ -272,10 +260,6 @@ hstream_ui:
     - id: hockey-roles
       label: Hockey roles — mixed iter 487500 (YOLOv8-m, 1984x736)
       config_prefix: config_infer_yolov8m_hockey_roles
-
-  drivegpt_database:
-    # Initial checkbox state; capture disables seeking for the run.
-    enabled: true
 
 # Native player pose cadence and display defaults. Enabling/drawing pose remains
 # an explicit choice; these preferences do not enable the model.
@@ -312,6 +296,11 @@ apply_camera:
   end_zones: false
 
 video_out:
+  # Shared native tone units. Exposure is the native 0..1.3 adjustment, not EV.
+  tone:
+    shadow_lift_percent: 0
+    lift_shadow_black_point: false
+    exposure: 0
   # Whether to skip final container flush/save in VideoOutput.
   # CLI flag --skip-final-video-save overrides this when provided.
   skip_final_save: false
@@ -923,13 +912,22 @@ rink:
     max_speed_ratio_y: 1.0
     max_accel_ratio_x: 1.0
     max_accel_ratio_y: 1.0
+    # Absolute translation overrides after camera/arena tuning and ratios.
+    # Zero inherits the configured limit. Target switches also apply to live edits.
+    motion_overrides:
+      apply_to_fast_box: false
+      apply_to_follower_box: true
+      max_speed_x: 0
+      max_speed_y: 0
+      max_accel_x: 0
+      max_accel_y: 0
     color:
       white_balance:
         - 1.0
         - 1.0
         - 1.0
       brightness: 1.0
-      exposure_ev: 0.0
+      # Shared final exposure is video_out.tone.exposure; Python EV is derived.
       contrast: 1.0
       gamma: 1.0
 

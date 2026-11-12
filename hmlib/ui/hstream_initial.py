@@ -22,10 +22,17 @@ from hmlib.ui.hstream_launch import (
 def prefer_initial_settings(arguments: list[str], explicit: dict) -> list[str]:
     """Keep generated UI options only when the original invocation did not own them."""
     aliases = {
-        "hstream_ui.camera_controls.Exposure_x100": "rink.camera.color.exposure_ev",
-        "hstream_ui.camera_controls.Bring_Up_Shadows": "rink.camera.color.shadow_lift",
-        "hstream_ui.camera_controls.Lift_Shadow_Black_Point": "rink.camera.color.shadow_lift_black_point",
+        "video_out.tone.exposure": "rink.camera.color.exposure_ev",
+        "video_out.tone.shadow_lift_percent": "rink.camera.color.shadow_lift",
+        "video_out.tone.lift_shadow_black_point": "rink.camera.color.shadow_lift_black_point",
     }
+    aliases.update(
+        {
+            "hstream_ui.camera_controls.Exposure_x100": "rink.camera.color.exposure_ev",
+            "hstream_ui.camera_controls.Bring_Up_Shadows": "rink.camera.color.shadow_lift",
+            "hstream_ui.camera_controls.Lift_Shadow_Black_Point": "rink.camera.color.shadow_lift_black_point",
+        }
+    )
     missing = object()
     result, index = [], 0
     while index < len(arguments):

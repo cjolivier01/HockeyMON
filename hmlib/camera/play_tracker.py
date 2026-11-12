@@ -6,6 +6,7 @@ import os
 import time
 from collections import deque
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import cv2
@@ -460,6 +461,8 @@ class PlayTracker(torch.nn.Module):
 
         start_box = self._play_box.clone()
 
+        from hmlib.runtime_controls import apply_motion_overrides
+
         if self._cpp_boxes:
 
             # Create and configure `AllLivingBoxConfig` for `_current_roi`
@@ -605,6 +608,15 @@ class PlayTracker(torch.nn.Module):
             except (AttributeError, RuntimeError, TypeError, ValueError) as ex:
                 logger.warning("Failed to read live stitch rotation: %s", ex)
 
+            self._configured_motion_limits = [
+                {
+                    key: float(getattr(box, key))
+                    for key in ("max_speed_x", "max_speed_y", "max_accel_x", "max_accel_y")
+                }
+                for box in (current_roi_config, current_roi_aspect_config)
+            ]
+            apply_motion_overrides(cam_cfg, current_roi_config, current_roi_aspect_config)
+
             # If we are not using the C++ PlayTracker, or if the camera controller is external
             # (e.g. transformer/GPT trunks), initialize Python-side movers without creating the C++ PlayTracker.
             if not self._cpp_playtracker or self._camera_controller in ("transformer", "gpt"):
@@ -744,14 +756,32 @@ class PlayTracker(torch.nn.Module):
                 float(self._camera_cfg().get("resizing_time_to_dest_stop_speed_threshold", 0.0))
             )
 
-            self._current_roi: MovingBox | PyLivingBox = MovingBox(
-                label="Current ROI",
-                bbox=start_box.clone(),
-                arena_box=self.get_arena_box(),
+            fast_limits = SimpleNamespace(
                 max_speed_x=self._camera_speed_x * 1.5 / speed_scale,
                 max_speed_y=self._camera_speed_y * 1.5 / speed_scale,
                 max_accel_x=self._camera_accel_x * 1.1 / speed_scale,
                 max_accel_y=self._camera_accel_y * 1.1 / speed_scale,
+            )
+            follower_limits = SimpleNamespace(
+                max_speed_x=self._camera_speed_x / speed_scale,
+                max_speed_y=self._camera_speed_y / speed_scale,
+                max_accel_x=self._camera_accel_x / speed_scale,
+                max_accel_y=self._camera_accel_y / speed_scale,
+            )
+            self._configured_motion_limits = [
+                vars(fast_limits).copy(),
+                vars(follower_limits).copy(),
+            ]
+            apply_motion_overrides(self._camera_cfg(), fast_limits, follower_limits)
+
+            self._current_roi: MovingBox | PyLivingBox = MovingBox(
+                label="Current ROI",
+                bbox=start_box.clone(),
+                arena_box=self.get_arena_box(),
+                max_speed_x=fast_limits.max_speed_x,
+                max_speed_y=fast_limits.max_speed_y,
+                max_accel_x=fast_limits.max_accel_x,
+                max_accel_y=fast_limits.max_accel_y,
                 max_width=play_width,
                 max_height=play_height,
                 stop_on_dir_change=False,
@@ -784,10 +814,10 @@ class PlayTracker(torch.nn.Module):
                 label="AspectRatio",
                 bbox=start_box.clone(),
                 arena_box=self.get_arena_box(),
-                max_speed_x=self._camera_speed_x * 1 / speed_scale,
-                max_speed_y=self._camera_speed_y * 1 / speed_scale,
-                max_accel_x=self._camera_accel_x * 1 / speed_scale,
-                max_accel_y=self._camera_accel_y * 1 / speed_scale,
+                max_speed_x=follower_limits.max_speed_x,
+                max_speed_y=follower_limits.max_speed_y,
+                max_accel_x=follower_limits.max_accel_x,
+                max_accel_y=follower_limits.max_accel_y,
                 max_width=play_width,
                 max_height=play_height,
                 stop_on_dir_change=True,
@@ -2332,8 +2362,9 @@ class PlayTracker(torch.nn.Module):
             tb("Zoom_In_Aggressiveness", 100, self._require_camera_value("zoom_in_aggressiveness"))
             # Translation constraints and target selection
             # Apply to fast and/or follower boxes
-            tb("Apply_To_Fast_Box", 1, 0)
-            tb("Apply_To_Follower_Box", 1, 1)
+            motion = self._camera_cfg()["motion_overrides"]
+            tb("Apply_To_Fast_Box", 1, int(motion["apply_to_fast_box"]))
+            tb("Apply_To_Follower_Box", 1, int(motion["apply_to_follower_box"]))
 
             # --- Stitch rotate degrees (0..180 slider mapped to -90..+90 degrees) ---
             self._stitch_slider_enabled = self._stitch_rotation_controller is not None
@@ -2372,10 +2403,10 @@ class PlayTracker(torch.nn.Module):
             self._fixed_edge_rotation_last_sliders = (fixed_left_x10, fixed_right_x10)
             # Speeds/accels (scale sliders by x10 to allow decimals)
             camera_cfg = self._camera_cfg()
-            msx = int(10 * self._camera_base_speed_x * float(camera_cfg["max_speed_ratio_x"]))
-            msy = int(10 * self._camera_base_speed_y * float(camera_cfg["max_speed_ratio_y"]))
-            maxx = int(10 * self._camera_base_accel_x * float(camera_cfg["max_accel_ratio_x"]))
-            maxy = int(10 * self._camera_base_accel_y * float(camera_cfg["max_accel_ratio_y"]))
+            msx = round(10 * motion["max_speed_x"])
+            msy = round(10 * motion["max_speed_y"])
+            maxx = round(10 * motion["max_accel_x"])
+            maxy = round(10 * motion["max_accel_y"])
             tb("Max_Speed_X_x10", 2000, msx)
             tb("Max_Speed_Y_x10", 2000, msy)
             tb("Max_Accel_X_x10", 1000, maxx)
@@ -2391,8 +2422,8 @@ class PlayTracker(torch.nn.Module):
                 "Overshoot_Speed_Ratio_x100": ov_scale,
                 "Time_To_Dest_Speed_Limit_Frames": ttg,
                 "Zoom_In_Aggressiveness": int(camera_cfg["zoom_in_aggressiveness"]),
-                "Apply_To_Fast_Box": 0,
-                "Apply_To_Follower_Box": 1,
+                "Apply_To_Fast_Box": int(motion["apply_to_fast_box"]),
+                "Apply_To_Follower_Box": int(motion["apply_to_follower_box"]),
                 "Link_Fixed_Edge_Rotation_Left_Right": fixed_linked,
                 "Left_Fixed_Edge_Rotation_Angle_x10": fixed_left_x10,
                 "Right_Fixed_Edge_Rotation_Angle_x10": fixed_right_x10,
@@ -2640,26 +2671,16 @@ class PlayTracker(torch.nn.Module):
         _replace(
             "Time_To_Dest_Speed_Limit_Frames", camera_cfg.get("time_to_dest_speed_limit_frames")
         )
-        _replace(
-            "Max_Speed_X_x10",
-            camera_cfg.get("max_speed_ratio_x"),
-            lambda value: round(10.0 * self._camera_base_speed_x * float(value)),
-        )
-        _replace(
-            "Max_Speed_Y_x10",
-            camera_cfg.get("max_speed_ratio_y"),
-            lambda value: round(10.0 * self._camera_base_speed_y * float(value)),
-        )
-        _replace(
-            "Max_Accel_X_x10",
-            camera_cfg.get("max_accel_ratio_x"),
-            lambda value: round(10.0 * self._camera_base_accel_x * float(value)),
-        )
-        _replace(
-            "Max_Accel_Y_x10",
-            camera_cfg.get("max_accel_ratio_y"),
-            lambda value: round(10.0 * self._camera_base_accel_y * float(value)),
-        )
+        motion = camera_cfg["motion_overrides"]
+        for identifier, key in (
+            ("Max_Speed_X_x10", "max_speed_x"),
+            ("Max_Speed_Y_x10", "max_speed_y"),
+            ("Max_Accel_X_x10", "max_accel_x"),
+            ("Max_Accel_Y_x10", "max_accel_y"),
+        ):
+            _replace(identifier, motion[key], lambda value: round(10 * float(value)))
+        _replace("Apply_To_Fast_Box", motion["apply_to_fast_box"])
+        _replace("Apply_To_Follower_Box", motion["apply_to_follower_box"])
         if "Stitch_Rotate_Degrees" in main:
             rotation = get_nested_value(
                 self._system_game_config,
@@ -3018,29 +3039,30 @@ class PlayTracker(torch.nn.Module):
             maxx = self._ui_slider_value(self._ui_window_name, "Max_Accel_X_x10") / 10.0
             maxy = self._ui_slider_value(self._ui_window_name, "Max_Accel_Y_x10") / 10.0
             self._apply_fixed_edge_rotation_controls()
-            if self._camera_base_speed_x > 0:
-                self._set_ui_config_value(
-                    ("rink", "camera", "max_speed_ratio_x"),
-                    float(msx / max(self._camera_base_speed_x, 1e-6)),
+            requested_limits = dict(
+                zip(
+                    ("max_speed_x", "max_speed_y", "max_accel_x", "max_accel_y"),
+                    (msx, msy, maxx, maxy),
                 )
-            if self._camera_base_speed_y > 0:
-                self._set_ui_config_value(
-                    ("rink", "camera", "max_speed_ratio_y"),
-                    float(msy / max(self._camera_base_speed_y, 1e-6)),
+            )
+            for key, value in {
+                **requested_limits,
+                "apply_to_fast_box": apply_fast,
+                "apply_to_follower_box": apply_follower,
+            }.items():
+                self._set_ui_config_value(("rink", "camera", "motion_overrides", key), value)
+
+            def limits_for(index):
+                from hmlib.runtime_controls import resolved_motion_limits
+
+                return resolved_motion_limits(
+                    requested_limits, self._configured_motion_limits[index]
                 )
-            if self._camera_base_accel_x > 0:
-                self._set_ui_config_value(
-                    ("rink", "camera", "max_accel_ratio_x"),
-                    float(maxx / max(self._camera_base_accel_x, 1e-6)),
-                )
-            if self._camera_base_accel_y > 0:
-                self._set_ui_config_value(
-                    ("rink", "camera", "max_accel_ratio_y"),
-                    float(maxy / max(self._camera_base_accel_y, 1e-6)),
-                )
+
             # Apply to Python movers (live)
             if isinstance(self._current_roi, MovingBox) and apply_fast:
                 mb = self._current_roi
+                msx, msy, maxx, maxy = limits_for(0)
                 mb._max_speed_x = torch.tensor(msx, dtype=torch.float, device=mb.device)
                 mb._max_speed_y = torch.tensor(msy, dtype=torch.float, device=mb.device)
                 mb._max_accel_x = torch.tensor(maxx, dtype=torch.float, device=mb.device)
@@ -3050,6 +3072,7 @@ class PlayTracker(torch.nn.Module):
                 )
             if isinstance(self._current_roi_aspect, MovingBox) and apply_follower:
                 mb = self._current_roi_aspect
+                msx, msy, maxx, maxy = limits_for(1)
                 mb._max_speed_x = torch.tensor(msx, dtype=torch.float, device=mb.device)
                 mb._max_speed_y = torch.tensor(msy, dtype=torch.float, device=mb.device)
                 mb._max_accel_x = torch.tensor(maxx, dtype=torch.float, device=mb.device)
@@ -3057,6 +3080,12 @@ class PlayTracker(torch.nn.Module):
                 mb._ttg_limit_frames = torch.tensor(
                     int(ttg_scaled), dtype=torch.int64, device=mb.device
                 )
+
+            for index, (selected, box) in enumerate(
+                ((apply_fast, self._current_roi), (apply_follower, self._current_roi_aspect))
+            ):
+                if selected and isinstance(box, PyLivingBox):
+                    box.set_translation_constraints(*limits_for(index))
 
             # Apply to Python movers live (if available)
             if isinstance(self._current_roi_aspect, MovingBox):
@@ -3086,7 +3115,7 @@ class PlayTracker(torch.nn.Module):
                             int(postns_scaled),
                             int(ttg_scaled),
                         )
-                        lb.set_translation_constraints(msx, msy, maxx, maxy)
+                        lb.set_translation_constraints(*limits_for(0))
                     if apply_follower:
                         lb = self._playtracker.get_live_box(1)
                         lb.set_braking(
@@ -3097,7 +3126,7 @@ class PlayTracker(torch.nn.Module):
                             int(postns_scaled),
                             int(ttg_scaled),
                         )
-                        lb.set_translation_constraints(msx, msy, maxx, maxy)
+                        lb.set_translation_constraints(*limits_for(1))
                     self._playtracker.set_breakaway_braking(int(ov_delay_scaled), ov_scal)
                 except (AttributeError, RuntimeError, ValueError, TypeError, KeyError) as ex:
                     logger.warning("Failed to apply camera UI values to C++ play tracker: %s", ex)
@@ -3327,6 +3356,15 @@ class PlayTracker(torch.nn.Module):
 
     def _set_ui_config_value(self, path: tuple[str, ...], value: Any):
         self._set_config_value(self._game_config, path, value, mark_dirty=True)
+        if len(path) == 4 and path[:3] == ("rink", "camera", "color"):
+            from hmlib.runtime_controls import PYTHON_TONE_KEYS
+
+            if path[-1] in PYTHON_TONE_KEYS:
+                key, factor, boolean = PYTHON_TONE_KEYS[path[-1]]
+                native = value if value is _MISSING or boolean else value * factor
+                self._set_config_value(
+                    self._game_config, ("video_out", "tone", key), native, mark_dirty=True
+                )
 
     def _get_config_path_value(self, path: tuple[str, ...]):
         return self._get_path_value(self._game_config, path)
@@ -3361,10 +3399,12 @@ class PlayTracker(torch.nn.Module):
                     ("rink", "camera", "stop_delay_cooldown_frames"),
                     ("rink", "camera", "time_to_dest_speed_limit_frames"),
                     ("rink", "camera", "zoom_in_aggressiveness"),
-                    ("rink", "camera", "max_speed_ratio_x"),
-                    ("rink", "camera", "max_speed_ratio_y"),
-                    ("rink", "camera", "max_accel_ratio_x"),
-                    ("rink", "camera", "max_accel_ratio_y"),
+                    ("rink", "camera", "motion_overrides", "apply_to_fast_box"),
+                    ("rink", "camera", "motion_overrides", "apply_to_follower_box"),
+                    ("rink", "camera", "motion_overrides", "max_speed_x"),
+                    ("rink", "camera", "motion_overrides", "max_speed_y"),
+                    ("rink", "camera", "motion_overrides", "max_accel_x"),
+                    ("rink", "camera", "motion_overrides", "max_accel_y"),
                     ("rink", "camera", "fixed_edge_rotation_angle"),
                     (
                         "rink",

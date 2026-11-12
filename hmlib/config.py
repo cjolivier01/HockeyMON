@@ -20,6 +20,7 @@ import yaml
 
 import hmlib
 from hmlib.log import get_logger
+from hmlib.runtime_controls import normalize_control_layer
 
 _HOME_DIR: str = os.environ.get("HOME") or str(Path.home())
 GAME_DIR_BASE: str = os.environ.get("HM_GAME_DIR") or os.path.join(_HOME_DIR, "Videos")
@@ -228,6 +229,7 @@ def save_private_config(game_id: str, data: Dict[str, Any], verbose: bool = True
     data_to_save = copy.deepcopy(data) if isinstance(data, dict) else data
     if isinstance(data_to_save, dict):
         normalize_runtime_config(data_to_save)
+        data_to_save = normalize_control_layer(data_to_save, derive_python=False)
     with stitching_lock(game_directory):
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=".config.yaml.", suffix=".tmp", dir=game_directory
@@ -376,6 +378,7 @@ def recursive_update(original, update):
     If a key in the original dictionary is not present in the update dictionary,
     its value is preserved.
     """
+    update = normalize_control_layer(update)
     for key, value in update.items():
         if isinstance(value, dict) and key in original:
             recursive_update(original[key], value)
@@ -518,6 +521,9 @@ def normalize_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
             set_nested_value(config, new_path, copy.deepcopy(legacy_value))
         _delete_nested_key(config, legacy_path)
     _migrate_game_stitching_config(config)
+    normalized = normalize_control_layer(config)
+    config.clear()
+    config.update(normalized)
     return config
 
 
