@@ -1553,3 +1553,11 @@ sh_test(
     data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_mot_video_chapters.py"],
     env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
 )
+
+sh_test(
+    name = "test_runtime_controls",
+    srcs = ["runtime_pytest.sh"],
+    args = ["tests/test_runtime_controls.py", "pytest", "yaml"],
+    data = ["//:pyproject.toml", "//hmlib:hmlib.lib", "python_runtime.sh", "test_runtime_controls.py"],
+    env_inherit = ["CONDA_PREFIX", "PYTHON_BIN_PATH"],
+)

@@ -218,12 +218,16 @@ def should_tune_only_follower_zoom_and_preserve_config_reset(monkeypatch, native
 def should_restore_distinct_system_and_open_time_zoom_defaults(monkeypatch, tmp_path):
     from hmlib.camera.hm_ui_bridge import HmUiProcess
     from hmlib.camera.zoom import zoom_in_shrink_thresholds
+    from hmlib.config import ROOT_DIR, baseline_config
 
     PlayTracker = _load_play_tracker(monkeypatch)
     tracker = PlayTracker.__new__(PlayTracker)
     tracker._game_config = {
         "rink": {
             "camera": {
+                "motion_overrides": copy.deepcopy(
+                    baseline_config(ROOT_DIR)["rink"]["camera"]["motion_overrides"]
+                ),
                 "zoom_in_aggressiveness": 80,
                 "stop_on_dir_change_delay": 4,
                 "cancel_stop_on_opposite_dir": False,

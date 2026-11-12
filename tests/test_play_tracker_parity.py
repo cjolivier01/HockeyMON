@@ -12,6 +12,7 @@ from torch.testing import assert_close
 
 from hmlib.camera.camera import HockeyMON
 from hmlib.camera.play_tracker import PlayTracker
+from hmlib.config import ROOT_DIR, baseline_config
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -53,6 +54,9 @@ def _base_game_config() -> dict:
                 "cancel_stop_on_opposite_dir": True,
                 "stop_cancel_hysteresis_frames": 2,
                 "stop_delay_cooldown_frames": 2,
+                "motion_overrides": copy.deepcopy(
+                    baseline_config(ROOT_DIR)["rink"]["camera"]["motion_overrides"]
+                ),
                 "max_speed_ratio_x": 1.0,
                 "max_speed_ratio_y": 1.0,
                 "max_accel_ratio_x": 1.0,
@@ -127,7 +131,7 @@ def _build_tracker(game_cfg: dict, overrides: dict, cpp_playtracker: bool) -> Pl
         cluster_centroids=copy.deepcopy(
             overrides.get("cluster_centroids", DEFAULT_CLUSTER_CENTROIDS)
         ),
-        cpp_boxes=True,
+        cpp_boxes=overrides.get("cpp_boxes", True),
         cpp_playtracker=cpp_playtracker,
         plot_cluster_tracking=bool(overrides.get("plot_cluster_tracking", False)),
     )
@@ -450,3 +454,19 @@ def should_share_camera_subjects_with_rink_guide_and_preserve_minimap(
     assert output["player_ids"][0].tolist() == [1, 2, 3, 4, 5, 6]
     assert output["player_bottom_points"][0].shape[0] == 6
     assert tracks.instances_id.tolist() == [1, 2, 3, 4, 5, 6]
+
+
+@pytest.mark.parametrize("cpp_boxes,cpp_tracker", [(False, False), (True, False), (True, True)])
+def should_apply_canonical_motion_without_opening_camera_ui(cpp_boxes, cpp_tracker):
+    config = _base_game_config()
+    motion = config["rink"]["camera"]["motion_overrides"]
+    motion.update(max_speed_x=12.3, max_accel_y=4.5)
+    tracker = _build_tracker(config, {"cpp_boxes": cpp_boxes}, cpp_tracker)
+    follower = tracker._playtracker.get_live_box(1) if cpp_tracker else tracker._current_roi_aspect
+    if cpp_boxes:
+        limits = follower.translation_config()
+        assert limits.max_speed_x == pytest.approx(12.3)
+        assert limits.max_accel_y == pytest.approx(4.5)
+    else:
+        assert float(follower._max_speed_x) == pytest.approx(12.3)
+        assert float(follower._max_accel_y) == pytest.approx(4.5)

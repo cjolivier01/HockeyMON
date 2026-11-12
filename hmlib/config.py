@@ -20,6 +20,7 @@ import yaml
 
 import hmlib
 from hmlib.log import get_logger
+from hmlib.runtime_controls import normalize_control_layer
 
 _HOME_DIR: str = os.environ.get("HOME") or str(Path.home())
 GAME_DIR_BASE: str = os.environ.get("HM_GAME_DIR") or os.path.join(_HOME_DIR, "Videos")
@@ -376,6 +377,7 @@ def recursive_update(original, update):
     If a key in the original dictionary is not present in the update dictionary,
     its value is preserved.
     """
+    update = normalize_control_layer(update)
     for key, value in update.items():
         if isinstance(value, dict) and key in original:
             recursive_update(original[key], value)

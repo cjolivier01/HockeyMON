@@ -108,7 +108,7 @@ def should_launch_all_chapters_with_shared_color_and_audio_settings(game, tmp_pa
     assert "--no-audio" in plan.arguments
     assert plan.config["video_out"]["archive_stitched"]
     assert not plan.config["video_out"]["archive_program"]
-    assert not plan.config["hm_shared_ui"]["telemetry"]
+    assert plan.config["hm_shared_ui"]["telemetry"]
     assert plan.write(tmp_path)[-1] == "--camera-ui=1"
 
 
@@ -1063,3 +1063,22 @@ def should_validate_encoded_rink_maps_after_initial_overrides(game, tmp_path, en
             make_plan(args, initial=initial)
     else:
         assert make_plan(args, initial=initial).config["output"]["rink-map"]["enable"] is False
+
+
+def should_use_canonical_launch_preferences_and_keep_explicit_false(game):
+    args = parser().parse_args(
+        [
+            "-g",
+            game.name,
+            "--options=playback.start_seconds=12.345",
+            "--options=playback.realtime=true",
+            "--options=telemetry.enabled=false",
+            "--options=video_out.tone.exposure=0.6",
+            "--options=hstream_ui.camera_controls.Exposure_x100=20",
+        ]
+    )
+    plan = make_plan(args)
+    assert "--start-time=12.345" in plan.arguments
+    assert args.render_realtime is True
+    assert plan.config["hm_shared_ui"]["telemetry"] is False
+    assert plan.config["rink"]["camera"]["color"]["exposure_ev"] == 0.3
