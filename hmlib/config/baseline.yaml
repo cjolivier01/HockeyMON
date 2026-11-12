@@ -232,8 +232,8 @@ hstream_ui:
     prefer_player_frames: true
     scan_duration_seconds: 60
     scan_interval_ms: 500
-    preview_duration_seconds: 15
-    preview_loop: true
+    preview_duration_seconds: 60
+    preview_loop: false
     share_saved_rotation: true
   # Session-only network destinations selected before playback.
   network_routes: []
