@@ -16,6 +16,11 @@ CONTROL_KEYS = {
     "Lift_Shadow_Black_Point": ("video_out.tone.lift_shadow_black_point", 1, True),
     "Exposure_x100": ("video_out.tone.exposure", 100, False),
 }
+PYTHON_TONE_KEYS = {
+    "shadow_lift": ("shadow_lift_percent", 1, False),
+    "shadow_lift_black_point": ("lift_shadow_black_point", 1, True),
+    "exposure_ev": ("exposure", 2, False),
+}
 _MISSING = object()
 
 
@@ -80,7 +85,7 @@ def _seconds(value):
     return result
 
 
-def normalize_control_layer(layer):
+def normalize_control_layer(layer, *, derive_python=True):
     """Normalize before merging. Explicit canonical keys win within a layer."""
     result = copy.deepcopy(layer)
     if not isinstance(layer, dict):
@@ -94,6 +99,15 @@ def normalize_control_layer(layer):
             _set(result, canonical, convert(value))
         _remove(result, legacy)
 
+    for old, (key, factor, boolean) in PYTHON_TONE_KEYS.items():
+        if _get(layer, "rink.camera.color." + old) is None:
+            _remove(result, "rink.camera.color." + old)
+            continue
+        move(
+            "rink.camera.color." + old,
+            "video_out.tone." + key,
+            _boolean if boolean else lambda value, factor=factor: _number(value) * factor,
+        )
     for key in ("shadow_lift_percent", "lift_shadow_black_point", "exposure"):
         move(f"runtime.amd.output.{key}", f"video_out.tone.{key}", copy.deepcopy)
     for identifier, (path, divisor, boolean) in CONTROL_KEYS.items():
@@ -110,6 +124,15 @@ def normalize_control_layer(layer):
         ("hstream_ui.drivegpt_database.enabled", "telemetry.enabled", _boolean),
     ):
         move(legacy, canonical, convert)
+    # Python consumers retain their existing color API. Derived values always
+    # agree with the canonical layer, including old Python-only presets.
+    for old, (key, factor, boolean) in PYTHON_TONE_KEYS.items():
+        value = _get(result, "video_out.tone." + key)
+        if value is not _MISSING:
+            value = _boolean(value) if boolean else _number(value)
+            _set(result, "video_out.tone." + key, value)
+            if derive_python:
+                _set(result, "rink.camera.color." + old, value if boolean else value / factor)
     return result
 
 
@@ -127,3 +150,40 @@ def apply_motion_overrides(camera, fast, follower):
             for name, value in limits.items():
                 if value > 0:
                     setattr(box, name, value)
+
+
+def resolved_motion_limits(requested, configured):
+    """Resolve live zero overrides against the untouched per-box startup tuning."""
+    result = []
+    for key in ("max_speed_x", "max_speed_y", "max_accel_x", "max_accel_y"):
+        value = _number(requested[key])
+        if value < 0:
+            raise ValueError("Motion override must be nonnegative: " + key)
+        result.append(value if value > 0 else configured[key])
+    return tuple(result)
+
+
+def playback_preferences(config):
+    playback = config["playback"]
+    start = _number(playback["start_seconds"])
+    if start < 0 or start * 1e9 > 2**63 - 1:
+        raise ValueError("playback.start_seconds must fit nonnegative nanoseconds")
+    return start, _boolean(playback["realtime"])
+
+
+def apply_worker_runtime_preferences(config, args):
+    """Resolve direct hmtrack startup after YAML and explicit CLI overlays."""
+    start, _ = playback_preferences(config)
+    explicit = set(args.explicit_arg_names or ())
+    if (
+        not {"start_frame_time", "start_frame"} & explicit
+        and args.start_frame_time is None
+        and not args.start_frame
+    ):
+        args.start_frame_time = str(start)
+    if not _boolean(config["telemetry"]["enabled"]):
+        for plugin in config.get("aspen", {}).get("plugins", {}).values():
+            if str(plugin.get("class", "")).endswith(
+                ("SaveCameraPlugin", "SaveTrackingPlugin", "SaveDetectionsPlugin", "SavePosePlugin")
+            ):
+                plugin["enabled"] = False

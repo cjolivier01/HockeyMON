@@ -1082,3 +1082,28 @@ def should_use_canonical_launch_preferences_and_keep_explicit_false(game):
     assert args.render_realtime is True
     assert plan.config["hm_shared_ui"]["telemetry"] is False
     assert plan.config["rink"]["camera"]["color"]["exposure_ev"] == 0.3
+
+
+def should_resolve_canonical_preferences_after_initial_config_overlays(game, tmp_path):
+    override = tmp_path / "canonical.yaml"
+    override.write_text(
+        "playback: {start_seconds: 42, realtime: true}\n" "video_out: {tone: {exposure: 0.6}}\n"
+    )
+    initial = tmp_path / "initial.json"
+    initial.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": ["--config", str(override)],
+            }
+        )
+    )
+    args = parser().parse_args(["-g", game.name])
+    plan = make_plan(args, initial=initial)
+    assert plan.start_seconds == 42
+    assert "--start-time=42.0" in plan.arguments
+    assert args.render_realtime is True
+    assert plan.config["rink"]["camera"]["color"]["exposure_ev"] == 0.3

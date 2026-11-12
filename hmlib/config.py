@@ -229,6 +229,7 @@ def save_private_config(game_id: str, data: Dict[str, Any], verbose: bool = True
     data_to_save = copy.deepcopy(data) if isinstance(data, dict) else data
     if isinstance(data_to_save, dict):
         normalize_runtime_config(data_to_save)
+        data_to_save = normalize_control_layer(data_to_save, derive_python=False)
     with stitching_lock(game_directory):
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=".config.yaml.", suffix=".tmp", dir=game_directory
@@ -520,6 +521,9 @@ def normalize_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
             set_nested_value(config, new_path, copy.deepcopy(legacy_value))
         _delete_nested_key(config, legacy_path)
     _migrate_game_stitching_config(config)
+    normalized = normalize_control_layer(config)
+    config.clear()
+    config.update(normalized)
     return config
 
 

@@ -467,11 +467,6 @@ def make_plan(
             )
         set_path(option_layer, key, value)
     config = merge(config, option_layer)
-    if args.start_time is None:
-        args.start_time = str(get_path(config, "playback.start_seconds"))
-    args.render_realtime = args.render_realtime or (
-        "RENDER" in sinks and get_path(config, "playback.realtime")
-    )
     _translate_native_settings(
         config, sinks, memory_profile_explicit="runtime.gpu_memory_profile" in options
     )
@@ -606,6 +601,12 @@ def make_plan(
     )
     generated += prepared
     generated = prefer_explicit_launch_arguments(generated, explicit, "track")
+    from hmlib.runtime_controls import playback_preferences
+
+    start, realtime = playback_preferences(config)
+    if args.start_time is None:
+        args.start_time = str(start)
+    args.render_realtime = args.render_realtime or ("RENDER" in sinks and realtime)
     arguments = ["--game-id", args.game_id, *generated, f"--start-time={args.start_time}"]
     if not get_path(config, "pipeline.hmaudio.enable", True):
         arguments.append("--no-audio")
@@ -740,16 +741,11 @@ def _translate_native_settings(
             set_path(config, "hm_ui.run.memory_profile", profiles[memory_profile])
     from hmlib.runtime_controls import normalize_control_layer
 
+    # Compatibility for direct translator callers; normal launch layers have
+    # already resolved canonical and Python color aliases together.
     canonical = normalize_control_layer(config)
-    tone = get_path(canonical, "video_out.tone", {})
-    for name, key, divisor in (
-        ("shadow_lift_percent", "shadow_lift", 1),
-        ("lift_shadow_black_point", "shadow_lift_black_point", 1),
-        ("exposure", "exposure_ev", 2),
-    ):
-        if name in tone:
-            value = bool(tone[name]) if key.endswith("black_point") else float(tone[name]) / divisor
-            set_path(config, f"rink.camera.color.{key}", value)
+    for key, value in get_path(canonical, "rink.camera.color", {}).items():
+        set_path(config, "rink.camera.color." + key, value)
     high_bit = str(
         get_path(config, "pipeline.hmstitcher.properties.high-bit-depth", "auto")
     ).lower()

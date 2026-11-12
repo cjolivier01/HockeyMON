@@ -49,3 +49,74 @@ def should_migrate_each_layer_without_masking_legacy_game_overrides():
 def should_reject_malformed_legacy_playback(value):
     with pytest.raises(ValueError):
         normalize_control_layer({"hstream_ui": {"playback_start_time": value}})
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), True, None])
+def should_reject_invalid_canonical_tone(value):
+    with pytest.raises((ValueError, TypeError)):
+        normalize_control_layer({"video_out": {"tone": {"exposure": value}}})
+
+
+def should_preserve_python_color_overlays_and_canonical_same_layer_precedence():
+    base = normalize_control_layer({"video_out": {"tone": {"exposure": 0.2}}})
+    result = recursive_update(base, {"rink": {"camera": {"color": {"exposure_ev": 0.4}}}})
+    assert result["video_out"]["tone"]["exposure"] == 0.8
+    assert result["rink"]["camera"]["color"]["exposure_ev"] == 0.4
+    result = recursive_update(
+        result,
+        {
+            "video_out": {"tone": {"exposure": 0.6, "lift_shadow_black_point": "false"}},
+            "rink": {"camera": {"color": {"exposure_ev": 0.1}}},
+        },
+    )
+    assert result["rink"]["camera"]["color"]["exposure_ev"] == 0.3
+    assert result["rink"]["camera"]["color"]["shadow_lift_black_point"] is False
+    saved = normalize_control_layer(result, derive_python=False)
+    assert "color" not in saved.get("rink", {}).get("camera", {})
+    assert normalize_control_layer({"rink": {"camera": {"color": {"exposure_ev": None}}}}) == {}
+
+
+@pytest.mark.parametrize(
+    "explicit,start,frame,expected",
+    [
+        ([], None, 0, "42.0"),
+        (["start_frame_time"], "0", 0, "0"),
+        (["start_frame"], None, 0, None),
+        (["start_frame"], None, 30, None),
+    ],
+)
+def should_resolve_direct_worker_start_without_overwriting_explicit_zero(
+    explicit, start, frame, expected
+):
+    from hmlib.runtime_controls import apply_worker_runtime_preferences
+
+    config = {
+        "playback": {"start_seconds": 42, "realtime": False},
+        "telemetry": {"enabled": False},
+        "aspen": {"plugins": {"capture": {"class": "module.SaveTrackingPlugin", "enabled": True}}},
+    }
+    args = SimpleNamespace(explicit_arg_names=explicit, start_frame_time=start, start_frame=frame)
+    apply_worker_runtime_preferences(config, args)
+    assert args.start_frame_time == expected
+    assert config["aspen"]["plugins"]["capture"]["enabled"] is False
+
+
+def should_load_canonical_tone_for_direct_python_consumers_and_save_only_canonical(
+    tmp_path, monkeypatch
+):
+    import hmlib.config as configuration
+
+    game = tmp_path / "test-game"
+    game.mkdir()
+    monkeypatch.setitem(
+        configuration.save_private_config.__globals__, "GAME_DIR_BASE", str(tmp_path)
+    )
+    configuration.save_private_config(
+        "test-game",
+        {"rink": {"camera": {"color": {"exposure_ev": 0.4, "shadow_lift_black_point": False}}}},
+        verbose=False,
+    )
+    saved = yaml.safe_load((game / "config.yaml").read_text())
+    assert saved == {"video_out": {"tone": {"exposure": 0.8, "lift_shadow_black_point": False}}}
+    loaded = configuration.get_game_config_private("test-game")
+    assert loaded["rink"]["camera"]["color"]["exposure_ev"] == 0.4

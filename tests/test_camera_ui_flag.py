@@ -288,6 +288,45 @@ def should_restore_distinct_system_and_open_time_zoom_defaults(monkeypatch, tmp_
         zoom = process._find_control("Tracker Controls", "Zoom_In_Aggressiveness")
         assert zoom.default_value == 80
         assert zoom.system_default_value == 25
+        speed = process._find_control("Tracker Controls", "Max_Speed_X_x10")
+        assert speed.default_value == speed.system_default_value == 0
+        tracker._configured_motion_limits = [
+            {"max_speed_x": 20, "max_speed_y": 15, "max_accel_x": 5, "max_accel_y": 4},
+            {"max_speed_x": 10, "max_speed_y": 7, "max_accel_x": 2, "max_accel_y": 1},
+        ]
+        calls = [{}, {}]
+        boxes = [
+            SimpleNamespace(
+                set_braking=lambda *args: None,
+                set_resizing_shrink_thresholds=follower.set_resizing_shrink_thresholds,
+                set_translation_constraints=lambda *args, index=index: calls[index].update(
+                    limits=args
+                ),
+            )
+            for index in range(2)
+        ]
+        tracker._playtracker = SimpleNamespace(
+            get_live_box=lambda index: boxes[index],
+            set_breakaway_braking=lambda *args: None,
+        )
+        for slider, expected in [(123, [12.3, 12.3]), (0, [20, 10])]:
+            process.apply_control_values(
+                {
+                    "Tracker Controls": {
+                        "Apply_To_Fast_Box": 1,
+                        "Apply_To_Follower_Box": 1,
+                        "Max_Speed_X_x10": slider,
+                    }
+                }
+            )
+            assert tracker._apply_current_ui_control_values()
+            assert [call["limits"][0] for call in calls] == expected
+            assert calls[0]["limits"][1:] == (15, 5, 4)
+            assert calls[1]["limits"][1:] == (7, 2, 1)
+            camera = tracker._game_config["rink"]["camera"]
+            assert camera["motion_overrides"]["max_speed_x"] == slider / 10
+            assert camera["motion_overrides"]["apply_to_fast_box"] is True
+            assert camera["max_speed_ratio_x"] == 1.0
         for default_kind, expected in [("system_default_value", 25), ("default_value", 80)]:
             # Use exactly the defaults the Rust sidecar receives for its reset action.
             reset = {
