@@ -3,7 +3,7 @@
 workflow:
   registry: null
   setup:
-    registry_path: ~/.local/state/hstream-workflows/registry
+    registry_path: ~/hstream-workflows/registry
     runtime_path: /opt/hstream
     server: null
     operation_timeout_seconds: 300
