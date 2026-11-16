@@ -2,6 +2,15 @@
 # separately; an absent registry leaves distributed submission unavailable.
 workflow:
   registry: null
+  setup:
+    registry_path: ~/.local/state/hstream-workflows/registry
+    runtime_path: /opt/hstream
+    server: null
+    operation_timeout_seconds: 300
+    gpu_resources:
+      cpus: 4
+      memory_mb: 16000
+      time_seconds: 1800
   max_parallel: 3
   poll_interval_ms: 1000
   command_timeout_seconds: 30
