@@ -657,6 +657,15 @@ stitching:
   # AKAZE needs no model asset, runs on CPU, and aligns rink footage better than
   # SuperPoint + LightGlue in practice. Neural matchers remain explicit choices.
   control_point_matcher: "akaze-hamming"
+  # Legacy reproduces the previous detector/descriptor admission rules.
+  control_point_selection: "quality-coverage"
+  # Deployment policy for quality-coverage; coverage never relaxes these bounds.
+  match_quality:
+    akaze_response_floor: 0.0001
+    akaze_max_hamming_fraction: 0.25
+    superpoint_min_score: 0.2
+    dedode_min_score: 0.2
+    loftr_min_score: 0.2
   # Native automatic matches: independent geometric checks before spatial capping.
   control_point_filtering:
     epipolar_ransac: false
