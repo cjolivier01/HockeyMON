@@ -7,6 +7,7 @@ workflow:
     runtime_path: /opt/hstream
     server: null
     operation_timeout_seconds: 300
+    gpu_request: gpu:1
     gpu_resources:
       cpus: 4
       memory_mb: 16000
