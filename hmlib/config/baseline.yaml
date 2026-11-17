@@ -289,6 +289,9 @@ pipeline:
       merge-iou: 0.5  # Same-class cross-tile duplicate suppression.
   hmstitcher:
     properties:
+      # Full-panorama surfaces are large. Reuse the configured output buffers
+      # instead of allocating extra surfaces when downstream processing is busy.
+      output-pool-extra-buffers: 0
       # Auto detects source depth; 1 forces P010/FP16, 0 forces standard 8-bit.
       high-bit-depth: auto
   player-analytics:
