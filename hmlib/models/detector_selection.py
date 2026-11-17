@@ -32,9 +32,9 @@ HOCKEYREF_WEIGHTS_SHA256 = "1431d6e713364e14d7f2330485ac9a4d5d607c2982a35267fd8a
 
 HOCKEY_ROLES_WEIGHTS_URL = (
     "https://github.com/cjolivier01/HockeyMONStream/releases/download/pretrained-assets-v1/"
-    "hm_hockey_roles_yolov8_m_1984_736_iter487500-dab4745091a41c31.pth"
+    "hm_hockey_roles_original_yolov8_m_1984_736_iter487500-708b88a48684ecb0.pth"
 )
-HOCKEY_ROLES_WEIGHTS_SHA256 = "dab4745091a41c31c096adb20c5431e307ebc808c0f2c8fcb0fecde6e465d0ab"
+HOCKEY_ROLES_WEIGHTS_SHA256 = "708b88a48684ecb06800205d2b97f11bdd70b3fe3cee09870086c4286655a117"
 PROFILE_GOALIE_LABEL = {"hockey-roles": 1}
 
 #: Class index -> name for each profile's detector head. Everything except
