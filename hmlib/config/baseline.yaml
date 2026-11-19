@@ -364,9 +364,12 @@ video_out:
     bitrate: 6000000
     # Apple asks for an IDR every 2 seconds, and seeking on a phone wants one
     # at least that often. Resolved to whole frames against the source frame
-    # rate. The other archives keep the 30-frame DeepStream default, which at
-    # 59.94 fps is a keyframe twice a second and measured ~21% of the file for
-    # no quality: worth revisiting for them separately.
+    # rate, so it is exact only on a constant-rate recording: a variable-rate
+    # source, or chapters at different rates, report an average and the
+    # interval drifts with them. The run warns when the selected sources
+    # disagree. The other archives keep the 30-frame DeepStream default, which
+    # at 59.94 fps is a keyframe twice a second and measured ~21% of the file
+    # for no quality: worth revisiting for them separately.
     keyframe_interval_seconds: 2.0
     # Scaling filter for the downscale, same vocabulary as
     # program_4k_interpolation above. Reducing 4x per axis from Program is well
