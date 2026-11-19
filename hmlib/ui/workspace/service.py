@@ -620,7 +620,7 @@ class Workspace:
     def catalog(self, game: Path) -> dict:
         archives, recordings, videos = [], [], []
         pattern = re.compile(
-            rf"^{re.escape(game.name)}-(tracking|stitched|program_4k)_output"
+            rf"^{re.escape(game.name)}-(tracking|stitched|program_8k|program_4k|program_mobile)_output"
             r"(?:-full)?(?:-with-audio)?(?:-part\d+)?(?:-(\d+))?\.(mp4|mkv|mov)$",
             re.IGNORECASE,
         )
