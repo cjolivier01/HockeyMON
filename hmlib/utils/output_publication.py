@@ -163,7 +163,8 @@ def publish_artifacts(
             patterns.extend(
                 [
                     re.compile(
-                        r"^(?:.*-)?(?:tracking|stitched)_output(?:-with-audio)?"
+                        r"^(?:.*-)?(?:tracking|stitched|program_8k|program_4k|program_mobile)"
+                        r"_output(?:-with-audio)?"
                         r"(?:-(\d+))?\.(?:mp4|mkv|mov|m4v|avi)(?:\.hstream-pin)?$",
                         re.IGNORECASE,
                     ),
