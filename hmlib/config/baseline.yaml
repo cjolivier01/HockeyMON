@@ -343,6 +343,35 @@ video_out:
   # footprint and cannot overshoot. AMD has no second resize to apply this
   # to and logs that it selects nothing there; its crop averages instead.
   program_4k_interpolation: "algo2"
+  # Independent phone-sized Program copy (ENCODE_PROGRAM_MOBILE_FILE), written
+  # alongside the 8K master and the 4K upload copy rather than instead of them.
+  # It publishes as <game>-program_mobile_output-with-audio-N.mp4 through the
+  # same remux as the others, so it is already HEVC tagged hvc1, AAC-LC and
+  # faststart: what iOS, Android and Safari all decode in hardware.
+  program_mobile:
+    # The copy is fitted inside this box on the GPU, preserving the Program
+    # aspect, and keeps the source frame rate. 1080p is the phone-screen
+    # resolution; raise it to 2560x1440 or 3840x2160 to trade size for a
+    # better look when the file is cast to a television.
+    max_width: 1920
+    max_height: 1080
+    # Bits per second. This route does not inherit the camera's bits-per-pixel
+    # the way the other archives do: a phone copy is a distribution target, not
+    # an acquisition one, and the camera rate is roughly five times what this
+    # content needs. Apple's HLS authoring spec puts 1080p HEVC at 4.5-5.8
+    # Mbit/s; 6 measured at ~3.9 GB for an 84-minute game, against 18.6 GB for
+    # the same game's 4K copy.
+    bitrate: 6000000
+    # Apple asks for an IDR every 2 seconds, and seeking on a phone wants one
+    # at least that often. Resolved to whole frames against the source frame
+    # rate. The other archives keep the 30-frame DeepStream default, which at
+    # 59.94 fps is a keyframe twice a second and measured ~21% of the file for
+    # no quality: worth revisiting for them separately.
+    keyframe_interval_seconds: 2.0
+    # Scaling filter for the downscale, same vocabulary as
+    # program_4k_interpolation above. Reducing 4x per axis from Program is well
+    # past the point where a bilinear footprint covers the source pixels.
+    interpolation: "algo2"
   show_image: false
   show_scaled: null
   show_youtube: false
