@@ -8,10 +8,14 @@ release and is verified on every cache reuse. It now uses original-background
 hockey training with spectator person labels, camera degradation augmentation,
 and CrowdHuman, with classes person (0), goalie (1), and official (2). The
 inference graph is resized to its trained 1984×736 geometry.
-Iteration 487500 has CrowdHuman mAP 0.527, original-background hockey mAP 0.623,
-and official AP 0.585. CrowdHuman mAP was 0.530 for the previous gray-background
-roles model and 0.534 for the person-only epoch-90 model. The old gray hockey
-validation score used different imagery/annotations and is not directly comparable.
+The pinned 2x-referee-frame checkpoint is iteration 412500. It has CrowdHuman
+mAP 0.528, original-background hockey mAP 0.622, and official AP 0.589.
+It repeats hockey samples containing an official twice while keeping the
+Hockey/CrowdHuman mixture balanced. The prior original-background model at
+iteration 487500 had CrowdHuman mAP 0.527, hockey mAP 0.623, and official AP
+0.585. CrowdHuman mAP was 0.530 for the earlier gray-background roles model
+and 0.534 for the person-only epoch-90 model. The old gray hockey validation
+score used different imagery/annotations and is not directly comparable.
 
 The new checkpoint filename includes `hockey_roles_original` and its digest;
 selecting the existing roles option downloads it and changes the compiled-engine
