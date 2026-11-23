@@ -28,6 +28,8 @@ from hmlib.utils.checksum import sha256_file
 if TYPE_CHECKING:
     import torch
 
+    from hmlib.utils.gpu import StreamTensorBase
+
 _REQUIRED_ARTIFACTS = {
     "hm_project.pto",
     "autooptimiser_out.pto",
@@ -71,7 +73,9 @@ class NativeCalibration:
     post_stitch_rotate_degrees: float
     sources: dict[str, list[dict[str, Any]]]
 
-    def source_transform(self, role: str) -> Callable[[torch.Tensor], torch.Tensor] | None:
+    def source_transform(
+        self, role: str
+    ) -> Callable[[torch.Tensor | StreamTensorBase], torch.Tensor] | None:
         cameras = self.config.get("stitching", {}).get("input_cameras", {})
         if not cameras:
             return None
@@ -97,7 +101,10 @@ class NativeCalibration:
             raise ValueError("Conflicting camera flips in one recording")
         horizontal, vertical = axes.pop()
 
-        def flip(frames: torch.Tensor) -> torch.Tensor:
+        from hmlib.utils.gpu import unwrap_tensor
+
+        def flip(decoded: torch.Tensor | StreamTensorBase) -> torch.Tensor:
+            frames = unwrap_tensor(decoded)
             # Decoders deliver either NHWC or NCHW batches to the source loader.
             width = -2 if frames.shape[-1] in (1, 3, 4) else -1
             return frames.flip(

@@ -55,6 +55,8 @@ def snapshot(tmp_path):
 def should_flip_the_selected_camera_before_stitching_and_preview(snapshot, horizontal, vertical):
     import torch
 
+    from hmlib.utils.gpu import wrap_tensor
+
     directory, _ = snapshot
     calibration = native.load_native_calibration(directory)
     calibration.config["game"]["videos"]["left"].insert(0, "earlier.mp4")
@@ -73,7 +75,7 @@ def should_flip_the_selected_camera_before_stitching_and_preview(snapshot, horiz
             (frames, expected),
             (frames.permute(0, 3, 1, 2), expected.permute(0, 3, 1, 2)),
         ]:
-            actual = transform(batch) if transform else batch
+            actual = transform(wrap_tensor(batch)) if transform else batch
             assert actual.device == batch.device
             assert torch.equal(actual, reference)
 
