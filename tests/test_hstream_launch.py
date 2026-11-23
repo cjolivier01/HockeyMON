@@ -324,6 +324,7 @@ def should_export_saved_recipe_and_execute_the_selected_backend(game, tmp_path, 
             "HSTREAM_UI_PARENT_PID": "1",
             "HSTREAM_UI_BACKEND_SESSION": "/stale/session",
             "HM_UI_INITIAL_LAUNCH": "/stale/launch",
+            "HSTREAM_RINK_MASK_PAINT_FLOW": "1",
         },
         capture_output=True,
         text=True,
@@ -333,6 +334,7 @@ def should_export_saved_recipe_and_execute_the_selected_backend(game, tmp_path, 
     assert "HSTREAM_UI_PARENT_PID=" not in result.stdout
     assert "HSTREAM_UI_BACKEND_SESSION=" not in result.stdout
     assert "HM_UI_INITIAL_LAUNCH=" not in result.stdout
+    assert "HSTREAM_RINK_MASK_PAINT_FLOW=" not in result.stdout
     with pytest.raises(FileExistsError):
         export_job(
             parser().parse_args(["--export-job", "--game-dir", str(game), "--output", str(script)])

@@ -864,6 +864,7 @@ def export_job(args: argparse.Namespace) -> Path:
         *(f"#SBATCH {line}" for line in args.sbatch),
         "set -eu",
         "unset HSTREAM_UI_PARENT_PID HSTREAM_UI_BACKEND_SESSION HM_UI_INITIAL_LAUNCH",
+        "unset HSTREAM_RINK_MASK_PAINT_FLOW",
         f"export HM_GAME_DIR={shlex.quote(str(game.parent))}",
     ]
     if output_root := os.environ.get("HM_OUTPUT_WORK_DIR"):
