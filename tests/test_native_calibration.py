@@ -49,6 +49,37 @@ def snapshot(tmp_path):
     return directory, manifest
 
 
+@pytest.mark.parametrize(
+    "horizontal,vertical", [(False, False), (True, False), (False, True), (True, True)]
+)
+def should_flip_the_selected_camera_before_stitching_and_preview(snapshot, horizontal, vertical):
+    import torch
+
+    from hmlib.utils.gpu import wrap_tensor
+
+    directory, _ = snapshot
+    calibration = native.load_native_calibration(directory)
+    calibration.config["game"]["videos"]["left"].insert(0, "earlier.mp4")
+    calibration.config["stitching"] = {
+        "input_cameras": {"left.mp4": {"flip_horizontal": horizontal, "flip_vertical": vertical}}
+    }
+    assert calibration.source_transform("right") is None
+    transform = calibration.source_transform("left")
+    assert (transform is None) == (not horizontal and not vertical)
+    for device in (["cpu", "cuda"] if torch.cuda.is_available() else ["cpu"]):
+        frames = torch.arange(2 * 7 * 8 * 3, device=device).reshape(2, 7, 8, 3)
+        expected = frames.flip(
+            [axis for axis, enabled in [(2, horizontal), (1, vertical)] if enabled]
+        )
+        for batch, reference in [
+            (frames, expected),
+            (frames.permute(0, 3, 1, 2), expected.permute(0, 3, 1, 2)),
+        ]:
+            actual = transform(wrap_tensor(batch)) if transform else batch
+            assert actual.device == batch.device
+            assert torch.equal(actual, reference)
+
+
 def should_preserve_native_fractional_sync_and_source_order(snapshot):
     directory, _ = snapshot
     result = native.load_native_calibration(directory)

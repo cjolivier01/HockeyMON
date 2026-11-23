@@ -341,6 +341,7 @@ class StitchDataset(PersistCacheMixin, torch.utils.data.IterableDataset):
         dataloaders.append(
             MOTLoadVideoWithOrig(
                 path=self._videos["left"]["files"],
+                preproc=self._videos["left"].get("preproc"),
                 game_id=os.path.basename(str(self._dir_name)),
                 max_frames=max_frames,
                 batch_size=self._batch_size,
@@ -360,6 +361,7 @@ class StitchDataset(PersistCacheMixin, torch.utils.data.IterableDataset):
         dataloaders.append(
             MOTLoadVideoWithOrig(
                 path=self._videos["right"]["files"],
+                preproc=self._videos["right"].get("preproc"),
                 game_id=os.path.basename(str(self._dir_name)),
                 max_frames=max_frames,
                 batch_size=self._batch_size,

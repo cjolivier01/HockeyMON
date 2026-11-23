@@ -283,3 +283,8 @@ The synchronized `hstream_ui.int8_preparation` block supplies the shared desktop
 dialog's required sample count and Play-when-ready defaults. The desktop passes
 the resolved count to `hm-cli --prepare-detector`; Python preparation and its
 artifact protocol are unchanged. Browser recording preparation remains native-only.
+
+Program reads each camera’s horizontal and vertical flip flags from the native
+calibration snapshot. Its source loaders flip the decoded batch on the decoder’s
+device before the camera preview, color adjustments and stitcher consume it.
+The recording’s original selection identifies the setting across all chapters.
