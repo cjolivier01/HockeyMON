@@ -617,6 +617,13 @@ def should_preserve_anonymous_games_and_outputs_after_desktop_closes(
         }
 
 
+def should_reject_ice_mask_switch_without_calibration_mode(capsys):
+    from hmlib.cli.hstream_backend import main
+
+    assert main(["--stitching-calibration-with-ice-mask"]) != 0
+    assert "requires --stitching-calibration-only" in capsys.readouterr().out
+
+
 def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_path):
     from hmlib.ui.hstream_initial import calibration_arguments
     from hmlib.ui.hstream_launch import parser
