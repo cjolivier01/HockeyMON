@@ -265,6 +265,7 @@ def prepare_detector(game_id: str, samples: int, detector_model: str) -> dict[st
         "HSTREAM_CALIBRATION_START_STAGE",
         "HSTREAM_CALIBRATION_INVALIDATION_ID",
         "HSTREAM_RINK_LEVELING_FLOW",
+        "HSTREAM_RINK_MASK_PAINT_FLOW",
         "HSTREAM_PROJECTION_CROP_FLOW",
     ):
         environment.pop(key, None)

@@ -617,6 +617,7 @@ def should_preserve_anonymous_games_and_outputs_after_desktop_closes(
 
 def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_path):
     from hmlib.ui.hstream_initial import calibration_arguments
+    from hmlib.ui.hstream_launch import parser
 
     before = (game / "config.yaml").read_bytes()
     envelope = tmp_path / "initial.json"
@@ -648,6 +649,7 @@ def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_
             "-c",
             "native.yaml",
             "--stitching-calibration-only",
+            "--stitching-calibration-with-ice-mask",
             "--options=stitching.blend_mode=laplacian,stitching.sync_method=imu",
             "--options",
             "pipeline.hmaudio.enable=1",
@@ -657,6 +659,12 @@ def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_
         envelope,
         Path("/native/hstream-cli"),
     )
+    assert (
+        parser()
+        .parse_args(["--stitching-calibration-only", "--stitching-calibration-with-ice-mask"])
+        .stitching_calibration_with_ice_mask
+    )
+    assert "--stitching-calibration-with-ice-mask" in command
     assert cwd == tmp_path
     assert command.count("-c") == 1
     assert "--time-limit=5" in command

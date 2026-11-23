@@ -64,6 +64,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--force-reconfigure", action="store_true")
     result.add_argument("--clean-expected-invalidation-id")
     result.add_argument("--stitching-calibration-only", action="store_true")
+    result.add_argument("--stitching-calibration-with-ice-mask", action="store_true")
     result.add_argument("--ui-preview-windows")
     result.add_argument("--ui-preview-active", default="program")
     result.add_argument("--export-job", action="store_true")
