@@ -1492,7 +1492,7 @@ MAP_ARGS_TO_YAML = {
 }
 
 
-def update_from_args(args, arg_name, config, noset_value: any | None = None):
+def update_from_args(args, arg_name, config, noset_value: Any | None = None):
     if not hasattr(args, arg_name):
         return
     set_nested_value(
@@ -2167,10 +2167,20 @@ def _main(args, num_gpu):
                 stitch_videos = {
                     "left": {
                         "files": game_videos["left"],
+                        "preproc": (
+                            native_calibration.source_transform("left")
+                            if native_calibration
+                            else None
+                        ),
                         "frame_offset": lfo,
                     },
                     "right": {
                         "files": game_videos["right"],
+                        "preproc": (
+                            native_calibration.source_transform("right")
+                            if native_calibration
+                            else None
+                        ),
                         "frame_offset": rfo,
                     },
                 }
@@ -2208,6 +2218,7 @@ def _main(args, num_gpu):
                     game_id = os.path.basename(str(dir_name))
                     left_loader = MOTLoadVideoWithOrig(
                         path=game_videos["left"],
+                        preproc=stitch_videos["left"]["preproc"],
                         game_id=game_id,
                         max_frames=args.max_frames,
                         batch_size=args.batch_size,
@@ -2227,6 +2238,7 @@ def _main(args, num_gpu):
                     )
                     right_loader = MOTLoadVideoWithOrig(
                         path=game_videos["right"],
+                        preproc=stitch_videos["right"]["preproc"],
                         game_id=game_id,
                         max_frames=args.max_frames,
                         batch_size=args.batch_size,

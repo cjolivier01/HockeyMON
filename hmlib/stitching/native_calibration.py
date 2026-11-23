@@ -15,14 +15,18 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from hmlib.utils.checksum import sha256_file
+
+if TYPE_CHECKING:
+    import torch
 
 _REQUIRED_ARTIFACTS = {
     "hm_project.pto",
@@ -66,6 +70,41 @@ class NativeCalibration:
     canvas_size: tuple[int, int]
     post_stitch_rotate_degrees: float
     sources: dict[str, list[dict[str, Any]]]
+
+    def source_transform(self, role: str) -> Callable[[torch.Tensor], torch.Tensor] | None:
+        cameras = self.config.get("stitching", {}).get("input_cameras", {})
+        if not cameras:
+            return None
+        # The native camera key is the first originally selected file; a sorted
+        # runtime playlist can put that chapter later in the recording.
+        chapters = {
+            os.path.normpath(self.game_directory / path)
+            for path in self.config["game"]["videos"][role]
+        }
+        axes = set()
+        for source, camera in cameras.items():
+            if os.path.normpath(self.game_directory / source) not in chapters:
+                continue
+            horizontal = camera.get("flip_horizontal", False)
+            vertical = camera.get("flip_vertical", False)
+            if type(horizontal) is not bool or type(vertical) is not bool:
+                raise ValueError("Camera flips must be booleans")
+            if horizontal or vertical:
+                axes.add((horizontal, vertical))
+        if not axes:
+            return None
+        if len(axes) != 1:
+            raise ValueError("Conflicting camera flips in one recording")
+        horizontal, vertical = axes.pop()
+
+        def flip(frames: torch.Tensor) -> torch.Tensor:
+            # Decoders deliver either NHWC or NCHW batches to the source loader.
+            width = -2 if frames.shape[-1] in (1, 3, 4) else -1
+            return frames.flip(
+                [axis for axis, enabled in ((width, horizontal), (width - 1, vertical)) if enabled]
+            )
+
+        return flip
 
     def verify_sources(self, game_directory: Path, videos: dict[str, list[str]]) -> None:
         if Path(game_directory).resolve() != self.game_directory:
