@@ -227,6 +227,8 @@ hstream_ui:
   # Open native review dialogs automatically when their workflow needs input.
   show_crop_dialog: true
   show_leveling_dialog: true
+  # Review each freshly detected ice mask before it is used for playback.
+  paint_rink_mask: false
   show_scoreboard_dialog: true
   # Next-playback preview preferences; encoded outputs have separate rink-map settings.
   preview_rink_map:
@@ -268,7 +270,7 @@ hstream_ui:
       label: Distilled (YOLOv8-s, 1408x544)
       config_prefix: config_infer_yolov8s_hockey
     - id: hockey-roles
-      label: Hockey roles — mixed iter 487500 (YOLOv8-m, 1984x736)
+      label: Hockey roles — mixed refs 2x iter 412500 (YOLOv8-m, 1984x736)
       config_prefix: config_infer_yolov8m_hockey_roles
 
 # Native player pose cadence and display defaults. Enabling/drawing pose remains

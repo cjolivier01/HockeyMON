@@ -324,6 +324,7 @@ def should_export_saved_recipe_and_execute_the_selected_backend(game, tmp_path, 
             "HSTREAM_UI_PARENT_PID": "1",
             "HSTREAM_UI_BACKEND_SESSION": "/stale/session",
             "HM_UI_INITIAL_LAUNCH": "/stale/launch",
+            "HSTREAM_RINK_MASK_PAINT_FLOW": "1",
         },
         capture_output=True,
         text=True,
@@ -333,6 +334,7 @@ def should_export_saved_recipe_and_execute_the_selected_backend(game, tmp_path, 
     assert "HSTREAM_UI_PARENT_PID=" not in result.stdout
     assert "HSTREAM_UI_BACKEND_SESSION=" not in result.stdout
     assert "HM_UI_INITIAL_LAUNCH=" not in result.stdout
+    assert "HSTREAM_RINK_MASK_PAINT_FLOW=" not in result.stdout
     with pytest.raises(FileExistsError):
         export_job(
             parser().parse_args(["--export-job", "--game-dir", str(game), "--output", str(script)])
@@ -615,8 +617,16 @@ def should_preserve_anonymous_games_and_outputs_after_desktop_closes(
         }
 
 
+def should_reject_ice_mask_switch_without_calibration_mode(capsys):
+    from hmlib.cli.hstream_backend import main
+
+    assert main(["--stitching-calibration-with-ice-mask"]) != 0
+    assert "requires --stitching-calibration-only" in capsys.readouterr().out
+
+
 def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_path):
     from hmlib.ui.hstream_initial import calibration_arguments
+    from hmlib.ui.hstream_launch import parser
 
     before = (game / "config.yaml").read_bytes()
     envelope = tmp_path / "initial.json"
@@ -648,6 +658,7 @@ def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_
             "-c",
             "native.yaml",
             "--stitching-calibration-only",
+            "--stitching-calibration-with-ice-mask",
             "--options=stitching.blend_mode=laplacian,stitching.sync_method=imu",
             "--options",
             "pipeline.hmaudio.enable=1",
@@ -657,6 +668,12 @@ def should_translate_initial_calibration_without_rewriting_saved_game(game, tmp_
         envelope,
         Path("/native/hstream-cli"),
     )
+    assert (
+        parser()
+        .parse_args(["--stitching-calibration-only", "--stitching-calibration-with-ice-mask"])
+        .stitching_calibration_with_ice_mask
+    )
+    assert "--stitching-calibration-with-ice-mask" in command
     assert cwd == tmp_path
     assert command.count("-c") == 1
     assert "--time-limit=5" in command

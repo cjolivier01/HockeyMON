@@ -86,6 +86,7 @@ def should_prepare_from_native_recording_samples_and_publish_validated_python_ar
     config = {"hm_ui": {"run": {"detector": "hockeyref", "precision": "onnx"}}}
     monkeypatch.setenv("HM_GAME_DIR", str(tmp_path))
     monkeypatch.setenv("HM_UI_SESSION_DIR", "/must/not/inherit")
+    monkeypatch.setenv("HSTREAM_RINK_MASK_PAINT_FLOW", "1")
     monkeypatch.setenv("HSTREAM_NATIVE_RUNNER", "/bin/true")
     monkeypatch.setattr(detector, "_native_config", lambda runner: graph)
     monkeypatch.setattr(detector, "_configuration", lambda game, profile: (config, graph, (32, 16)))
@@ -95,6 +96,7 @@ def should_prepare_from_native_recording_samples_and_publish_validated_python_ar
     def preparation_step(command, environment, *, cwd=None):
         calls.append(command)
         assert "HM_UI_SESSION_DIR" not in environment
+        assert "HSTREAM_RINK_MASK_PAINT_FLOW" not in environment
         assert environment["PYTHONPATH"].split(os.pathsep)[0] == str(
             Path(detector.__file__).resolve().parents[2]
         )

@@ -64,6 +64,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--force-reconfigure", action="store_true")
     result.add_argument("--clean-expected-invalidation-id")
     result.add_argument("--stitching-calibration-only", action="store_true")
+    result.add_argument("--stitching-calibration-with-ice-mask", action="store_true")
     result.add_argument("--ui-preview-windows")
     result.add_argument("--ui-preview-active", default="program")
     result.add_argument("--export-job", action="store_true")
@@ -863,6 +864,7 @@ def export_job(args: argparse.Namespace) -> Path:
         *(f"#SBATCH {line}" for line in args.sbatch),
         "set -eu",
         "unset HSTREAM_UI_PARENT_PID HSTREAM_UI_BACKEND_SESSION HM_UI_INITIAL_LAUNCH",
+        "unset HSTREAM_RINK_MASK_PAINT_FLOW",
         f"export HM_GAME_DIR={shlex.quote(str(game.parent))}",
     ]
     if output_root := os.environ.get("HM_OUTPUT_WORK_DIR"):

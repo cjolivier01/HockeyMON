@@ -918,6 +918,8 @@ def main(arguments: list[str] | None = None) -> int:
 
     args = parser().parse_args(arguments)
     try:
+        if args.stitching_calibration_with_ice_mask and not args.stitching_calibration_only:
+            raise ValueError("--stitching-calibration-with-ice-mask requires --stitching-calibration-only")
         if args.resolve_initial_sources:
             initial = os.environ.get("HM_UI_INITIAL_LAUNCH")
             if not initial:
