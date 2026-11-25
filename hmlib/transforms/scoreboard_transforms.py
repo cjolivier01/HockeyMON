@@ -6,7 +6,13 @@ from typing import Any
 import torch
 from mmengine.registry import TRANSFORMS
 
-from hmlib.config import get_clip_box, get_config, get_nested_value
+from hmlib.config import (
+    SCOREBOARD_FLIP_KEYS,
+    get_clip_box,
+    get_config,
+    get_nested_value,
+    scoreboard_flip,
+)
 from hmlib.scoreboard.scoreboard import Scoreboard
 from hmlib.scoreboard.selector import configure_scoreboard
 from hmlib.utils.image import image_height, image_width, make_channels_last
@@ -69,6 +75,7 @@ class HmConfigureScoreboard:
             self._allow_interactive_setup = bool(allow_interactive_setup)
         self._scoreboard_config = None
         self._configured = False
+        self._saved_flips = {}
         self._polygon_revision = None
         self._shared_canvas_saved = False
 
@@ -99,9 +106,12 @@ class HmConfigureScoreboard:
                 return results
         if self._game_id and not self._configured:
             self._configured = True
-            game_config = (
-                runtime_config if runtime_config is not None else get_config(game_id=self._game_id)
-            )
+            if runtime_config is None:
+                game_config = get_config(game_id=self._game_id)
+                saved = get_nested_value(game_config, "rink.scoreboard", {}) or {}
+                self._saved_flips = {k: saved[k] for k in SCOREBOARD_FLIP_KEYS if k in saved}
+            else:
+                game_config = runtime_config
             current_scoreboard = get_nested_value(
                 game_config, "rink.scoreboard.perspective_polygon"
             )
@@ -141,6 +151,11 @@ class HmConfigureScoreboard:
                         game_config, "rink.scoreboard.projected_height"
                     ),
                 }
+        if runtime_config is None and self._saved_flips:
+            results["scoreboard_preferences"] = {
+                **self._saved_flips,
+                **results.get("scoreboard_preferences", {}),
+            }
         if self._scoreboard_config:
             results["scoreboard_cfg"] = self._scoreboard_config
         else:
@@ -242,6 +257,11 @@ class HmRenderScoreboard:
         self._scoreboard_height = int(scoreboard_img.shape[1])
         self._scoreboard_width = int(scoreboard_img.shape[2])
         preferences = results.get("scoreboard_preferences", {})
+        flip_dims = [
+            axis
+            for key, axis in (("flip_horizontal", 2), ("flip_vertical", 1))
+            if scoreboard_flip(key, preferences.get(key))
+        ]
         position = preferences.get("position", "upper-left")
         if position not in {"upper-left", "upper-center", "upper-right"}:
             raise ValueError(f"Unknown scoreboard position: {position}")
@@ -278,6 +298,6 @@ class HmRenderScoreboard:
                     if position == "upper-left"
                     else (img.shape[2] - sw) // (2 if position == "upper-center" else 1)
                 )
-                img[:, :sh, x : x + sw, :] = board
+                img[:, :sh, x : x + sw, :] = board.flip(flip_dims) if flip_dims else board
                 results[img_label] = img
         return results

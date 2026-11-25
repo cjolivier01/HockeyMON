@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hmlib.config import scoreboard_flip
 from hmlib.ui.analytics_graph import apply_analytics_preferences, graph_paths, selected_analysis
 from hmlib.ui.calibration_workspace import CalibrationWorkspace, _get
 
@@ -153,6 +154,8 @@ RUN_FIELDS = [
         choices=["upper-left", "upper-center", "upper-right"],
     ),
     _field("rink.scoreboard.enabled", "Show scoreboard", "bool", True),
+    _field("rink.scoreboard.flip_horizontal", "Flip scoreboard horizontally", "bool"),
+    _field("rink.scoreboard.flip_vertical", "Flip scoreboard vertically", "bool"),
     _field("rink.scoreboard.scoreboard_scale", "Scoreboard scale", "number", 1, min=0.1, max=4),
     _field(
         "rink.scoreboard.resize_filter",
@@ -327,6 +330,8 @@ class OperatorWorkspace(CalibrationWorkspace):
             value = _get(config, spec["key"], spec["default"])
             if value is None:
                 value = spec["default"]
+            if spec["key"] in ("rink.scoreboard.flip_horizontal", "rink.scoreboard.flip_vertical"):
+                value = scoreboard_flip(spec["key"].rsplit(".", 1)[1], value)
             if spec["kind"] == "text":
                 value = "" if value is None else str(value)
             values[spec["key"]] = value

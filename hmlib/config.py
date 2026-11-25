@@ -204,6 +204,52 @@ def baseline_config(root_dir: str) -> Dict[str, Any]:
     return load_config_file(root_dir=root_dir, config_type=".", config_name="baseline")
 
 
+SCOREBOARD_FLIP_KEYS = ("flip_horizontal", "flip_vertical")
+
+
+@lru_cache(maxsize=4)
+def _scoreboard_baseline(config_dir: str) -> dict:
+    return load_config_file_yaml(os.path.join(config_dir, "baseline.yaml"))["rink"]["scoreboard"]
+
+
+def scoreboard_flip(key: str, value: Any) -> bool:
+    """Read a scoreboard axis with the same boolean and reset semantics as yaml-cpp."""
+    if value is None:
+        config_dir = os.environ.get("HM_CONFIG_ROOT") or os.path.join(ROOT_DIR, "config")
+        value = _scoreboard_baseline(config_dir)[key]
+    return _scoreboard_bool(key, value)
+
+
+def _scoreboard_bool(key: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and (value.islower() or value.isupper() or value.istitle()):
+        if value.lower() in {"y", "yes", "true", "on"}:
+            return True
+        if value.lower() in {"n", "no", "false", "off"}:
+            return False
+    raise ValueError(f"rink.scoreboard.{key} requires a boolean, got {value!r}")
+
+
+def resolve_scoreboard_flip_resets(
+    config: dict, root_dir: str | None, defaults: dict | None = None
+) -> None:
+    """Resolve explicit nulls while the root that supplied the baseline is known."""
+    settings = get_nested_value(config, "rink.scoreboard")
+    if not isinstance(settings, dict):
+        return
+    resets = [key for key in SCOREBOARD_FLIP_KEYS if key in settings and settings[key] is None]
+    if resets:
+        if defaults is None:
+            # A shared worker can replay original Python overlays after launch.yaml.
+            # Their nulls still refer to the baseline selected by the Program pane.
+            defaults = get_nested_value(config, "hm_shared_ui.scoreboard_flip_defaults")
+        if defaults is None:
+            defaults = baseline_config(root_dir)["rink"]["scoreboard"]
+        for key in resets:
+            settings[key] = _scoreboard_bool(key, defaults[key])
+
+
 def get_game_config_private(
     game_id: str,
     merge_into_config: Optional[Dict[str, Any]] = None,
@@ -278,6 +324,7 @@ def get_config(
     camera: Optional[str] = None,
     ignore_private_config: bool = False,
     resolve_globals: bool = True,
+    scoreboard_defaults: dict | None = None,
 ):
     """Return a consolidated configuration from baseline + rink + camera + game.
 
@@ -287,6 +334,11 @@ def get_config(
     (``$HOME/Videos/<game_id>/config.yaml``) is not merged.
     """
     consolidated_config: Dict[str, Any] = baseline_config(root_dir=root_dir)
+    if scoreboard_defaults is not None:
+        board = consolidated_config.setdefault("rink", {}).setdefault("scoreboard", {})
+        for key in SCOREBOARD_FLIP_KEYS:
+            board[key] = _scoreboard_bool(key, scoreboard_defaults[key])
+    baseline_board = dict(get_nested_value(consolidated_config, "rink.scoreboard", {}) or {})
     game_config: Dict[str, Any] = dict()
     rink_config: Dict[str, Any] = dict()
     camera_config: Dict[str, Any] = dict()
@@ -320,6 +372,7 @@ def get_config(
     consolidated_config = normalize_runtime_config(consolidated_config)
     if resolve_globals:
         consolidated_config = resolve_global_refs(consolidated_config)
+    resolve_scoreboard_flip_resets(consolidated_config, root_dir, baseline_board)
     return consolidated_config
 
 

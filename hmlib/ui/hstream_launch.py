@@ -346,7 +346,7 @@ def _initial_output_routes(settings: dict, sinks: set[str]) -> None:
 def make_plan(
     args: argparse.Namespace, *, initial: Path | None = None, validate_models: bool = True
 ) -> LaunchPlan:
-    from hmlib.config import get_config
+    from hmlib.config import SCOREBOARD_FLIP_KEYS, get_config, resolve_scoreboard_flip_resets
     from hmlib.ui.analytics_graph import graph_paths, selected_analysis
     from hmlib.ui.runtime_setup import (
         apply_engine_preferences,
@@ -391,9 +391,22 @@ def make_plan(
 
         python_parser = make_parser()
         initial_args = python_parser.parse_args(explicit)
+    root_dir = str((cwd / initial_args.root_dir).resolve()) if initial_args else None
+    # A shared Program launch uses the same orientation defaults as its Qt/web
+    # controls. An explicitly requested Python root owns its launch baseline.
+    python_root_selected = any(
+        arg == "--root-dir" or arg.startswith("--root-dir=") for arg in explicit
+    )
+    native_root = os.environ.get("HM_CONFIG_ROOT")
+    scoreboard_defaults = None
+    if native_root and not python_root_selected:
+        scoreboard_defaults = read_mapping(Path(native_root) / "baseline.yaml")["rink"][
+            "scoreboard"
+        ]
     config = get_config(
         game_id=args.game_id,
-        root_dir=str((cwd / initial_args.root_dir).resolve()) if initial_args else None,
+        root_dir=root_dir,
+        scoreboard_defaults=scoreboard_defaults,
         rink=initial_args.rink if initial_args else None,
         camera=initial_args.camera_name if initial_args else None,
         ignore_private_config=bool(initial_args.ignore_private_config) if initial_args else False,
@@ -698,6 +711,13 @@ def make_plan(
     if set(sources) == {"left", "right"}:
         arguments.append("--aspen-stitching")
     arguments = prefer_explicit_launch_arguments(arguments, explicit, "track")
+    if scoreboard_defaults is not None:
+        config["hm_shared_ui"]["scoreboard_flip_defaults"] = {
+            key: scoreboard_defaults[key] for key in SCOREBOARD_FLIP_KEYS
+        }
+    else:
+        config["hm_shared_ui"].pop("scoreboard_flip_defaults", None)
+    resolve_scoreboard_flip_resets(config, root_dir, scoreboard_defaults)
     return LaunchPlan(
         game,
         config,
