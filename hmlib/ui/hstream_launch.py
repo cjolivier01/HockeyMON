@@ -392,9 +392,21 @@ def make_plan(
         python_parser = make_parser()
         initial_args = python_parser.parse_args(explicit)
     root_dir = str((cwd / initial_args.root_dir).resolve()) if initial_args else None
+    # A shared Program launch uses the same orientation defaults as its Qt/web
+    # controls. An explicitly requested Python root owns its launch baseline.
+    python_root_selected = any(
+        arg == "--root-dir" or arg.startswith("--root-dir=") for arg in explicit
+    )
+    native_root = os.environ.get("HM_CONFIG_ROOT")
+    scoreboard_defaults = None
+    if native_root and not python_root_selected:
+        scoreboard_defaults = read_mapping(Path(native_root) / "baseline.yaml")["rink"][
+            "scoreboard"
+        ]
     config = get_config(
         game_id=args.game_id,
         root_dir=root_dir,
+        scoreboard_defaults=scoreboard_defaults,
         rink=initial_args.rink if initial_args else None,
         camera=initial_args.camera_name if initial_args else None,
         ignore_private_config=bool(initial_args.ignore_private_config) if initial_args else False,
@@ -699,7 +711,7 @@ def make_plan(
     if set(sources) == {"left", "right"}:
         arguments.append("--aspen-stitching")
     arguments = prefer_explicit_launch_arguments(arguments, explicit, "track")
-    resolve_scoreboard_flip_resets(config, root_dir)
+    resolve_scoreboard_flip_resets(config, root_dir, scoreboard_defaults)
     return LaunchPlan(
         game,
         config,

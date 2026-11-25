@@ -6,7 +6,13 @@ from typing import Any
 import torch
 from mmengine.registry import TRANSFORMS
 
-from hmlib.config import get_clip_box, get_config, get_nested_value, scoreboard_flip
+from hmlib.config import (
+    SCOREBOARD_FLIP_KEYS,
+    get_clip_box,
+    get_config,
+    get_nested_value,
+    scoreboard_flip,
+)
 from hmlib.scoreboard.scoreboard import Scoreboard
 from hmlib.scoreboard.selector import configure_scoreboard
 from hmlib.utils.image import image_height, image_width, make_channels_last
@@ -103,9 +109,7 @@ class HmConfigureScoreboard:
             if runtime_config is None:
                 game_config = get_config(game_id=self._game_id)
                 saved = get_nested_value(game_config, "rink.scoreboard", {}) or {}
-                self._saved_flips = {
-                    k: saved[k] for k in ("flip_horizontal", "flip_vertical") if k in saved
-                }
+                self._saved_flips = {k: saved[k] for k in SCOREBOARD_FLIP_KEYS if k in saved}
             else:
                 game_config = runtime_config
             current_scoreboard = get_nested_value(

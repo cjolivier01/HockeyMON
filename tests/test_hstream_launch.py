@@ -33,6 +33,38 @@ def game(tmp_path, monkeypatch):
     return selected
 
 
+def should_use_shared_scoreboard_baseline_for_absent_flags_and_game_or_play_resets(
+    game, tmp_path, monkeypatch
+):
+    import hmlib.config as configuration
+
+    native_root = tmp_path / "native"
+    native_root.mkdir()
+    baseline = configuration.baseline_config(root_dir=None)
+    baseline["rink"]["scoreboard"].update(flip_horizontal=True, flip_vertical=True)
+    (native_root / "baseline.yaml").write_text(yaml.safe_dump(baseline))
+    monkeypatch.setenv("HM_CONFIG_ROOT", str(native_root))
+    config_path = game / "config.yaml"
+    config = yaml.safe_load(config_path.read_text())
+    board = config.setdefault("rink", {}).setdefault("scoreboard", {})
+    args = ["-g", game.name, "--enable-sinks=FAKE"]
+
+    def flips(options):
+        settings = make_plan(parser().parse_args(args + options)).config["rink"]["scoreboard"]
+        return settings["flip_horizontal"], settings["flip_vertical"]
+
+    assert flips([]) == (True, True)
+    board.update(flip_horizontal=None, flip_vertical=False)
+    config_path.write_text(yaml.safe_dump(config))
+    assert flips([]) == (True, False)
+    assert flips(
+        [
+            "--options=rink.scoreboard.flip_horizontal=false",
+            "--options=rink.scoreboard.flip_vertical=null",
+        ]
+    ) == (False, True)
+
+
 def should_preserve_yaml_commas_and_grouped_native_options():
     assert option_assignments('camera.x=[1,2],camera.y="one,two",camera.z={a: 1, b: 2}') == [
         "camera.x=[1,2]",
@@ -154,16 +186,22 @@ def should_preserve_initial_source_config_clock_and_cli_precedence(game, tmp_pat
     assert "--start-time=5.000000000" in sought
 
 
-def should_resolve_initial_config_root_and_private_opt_out(game, tmp_path):
+def should_resolve_initial_config_root_and_private_opt_out(game, tmp_path, monkeypatch):
     import hmlib.config as configuration
 
     # A private-only source and camera setting must not survive opt-out through
     # the adapter's generated --config, even when desktop user defaults exist.
     config_root = tmp_path / "custom-config"
     (config_root / "config" / "games").mkdir(parents=True)
-    (config_root / "config" / "baseline.yaml").write_text(
-        yaml.safe_dump(configuration.baseline_config(root_dir=None))
+    python_baseline = configuration.baseline_config(root_dir=None)
+    python_baseline["rink"]["scoreboard"]["flip_horizontal"] = True
+    (config_root / "config" / "baseline.yaml").write_text(yaml.safe_dump(python_baseline))
+    native_root = tmp_path / "native"
+    native_root.mkdir()
+    (native_root / "baseline.yaml").write_text(
+        "rink: {scoreboard: {flip_horizontal: false, flip_vertical: false}}"
     )
+    monkeypatch.setenv("HM_CONFIG_ROOT", str(native_root))
     (config_root / "config" / "games" / f"{game.name}.yaml").write_text(
         yaml.safe_dump({"game": {"videos": {"source": ["two.mp4"]}}, "camera": {"tag": "public"}})
     )
@@ -186,6 +224,7 @@ def should_resolve_initial_config_root_and_private_opt_out(game, tmp_path):
         )
     )
     plan = make_plan(parser().parse_args(["-g", game.name]), initial=initial)
+    assert plan.config["rink"]["scoreboard"]["flip_horizontal"] is True
     assert plan.sources == {"source": [game / "two.mp4"]}
     assert plan.config["camera"]["tag"] == "public"
     assert plan.config["rink"]["camera"]["color"]["exposure_ev"] == 0.25
