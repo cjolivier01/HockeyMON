@@ -29,6 +29,7 @@ from hmlib.config import (
     load_config_file,
     normalize_runtime_config,
     resolve_global_refs,
+    resolve_scoreboard_flip_resets,
     set_nested_value,
 )
 from hmlib.hm_opts import _get_baseline_runtime_config, copy_opts, hm_opts, preferred_arg
@@ -1405,6 +1406,7 @@ def _run_experiment(
             explicit_arg_names=variant_explicit_arg_names,
         )
         variant_config = resolve_global_refs(variant_config)
+        resolve_scoreboard_flip_resets(variant_config, variant_args.root_dir)
 
         variant_args.output_label = safe_label
         variant_config["initial_args"] = vars(variant_args)
@@ -2889,6 +2891,7 @@ def main() -> int | None:
 
     restore_worker_native_scoreboard(args.game_config, args.game_id)
     game_config = resolve_global_refs(args.game_config)
+    resolve_scoreboard_flip_resets(game_config, args.root_dir)
     args.game_config = game_config
 
     if args.experiment_config:

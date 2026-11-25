@@ -346,7 +346,7 @@ def _initial_output_routes(settings: dict, sinks: set[str]) -> None:
 def make_plan(
     args: argparse.Namespace, *, initial: Path | None = None, validate_models: bool = True
 ) -> LaunchPlan:
-    from hmlib.config import get_config
+    from hmlib.config import get_config, resolve_scoreboard_flip_resets
     from hmlib.ui.analytics_graph import graph_paths, selected_analysis
     from hmlib.ui.runtime_setup import (
         apply_engine_preferences,
@@ -391,9 +391,10 @@ def make_plan(
 
         python_parser = make_parser()
         initial_args = python_parser.parse_args(explicit)
+    root_dir = str((cwd / initial_args.root_dir).resolve()) if initial_args else None
     config = get_config(
         game_id=args.game_id,
-        root_dir=str((cwd / initial_args.root_dir).resolve()) if initial_args else None,
+        root_dir=root_dir,
         rink=initial_args.rink if initial_args else None,
         camera=initial_args.camera_name if initial_args else None,
         ignore_private_config=bool(initial_args.ignore_private_config) if initial_args else False,
@@ -698,6 +699,7 @@ def make_plan(
     if set(sources) == {"left", "right"}:
         arguments.append("--aspen-stitching")
     arguments = prefer_explicit_launch_arguments(arguments, explicit, "track")
+    resolve_scoreboard_flip_resets(config, root_dir)
     return LaunchPlan(
         game,
         config,

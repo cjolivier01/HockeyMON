@@ -214,6 +214,10 @@ def scoreboard_flip(key: str, value: Any) -> bool:
     if value is None:
         config_dir = os.environ.get("HM_CONFIG_ROOT") or os.path.join(ROOT_DIR, "config")
         value = _scoreboard_baseline(config_dir)[key]
+    return _scoreboard_bool(key, value)
+
+
+def _scoreboard_bool(key: str, value: Any) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str) and (value.islower() or value.isupper() or value.istitle()):
@@ -222,6 +226,22 @@ def scoreboard_flip(key: str, value: Any) -> bool:
         if value.lower() in {"n", "no", "false", "off"}:
             return False
     raise ValueError(f"rink.scoreboard.{key} requires a boolean, got {value!r}")
+
+
+def resolve_scoreboard_flip_resets(config: dict, root_dir: str | None) -> None:
+    """Resolve explicit nulls while the root that supplied the baseline is known."""
+    settings = get_nested_value(config, "rink.scoreboard")
+    if not isinstance(settings, dict):
+        return
+    resets = [
+        key
+        for key in ("flip_horizontal", "flip_vertical")
+        if key in settings and settings[key] is None
+    ]
+    if resets:
+        defaults = baseline_config(root_dir)["rink"]["scoreboard"]
+        for key in resets:
+            settings[key] = _scoreboard_bool(key, defaults[key])
 
 
 def get_game_config_private(
@@ -340,6 +360,7 @@ def get_config(
     consolidated_config = normalize_runtime_config(consolidated_config)
     if resolve_globals:
         consolidated_config = resolve_global_refs(consolidated_config)
+    resolve_scoreboard_flip_resets(consolidated_config, root_dir)
     return consolidated_config
 
 

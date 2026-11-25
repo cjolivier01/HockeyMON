@@ -117,6 +117,25 @@ def should_parse_scoreboard_flip_scalars_and_restore_the_configured_baseline(tmp
             draw(False, invalid)
 
 
+def should_reset_game_and_launch_overrides_to_the_selected_root(tmp_path, monkeypatch):
+    from hmlib.config import get_config, recursive_update, resolve_scoreboard_flip_resets
+
+    monkeypatch.delenv("HM_CONFIG_ROOT", raising=False)
+    config_dir = tmp_path / "config"
+    (config_dir / "games").mkdir(parents=True)
+    (config_dir / "baseline.yaml").write_text(
+        "rink: {scoreboard: {flip_horizontal: true, flip_vertical: true}}"
+    )
+    (config_dir / "games" / "fixture.yaml").write_text(
+        "rink: {scoreboard: {flip_horizontal: null, flip_vertical: false}}"
+    )
+    config = get_config(root_dir=str(tmp_path), game_id="fixture", ignore_private_config=True)
+    assert config["rink"]["scoreboard"] == {"flip_horizontal": True, "flip_vertical": False}
+    recursive_update(config, {"rink": {"scoreboard": {"flip_vertical": None}}})
+    resolve_scoreboard_flip_resets(config, str(tmp_path))
+    assert config["rink"]["scoreboard"]["flip_vertical"] is True
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Scoreboard warp requires CUDA")
 def should_resize_scoreboard_live_without_losing_source_dimensions():
     capture = HmCaptureScoreboard()
@@ -164,6 +183,8 @@ def should_translate_all_saved_scoreboard_corners_without_mutating_config(monkey
         "rink": {
             "scoreboard": {
                 "perspective_polygon": points,
+                "scoreboard_scale": 1.0,
+                "resize_filter": "bilinear",
                 "projected_width": 20,
                 "projected_height": 20,
                 "flip_horizontal": True,
@@ -182,6 +203,17 @@ def should_translate_all_saved_scoreboard_corners_without_mutating_config(monkey
         result = configure({"game_config": config} if in_frame else {})
         assert result["scoreboard_preferences"]["flip_horizontal"] is True
         assert result["scoreboard_preferences"]["flip_vertical"] is False
+        if not in_frame:
+            assert set(result["scoreboard_preferences"]) == {"flip_horizontal", "flip_vertical"}
+    if not in_frame:
+        result = configure(
+            {"scoreboard_preferences": {"scoreboard_scale": 1.7, "flip_horizontal": False}}
+        )
+        assert result["scoreboard_preferences"] == {
+            "scoreboard_scale": 1.7,
+            "flip_horizontal": False,
+            "flip_vertical": False,
+        }
     assert reads == ([] if in_frame else ["fixture"])
     assert result["scoreboard_cfg"]["scoreboard_points"] == [[10, 10], [30, 10], [30, 30], [10, 30]]
     assert points == [[20, 30], [40, 30], [40, 50], [20, 50]]

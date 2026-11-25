@@ -69,7 +69,7 @@ class HmConfigureScoreboard:
             self._allow_interactive_setup = bool(allow_interactive_setup)
         self._scoreboard_config = None
         self._configured = False
-        self._saved_game_config = None
+        self._saved_flips = {}
         self._polygon_revision = None
         self._shared_canvas_saved = False
 
@@ -87,10 +87,6 @@ class HmConfigureScoreboard:
             publish_source_canvas(self._game_id, results["game_config"], results["img"])
             self._shared_canvas_saved = True
         runtime_config = results.get("game_config")
-        if runtime_config is None and self._game_id:
-            if self._saved_game_config is None:
-                self._saved_game_config = get_config(game_id=self._game_id)
-            runtime_config = self._saved_game_config
         if runtime_config is not None:
             preferences = get_nested_value(runtime_config, "rink.scoreboard", {}) or {}
             results["scoreboard_preferences"] = preferences
@@ -104,7 +100,14 @@ class HmConfigureScoreboard:
                 return results
         if self._game_id and not self._configured:
             self._configured = True
-            game_config = runtime_config
+            if runtime_config is None:
+                game_config = get_config(game_id=self._game_id)
+                saved = get_nested_value(game_config, "rink.scoreboard", {}) or {}
+                self._saved_flips = {
+                    k: saved[k] for k in ("flip_horizontal", "flip_vertical") if k in saved
+                }
+            else:
+                game_config = runtime_config
             current_scoreboard = get_nested_value(
                 game_config, "rink.scoreboard.perspective_polygon"
             )
@@ -144,6 +147,11 @@ class HmConfigureScoreboard:
                         game_config, "rink.scoreboard.projected_height"
                     ),
                 }
+        if runtime_config is None and self._saved_flips:
+            results["scoreboard_preferences"] = {
+                **self._saved_flips,
+                **results.get("scoreboard_preferences", {}),
+            }
         if self._scoreboard_config:
             results["scoreboard_cfg"] = self._scoreboard_config
         else:
