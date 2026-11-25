@@ -912,6 +912,8 @@ rink:
     projected_height: "%20"
     projected_width: "%10"
     scoreboard_scale: 1.0
+    flip_horizontal: false
+    flip_vertical: false
     # Resize the extracted scoreboard before the bilinear perspective warp.
     resize_filter: bilinear
     # GPU unsharp mask after perspective correction; 0 disables it. Values above 2 can strongly amplify artifacts.

@@ -64,14 +64,29 @@ def should_place_preview_map_without_touching_recording(position, where):
 @pytest.mark.parametrize(
     "position,offset", [("upper-left", 0), ("upper-center", 8), ("upper-right", 16)]
 )
-def should_render_scoreboard_at_requested_program_position(position, offset):
+@pytest.mark.parametrize("horizontal", [False, True])
+@pytest.mark.parametrize("vertical", [False, True])
+def should_render_scoreboard_at_requested_program_position(position, offset, horizontal, vertical):
     frame = torch.zeros((1, 10, 20, 3), dtype=torch.uint8)
-    board = torch.full((1, 2, 4, 3), 137, dtype=torch.float32)
+    board = torch.arange(24, dtype=torch.float32).reshape(1, 2, 4, 3)
     rendered = HmRenderScoreboard(["img"])(
-        {"img": frame, "scoreboard_img": board, "scoreboard_preferences": {"position": position}}
+        {
+            "img": frame,
+            "scoreboard_img": board,
+            "scoreboard_preferences": {
+                "position": position,
+                "flip_horizontal": horizontal,
+                "flip_vertical": vertical,
+            },
+        }
     )["img"]
-    assert torch.all(rendered[:, :2, offset : offset + 4] == 137)
-    assert int(rendered.sum()) == 137 * 2 * 4 * 3
+    expected = torch.zeros_like(frame)
+    for y in range(2):
+        for x in range(4):
+            expected[:, y, offset + x] = board[
+                :, 1 - y if vertical else y, 3 - x if horizontal else x
+            ]
+    assert torch.equal(rendered, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Scoreboard warp requires CUDA")
@@ -110,25 +125,36 @@ def should_reject_invalid_scoreboard_filter_and_render_actual_font_glyphs():
     assert "\n" not in glyphs
 
 
-def should_translate_all_saved_scoreboard_corners_without_mutating_config(monkeypatch):
+@pytest.mark.parametrize("in_frame", [True, False])
+def should_translate_all_saved_scoreboard_corners_without_mutating_config(monkeypatch, in_frame):
     from hmlib.transforms import scoreboard_transforms as module
 
     points = [[20, 30], [40, 30], [40, 50], [20, 50]]
     monkeypatch.setattr(module, "get_clip_box", lambda **kwargs: [10, 20, 100, 100])
     configure = module.HmConfigureScoreboard(game_id="fixture", allow_interactive_setup=False)
-    result = configure(
-        {
-            "game_config": {
-                "rink": {
-                    "scoreboard": {
-                        "perspective_polygon": points,
-                        "projected_width": 20,
-                        "projected_height": 20,
-                    }
-                }
+    config = {
+        "rink": {
+            "scoreboard": {
+                "perspective_polygon": points,
+                "projected_width": 20,
+                "projected_height": 20,
+                "flip_horizontal": True,
+                "flip_vertical": False,
             }
         }
-    )
+    }
+    reads = []
+
+    def read_config(game_id):
+        reads.append(game_id)
+        return config
+
+    monkeypatch.setattr(module, "get_config", read_config)
+    for _ in range(2):
+        result = configure({"game_config": config} if in_frame else {})
+        assert result["scoreboard_preferences"]["flip_horizontal"] is True
+        assert result["scoreboard_preferences"]["flip_vertical"] is False
+    assert reads == ([] if in_frame else ["fixture"])
     assert result["scoreboard_cfg"]["scoreboard_points"] == [[10, 10], [30, 10], [30, 30], [10, 30]]
     assert points == [[20, 30], [40, 30], [40, 50], [20, 50]]
 

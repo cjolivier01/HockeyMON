@@ -153,6 +153,8 @@ RUN_FIELDS = [
         choices=["upper-left", "upper-center", "upper-right"],
     ),
     _field("rink.scoreboard.enabled", "Show scoreboard", "bool", True),
+    _field("rink.scoreboard.flip_horizontal", "Flip scoreboard horizontally", "bool"),
+    _field("rink.scoreboard.flip_vertical", "Flip scoreboard vertically", "bool"),
     _field("rink.scoreboard.scoreboard_scale", "Scoreboard scale", "number", 1, min=0.1, max=4),
     _field(
         "rink.scoreboard.resize_filter",

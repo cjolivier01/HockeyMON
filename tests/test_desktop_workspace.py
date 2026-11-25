@@ -30,6 +30,8 @@ def should_persist_operator_settings_and_translate_them_for_python_launch(deskto
         "hm_ui.run.precision": "trt-fp32",
         "hm_ui.run.analytics": "pose-jersey",
         "hm_ui.run.save_video": False,
+        "rink.scoreboard.flip_horizontal": True,
+        "rink.scoreboard.flip_vertical": False,
         "video_out.output_width": "1920",
         "video_out.bit_rate": "8M",
         "team.backend": "lab",
@@ -37,6 +39,8 @@ def should_persist_operator_settings_and_translate_them_for_python_launch(deskto
     }
     editor.update_settings(changes, expected_revision=snapshot["revision"])
     private = yaml.safe_load((desktop.game() / "config.yaml").read_text())
+    assert private["rink"]["scoreboard"]["flip_horizontal"] is True
+    assert editor.snapshot()["settings"]["rink.scoreboard.flip_vertical"] is False
     assert private["video_out"]["output_width"] == 1920
     assert "stitching" not in private
     arguments = launch_arguments(desktop.game(), "track")

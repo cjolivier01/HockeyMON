@@ -69,6 +69,7 @@ class HmConfigureScoreboard:
             self._allow_interactive_setup = bool(allow_interactive_setup)
         self._scoreboard_config = None
         self._configured = False
+        self._saved_game_config = None
         self._polygon_revision = None
         self._shared_canvas_saved = False
 
@@ -86,6 +87,10 @@ class HmConfigureScoreboard:
             publish_source_canvas(self._game_id, results["game_config"], results["img"])
             self._shared_canvas_saved = True
         runtime_config = results.get("game_config")
+        if runtime_config is None and self._game_id:
+            if self._saved_game_config is None:
+                self._saved_game_config = get_config(game_id=self._game_id)
+            runtime_config = self._saved_game_config
         if runtime_config is not None:
             preferences = get_nested_value(runtime_config, "rink.scoreboard", {}) or {}
             results["scoreboard_preferences"] = preferences
@@ -99,9 +104,7 @@ class HmConfigureScoreboard:
                 return results
         if self._game_id and not self._configured:
             self._configured = True
-            game_config = (
-                runtime_config if runtime_config is not None else get_config(game_id=self._game_id)
-            )
+            game_config = runtime_config
             current_scoreboard = get_nested_value(
                 game_config, "rink.scoreboard.perspective_polygon"
             )
@@ -242,6 +245,11 @@ class HmRenderScoreboard:
         self._scoreboard_height = int(scoreboard_img.shape[1])
         self._scoreboard_width = int(scoreboard_img.shape[2])
         preferences = results.get("scoreboard_preferences", {})
+        flip_dims = [
+            axis
+            for key, axis in (("flip_horizontal", 2), ("flip_vertical", 1))
+            if preferences.get(key)
+        ]
         position = preferences.get("position", "upper-left")
         if position not in {"upper-left", "upper-center", "upper-right"}:
             raise ValueError(f"Unknown scoreboard position: {position}")
@@ -278,6 +286,6 @@ class HmRenderScoreboard:
                     if position == "upper-left"
                     else (img.shape[2] - sw) // (2 if position == "upper-center" else 1)
                 )
-                img[:, :sh, x : x + sw, :] = board
+                img[:, :sh, x : x + sw, :] = board.flip(flip_dims) if flip_dims else board
                 results[img_label] = img
         return results
