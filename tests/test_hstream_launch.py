@@ -64,6 +64,36 @@ def should_use_shared_scoreboard_baseline_for_absent_flags_and_game_or_play_rese
         ]
     ) == (False, True)
 
+    from hmlib.cli.hmtrack import make_parser, split_config_paths
+
+    # The worker replays the original --config after the generated launch file.
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text("rink: {scoreboard: {flip_horizontal: null, flip_vertical: false}}")
+    initial = tmp_path / "initial.json"
+    initial.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "module": "hmlib.cli.hmtrack",
+                "game_id": game.name,
+                "cwd": str(tmp_path),
+                "arguments": ["--config", str(overlay)],
+            }
+        )
+    )
+    plan = make_plan(parser().parse_args(args), initial=initial)
+    command = plan.write(tmp_path)
+    worker = make_parser().parse_args(command[command.index("hmlib.cli.hmtrack") + 1 :])
+    worker_config = configuration.get_config(root_dir=worker.root_dir, game_id=game.name)
+    files = split_config_paths(worker.config)
+    assert files.index(str(tmp_path / "launch.yaml")) < files.index(str(overlay))
+    for path in files:
+        configuration.recursive_update(worker_config, configuration.load_yaml_files_ordered([path]))
+    assert worker_config["rink"]["scoreboard"]["flip_horizontal"] is None
+    configuration.resolve_scoreboard_flip_resets(worker_config, worker.root_dir)
+    assert worker_config["rink"]["scoreboard"]["flip_horizontal"] is True
+    assert worker_config["rink"]["scoreboard"]["flip_vertical"] is False
+
 
 def should_preserve_yaml_commas_and_grouped_native_options():
     assert option_assignments('camera.x=[1,2],camera.y="one,two",camera.z={a: 1, b: 2}') == [

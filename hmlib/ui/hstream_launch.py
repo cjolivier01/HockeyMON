@@ -346,7 +346,7 @@ def _initial_output_routes(settings: dict, sinks: set[str]) -> None:
 def make_plan(
     args: argparse.Namespace, *, initial: Path | None = None, validate_models: bool = True
 ) -> LaunchPlan:
-    from hmlib.config import get_config, resolve_scoreboard_flip_resets
+    from hmlib.config import SCOREBOARD_FLIP_KEYS, get_config, resolve_scoreboard_flip_resets
     from hmlib.ui.analytics_graph import graph_paths, selected_analysis
     from hmlib.ui.runtime_setup import (
         apply_engine_preferences,
@@ -711,6 +711,12 @@ def make_plan(
     if set(sources) == {"left", "right"}:
         arguments.append("--aspen-stitching")
     arguments = prefer_explicit_launch_arguments(arguments, explicit, "track")
+    if scoreboard_defaults is not None:
+        config["hm_shared_ui"]["scoreboard_flip_defaults"] = {
+            key: scoreboard_defaults[key] for key in SCOREBOARD_FLIP_KEYS
+        }
+    else:
+        config["hm_shared_ui"].pop("scoreboard_flip_defaults", None)
     resolve_scoreboard_flip_resets(config, root_dir, scoreboard_defaults)
     return LaunchPlan(
         game,

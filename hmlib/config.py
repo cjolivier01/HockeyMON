@@ -241,6 +241,10 @@ def resolve_scoreboard_flip_resets(
     resets = [key for key in SCOREBOARD_FLIP_KEYS if key in settings and settings[key] is None]
     if resets:
         if defaults is None:
+            # A shared worker can replay original Python overlays after launch.yaml.
+            # Their nulls still refer to the baseline selected by the Program pane.
+            defaults = get_nested_value(config, "hm_shared_ui.scoreboard_flip_defaults")
+        if defaults is None:
             defaults = baseline_config(root_dir)["rink"]["scoreboard"]
         for key in resets:
             settings[key] = _scoreboard_bool(key, defaults[key])
