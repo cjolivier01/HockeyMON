@@ -6,7 +6,7 @@ from typing import Any
 import torch
 from mmengine.registry import TRANSFORMS
 
-from hmlib.config import get_clip_box, get_config, get_nested_value
+from hmlib.config import get_clip_box, get_config, get_nested_value, scoreboard_flip
 from hmlib.scoreboard.scoreboard import Scoreboard
 from hmlib.scoreboard.selector import configure_scoreboard
 from hmlib.utils.image import image_height, image_width, make_channels_last
@@ -248,7 +248,7 @@ class HmRenderScoreboard:
         flip_dims = [
             axis
             for key, axis in (("flip_horizontal", 2), ("flip_vertical", 1))
-            if preferences.get(key)
+            if scoreboard_flip(key, preferences.get(key))
         ]
         position = preferences.get("position", "upper-left")
         if position not in {"upper-left", "upper-center", "upper-right"}:

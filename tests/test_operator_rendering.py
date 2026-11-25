@@ -89,6 +89,34 @@ def should_render_scoreboard_at_requested_program_position(position, offset, hor
     assert torch.equal(rendered, expected)
 
 
+def should_parse_scoreboard_flip_scalars_and_restore_the_configured_baseline(tmp_path, monkeypatch):
+    (tmp_path / "baseline.yaml").write_text(
+        "rink: {scoreboard: {flip_horizontal: true, flip_vertical: false}}"
+    )
+    monkeypatch.setenv("HM_CONFIG_ROOT", str(tmp_path))
+    board = torch.arange(24, dtype=torch.uint8).reshape(1, 2, 4, 3)
+    render = HmRenderScoreboard(["img"])
+
+    def draw(horizontal, vertical):
+        return render(
+            {
+                "img": torch.zeros_like(board),
+                "scoreboard_img": board,
+                "scoreboard_preferences": {
+                    "flip_horizontal": horizontal,
+                    "flip_vertical": vertical,
+                },
+            }
+        )["img"]
+
+    assert torch.equal(draw("false", "OFF"), board)
+    assert torch.equal(draw("No", "Yes"), board.flip([1]))
+    assert torch.equal(draw(None, None), board.flip([2]))
+    for invalid in ("bad", "fAlSe", "0", 0, 2, [False]):
+        with pytest.raises(ValueError, match="flip_vertical requires a boolean"):
+            draw(False, invalid)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Scoreboard warp requires CUDA")
 def should_resize_scoreboard_live_without_losing_source_dimensions():
     capture = HmCaptureScoreboard()

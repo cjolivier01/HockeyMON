@@ -204,6 +204,26 @@ def baseline_config(root_dir: str) -> Dict[str, Any]:
     return load_config_file(root_dir=root_dir, config_type=".", config_name="baseline")
 
 
+@lru_cache(maxsize=4)
+def _scoreboard_baseline(config_dir: str) -> dict:
+    return load_config_file_yaml(os.path.join(config_dir, "baseline.yaml"))["rink"]["scoreboard"]
+
+
+def scoreboard_flip(key: str, value: Any) -> bool:
+    """Read a scoreboard axis with the same boolean and reset semantics as yaml-cpp."""
+    if value is None:
+        config_dir = os.environ.get("HM_CONFIG_ROOT") or os.path.join(ROOT_DIR, "config")
+        value = _scoreboard_baseline(config_dir)[key]
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and (value.islower() or value.isupper() or value.istitle()):
+        if value.lower() in {"y", "yes", "true", "on"}:
+            return True
+        if value.lower() in {"n", "no", "false", "off"}:
+            return False
+    raise ValueError(f"rink.scoreboard.{key} requires a boolean, got {value!r}")
+
+
 def get_game_config_private(
     game_id: str,
     merge_into_config: Optional[Dict[str, Any]] = None,

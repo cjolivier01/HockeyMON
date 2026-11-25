@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hmlib.config import scoreboard_flip
 from hmlib.ui.analytics_graph import apply_analytics_preferences, graph_paths, selected_analysis
 from hmlib.ui.calibration_workspace import CalibrationWorkspace, _get
 
@@ -329,6 +330,8 @@ class OperatorWorkspace(CalibrationWorkspace):
             value = _get(config, spec["key"], spec["default"])
             if value is None:
                 value = spec["default"]
+            if spec["key"] in ("rink.scoreboard.flip_horizontal", "rink.scoreboard.flip_vertical"):
+                value = scoreboard_flip(spec["key"].rsplit(".", 1)[1], value)
             if spec["kind"] == "text":
                 value = "" if value is None else str(value)
             values[spec["key"]] = value
