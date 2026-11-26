@@ -1116,6 +1116,22 @@ def should_accept_shared_program_box_selection(game, enabled):
     assert plan.config["plot"]["plot_individual_player_tracking"] is yaml.safe_load(enabled)
 
 
+@pytest.mark.parametrize("saved_enabled", [True, False])
+@pytest.mark.parametrize("enabled", [True, False])
+def should_validate_scoreboard_camera_after_overrides(game, saved_enabled, enabled):
+    private = yaml.safe_load((game / "config.yaml").read_text())
+    private["rink"] = {"scoreboard": {"camera": {"enabled": saved_enabled}}}
+    (game / "config.yaml").write_text(yaml.safe_dump(private))
+    args = parser().parse_args(
+        ["-g", game.name, f"--options=rink.scoreboard.camera.enabled={str(enabled).lower()}"]
+    )
+    if enabled:
+        with pytest.raises(ValueError, match="scoreboard camera requires the native"):
+            make_plan(args)
+    else:
+        assert make_plan(args).config["rink"]["scoreboard"]["camera"]["enabled"] is False
+
+
 def should_reject_native_only_encoded_rink_maps(game):
     private = yaml.safe_load((game / "config.yaml").read_text())
     private["output"] = {"rink-map": {"enable": True}}
