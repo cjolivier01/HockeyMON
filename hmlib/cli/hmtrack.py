@@ -1578,6 +1578,9 @@ class _StitchRotationController:
 
 
 def _main(args, num_gpu):
+    from hmlib.runtime_controls import validate_python_program_sources
+
+    validate_python_program_sources(args.game_config)
     from mmcv.transforms import Compose
 
     import hmlib.hm_transforms

@@ -11,6 +11,14 @@ from hmlib.config import recursive_update
 from hmlib.runtime_controls import apply_motion_overrides, normalize_control_layer
 
 
+@pytest.mark.parametrize("enabled", [False, "false", 0])
+def should_allow_disabled_independent_camera_in_python_processing(enabled):
+    from hmlib.runtime_controls import validate_python_program_sources
+
+    validate_python_program_sources({"rink": {"scoreboard": {"camera": {"enabled": enabled}}}})
+    validate_python_program_sources({})
+
+
 def should_apply_baseline_motion_without_a_ui_or_sidecar():
     baseline = yaml.safe_load(
         (Path(__file__).parents[1] / "hmlib/config/baseline.yaml").read_text()

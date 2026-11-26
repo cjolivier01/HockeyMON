@@ -12,6 +12,14 @@ if _HAS_TORCH:
     import hmlib.cli.hmtrack as hmtrack_cli
 
 
+def should_reject_independent_scoreboard_before_loading_processing_modules():
+    args = types.SimpleNamespace(
+        game_config={"rink": {"scoreboard": {"camera": {"enabled": True}}}}
+    )
+    with pytest.raises(ValueError, match="scoreboard camera requires the native"):
+        hmtrack_cli._main(args, 0)
+
+
 def _make_cfg():
     return {
         "stitching": {

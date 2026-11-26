@@ -598,11 +598,9 @@ def make_plan(
             "Encoded rink mini-maps require the native HStream backend; "
             "disable output.rink-map.enable for HockeyMON Program runs"
         )
-    if get_path(config, "rink.scoreboard.camera.enabled"):
-        raise ValueError(
-            "An independent scoreboard camera requires the native HStream backend; "
-            "disable rink.scoreboard.camera.enabled for HockeyMON Program runs"
-        )
+    from hmlib.runtime_controls import validate_python_program_sources
+
+    validate_python_program_sources(config)
     apply_engine_preferences(config)
     prepared = []
     if (

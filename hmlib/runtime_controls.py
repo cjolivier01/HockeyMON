@@ -39,6 +39,16 @@ def _set(node, path, value):
     node[keys[-1]] = value
 
 
+def validate_python_program_sources(config):
+    """Reject native-only sources at processing admission, after all overrides."""
+    enabled = _get(config, "rink.scoreboard.camera.enabled")
+    if enabled is not _MISSING and _boolean(enabled):
+        raise ValueError(
+            "An independent scoreboard camera requires the native HStream backend; "
+            "disable rink.scoreboard.camera.enabled for HockeyMON Program runs"
+        )
+
+
 def _remove(node, path):
     key, dot, rest = path.partition(".")
     if not dot:
