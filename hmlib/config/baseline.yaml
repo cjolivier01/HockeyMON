@@ -905,6 +905,27 @@ rink:
     capacity: null
     price: null
   scoreboard:
+    # Optional independent scoreboard source. It never enters the stitcher.
+    camera:
+      enabled: false
+      files: []
+      uri: null
+      # Required for RTSP; recorded chapters are inspected without decoding.
+      codec: null
+      source_dimensions: null
+      polygon: null
+      # Positive skips into the scoreboard recording; negative delays its appearance.
+      start_offset: "00:00:00.0000"
+      queue_frames: 3
+      extra_decode_surfaces: 2
+      operation_timeout_ms: 10000
+      cancellation_poll_ms: 10
+      live_latency_ms: 200
+      # Enable only for cameras with synchronized sender NTP timestamps.
+      live_ntp_sync: false
+      preview_time: "00:00:00.0000"
+      preview_max_dimension: 2048
+      preview_max_source_pixels: 67108864
     # 4-sided polygon that maps out the scoreboard in the perspective view
     # Should be tlbr form, with values: [x, y]
     perspective_polygon: null
